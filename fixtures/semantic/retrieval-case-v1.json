@@ -1,0 +1,20 @@
+{
+  "schema_version": "retrieval-case-v1",
+  "catalog_version": "catalog-v1",
+  "split": "development",
+  "note": "Development-only queries; no holdout conclusion is made here.",
+  "cases": [
+    {"query": "营业额", "relevant_source_ids": ["semantic-metric-gross"], "family_id": "metric-gross", "split": "development", "catalog_version": "catalog-v1"},
+    {"query": "销售额", "relevant_source_ids": ["semantic-metric-gross", "semantic-metric-net"], "family_id": "metric-sales-ambiguous", "split": "development", "catalog_version": "catalog-v1"},
+    {"query": "净额", "relevant_source_ids": ["semantic-metric-net"], "family_id": "metric-net", "split": "development", "catalog_version": "catalog-v1"},
+    {"query": "退款金额", "relevant_source_ids": ["semantic-metric-refund"], "family_id": "metric-refund", "split": "development", "catalog_version": "catalog-v1"},
+    {"query": "已支付订单数", "relevant_source_ids": ["semantic-metric-paid-count"], "family_id": "metric-paid-count", "split": "development", "catalog_version": "catalog-v1"},
+    {"query": "订单数量", "relevant_source_ids": ["semantic-metric-paid-count"], "family_id": "metric-paid-count-synonym", "split": "development", "catalog_version": "catalog-v1"},
+    {"query": "订单状态", "relevant_source_ids": ["semantic-schema-orders"], "family_id": "orders-status", "split": "development", "catalog_version": "catalog-v1"},
+    {"query": "订单金额分", "relevant_source_ids": ["semantic-schema-orders"], "family_id": "orders-amount-unit", "split": "development", "catalog_version": "catalog-v1"},
+    {"query": "客户租户", "relevant_source_ids": ["semantic-schema-customers"], "family_id": "customers-tenant", "split": "development", "catalog_version": "catalog-v1"},
+    {"query": "退款订单关联", "relevant_source_ids": ["semantic-schema-refunds"], "family_id": "refund-order-join", "split": "development", "catalog_version": "catalog-v1"},
+    {"query": "UTC时间窗口", "relevant_source_ids": ["semantic-time-window"], "family_id": "time-window", "split": "development", "catalog_version": "catalog-v1"},
+    {"query": "没有这个业务词", "relevant_source_ids": [], "family_id": "empty-hit", "split": "development", "catalog_version": "catalog-v1"}
+  ]
+}

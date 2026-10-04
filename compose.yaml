@@ -1,0 +1,93 @@
+# QueryShield: PostgreSQL + one-shot database setup + the service (B4b).
+#
+#   python scripts/new_env.py      # once: writes .env with random credentials (never printed)
+#   docker compose up -d --build   # builds the image, creates the demo database, starts the service
+#   docker compose down -v         # back to an empty environment (deletes both volumes)
+#
+# The default model is the deterministic Fake model: no key is needed. To use a real model,
+# set QUERYSHIELD_PROVIDER_MODE=real and the model/embedding variables in the SHELL that runs
+# docker compose (docs/operations.md). Credentials come only from .env or the shell; none is
+# written in this file, and a missing required variable stops Compose with its name.
+
+name: queryshield
+
+x-app-build: &app-build
+  context: .
+
+services:
+  db:
+    image: postgres:16.15-bookworm@sha256:efedf3595f1d6f415c08568ba171029bf54052e754cc9f030e3f2412b21f3d67
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set - run python scripts/new_env.py first}
+    volumes:
+      - qs_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    # No "ports": the database is reachable from the other services only, never from the host.
+
+  setup:
+    build: *app-build
+    image: queryshield-app:local
+    command: ["python", "scripts/setup_databases.py", "--demo"]
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      disable: true
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      QUERYSHIELD_SUPERUSER_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set - run python scripts/new_env.py first}@db:5432/postgres
+      QUERYSHIELD_ADMIN_PASSWORD: ${QUERYSHIELD_ADMIN_PASSWORD:?QUERYSHIELD_ADMIN_PASSWORD is not set - run python scripts/new_env.py first}
+      QUERYSHIELD_RO_PASSWORD: ${QUERYSHIELD_RO_PASSWORD:?QUERYSHIELD_RO_PASSWORD is not set - run python scripts/new_env.py first}
+
+  app:
+    build: *app-build
+    image: queryshield-app:local
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    stop_grace_period: 30s
+    ports:
+      - "127.0.0.1:${QUERYSHIELD_HTTP_PORT:-8000}:8000"
+    volumes:
+      - qs_state:/var/lib/queryshield
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      # The database name is written out: the demo pairing check (G6) reads it from the URL.
+      QUERYSHIELD_DATABASE_URL: postgresql://queryshield_ro:${QUERYSHIELD_RO_PASSWORD:?QUERYSHIELD_RO_PASSWORD is not set - run python scripts/new_env.py first}@db:5432/queryshield_demo
+      QUERYSHIELD_DEMO_DATASET: commerce-demo-v1
+      QUERYSHIELD_STATE_STORE_PATH: /var/lib/queryshield/state.sqlite3
+      QUERYSHIELD_CALL_STORE_PATH: /var/lib/queryshield/calls.sqlite3
+      QUERYSHIELD_PROVIDER_MODE: ${QUERYSHIELD_PROVIDER_MODE:-fake}
+      QUERYSHIELD_TOKEN_A_REQUESTER: ${QUERYSHIELD_TOKEN_A_REQUESTER:?QUERYSHIELD_TOKEN_A_REQUESTER is not set - run python scripts/new_env.py first}
+      QUERYSHIELD_TOKEN_A_APPROVER: ${QUERYSHIELD_TOKEN_A_APPROVER:?QUERYSHIELD_TOKEN_A_APPROVER is not set - run python scripts/new_env.py first}
+      QUERYSHIELD_TOKEN_B_REQUESTER: ${QUERYSHIELD_TOKEN_B_REQUESTER:?QUERYSHIELD_TOKEN_B_REQUESTER is not set - run python scripts/new_env.py first}
+      QUERYSHIELD_TOKEN_B_APPROVER: ${QUERYSHIELD_TOKEN_B_APPROVER:?QUERYSHIELD_TOKEN_B_APPROVER is not set - run python scripts/new_env.py first}
+      # Passed through from the shell only when set there; otherwise left unset (not empty).
+      QUERYSHIELD_MODEL_BASE_URL:
+      QUERYSHIELD_MODEL_API_KEY:
+      QUERYSHIELD_MODEL_NAME:
+      QUERYSHIELD_MODEL_MAX_TOKENS:
+      QUERYSHIELD_MODEL_TIMEOUT_SECONDS:
+      QUERYSHIELD_EMBEDDING_BASE_URL:
+      QUERYSHIELD_EMBEDDING_API_KEY:
+      QUERYSHIELD_EMBEDDING_MODEL_NAME:
+      QUERYSHIELD_EMBEDDING_MODEL_REVISION:
+      QUERYSHIELD_EMBEDDING_DIMENSIONS:
+      QUERYSHIELD_METADATA_TOOLS:
+
+volumes:
+  qs_pgdata:
+  qs_state:

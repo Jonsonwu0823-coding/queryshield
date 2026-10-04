@@ -1,0 +1,240 @@
+# QueryShield CI (B4b). Two jobs, no repository secrets.
+#
+#   checks   full tests, DB-SMOKE/W01-W05 (Fake) and the Fake smokes through scripts/check-all.ps1,
+#            the same entry the local machine uses, against a PostgreSQL started here with
+#            credentials generated at run time and masked in the log.
+#   compose  docker compose up from an empty environment, the demo walkthrough (Fake, then with
+#            the MCP metadata setting) and the stop/start checks (N8).
+#
+# The project directory is named once, in defaults.run.working-directory below. Everything else
+# is relative to it or lives under runner.temp. If the project moves in a different repository
+# layout, change that one line.
+
+name: QueryShield CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+    working-directory: .
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the full history and the tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14.3"
+
+      - name: Install the locked dependencies and the project
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.lock
+          .venv/bin/python -m pip install --no-deps -e .
+
+      - name: Start PostgreSQL with generated credentials
+        run: |
+          gen() { python -c "import secrets; print(secrets.token_urlsafe(24))"; }
+          superuser_password="$(gen)"
+          admin_password="$(gen)"
+          readonly_password="$(gen)"
+          for value in "$superuser_password" "$admin_password" "$readonly_password"; do
+            echo "::add-mask::$value"
+          done
+          {
+            echo "QUERYSHIELD_SUPERUSER_DATABASE_URL=postgresql://postgres:${superuser_password}@127.0.0.1:55432/postgres"
+            echo "QUERYSHIELD_ADMIN_PASSWORD=${admin_password}"
+            echo "QUERYSHIELD_RO_PASSWORD=${readonly_password}"
+          } >> "$GITHUB_ENV"
+          docker run -d --name qs-postgres \
+            -e POSTGRES_PASSWORD="$superuser_password" \
+            -p 127.0.0.1:55432:5432 \
+            postgres:16.15-bookworm@sha256:efedf3595f1d6f415c08568ba171029bf54052e754cc9f030e3f2412b21f3d67 > /dev/null
+          for attempt in $(seq 1 60); do
+            # Over TCP: the temporary server of the image's first start listens on the socket only.
+            if docker exec qs-postgres pg_isready -h 127.0.0.1 -U postgres -d postgres > /dev/null 2>&1; then
+              echo "PostgreSQL is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "PostgreSQL did not become ready" >&2
+          docker logs qs-postgres 2>&1 | tail -20
+          exit 1
+
+      - name: Create the test and demo databases (run twice, the script is idempotent)
+        run: |
+          .venv/bin/python scripts/setup_databases.py --test --demo
+          .venv/bin/python scripts/setup_databases.py --test --demo
+          .venv/bin/python - <<'PY' >> "$GITHUB_ENV"
+          import os
+          from scripts import setup_databases as setup
+
+          superuser = os.environ[setup.SUPERUSER_URL_ENV]
+          print("QUERYSHIELD_DATABASE_URL=" + setup.database_url(superuser, user=setup.READONLY_ROLE, password=os.environ[setup.RO_PASSWORD_ENV], database=setup.TEST_DATABASE))
+          print("QUERYSHIELD_BOOTSTRAP_DATABASE_URL=" + setup.database_url(superuser, user=setup.ADMIN_ROLE, password=os.environ[setup.ADMIN_PASSWORD_ENV], database=setup.TEST_DATABASE))
+          PY
+
+      - name: Run check-all.ps1 (the same entry as on the local machine)
+        run: pwsh -NoProfile -File scripts/check-all.ps1 -EvidenceDir "$RUNNER_TEMP/qs-evidence" -NonInteractive
+
+      - name: Upload summaries and check output (never raw records)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: checks-evidence
+          path: |
+            ${{ runner.temp }}/qs-evidence/**/*summary*.json
+            ${{ runner.temp }}/qs-evidence/**/*.txt
+            !${{ runner.temp }}/qs-evidence/**/*-raw.json
+          if-no-files-found: warn
+
+      - name: Stop PostgreSQL
+        if: always()
+        run: docker rm -f qs-postgres > /dev/null 2>&1 || true
+
+  compose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      COMPOSE_OVERRIDE: -f compose.yaml -f deploy/ci-tmp-volume.compose.yaml
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Create .env and mask its values
+        run: |
+          python3 scripts/new_env.py
+          while IFS='=' read -r name value; do
+            case "$name" in
+              ""|\#*) ;;
+              *) echo "::add-mask::$value" ;;
+            esac
+          done < .env
+
+      - name: Build the image and start the stack from an empty environment
+        run: |
+          docker compose up -d --build
+          docker compose ps -a
+
+      - name: Wait for the service, and check that setup exited 0
+        run: |
+          wait_healthy() {
+            for attempt in $(seq 1 60); do
+              status="$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q app)" 2>/dev/null || true)"
+              [ "$status" = "healthy" ] && return 0
+              sleep 2
+            done
+            echo "app did not become healthy (last status: ${status:-none})" >&2
+            return 1
+          }
+          wait_healthy
+          setup_exit="$(docker inspect -f '{{.State.ExitCode}}' "$(docker compose ps -a -q setup)")"
+          echo "setup exit code: $setup_exit"
+          [ "$setup_exit" = "0" ]
+
+      - name: Demo walkthrough and demo questions against the running service (Fake, local metadata tools)
+        run: |
+          mkdir -p "$RUNNER_TEMP/compose-evidence"
+          docker compose exec -T app python scripts/demo_walkthrough.py --mode fake --metadata-tools local --evidence-dir /tmp/evidence-local
+          docker compose exec -T app python scripts/demo_run.py --mode fake --base-url http://127.0.0.1:8000 --evidence-dir /tmp/evidence-demo-run
+          docker compose exec -T app cat /tmp/evidence-local/b4b-walkthrough-summary.json > "$RUNNER_TEMP/compose-evidence/walkthrough-local-summary.json"
+          docker compose exec -T app cat /tmp/evidence-demo-run/b3d-demo-summary.json > "$RUNNER_TEMP/compose-evidence/demo-run-summary.json"
+
+      - name: Running docker compose up again is idempotent
+        run: |
+          docker compose up -d
+          setup_exit="$(docker inspect -f '{{.State.ExitCode}}' "$(docker compose ps -a -q setup)")"
+          [ "$setup_exit" = "0" ]
+          for attempt in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q app)")" = "healthy" ] && exit 0
+            sleep 2
+          done
+          exit 1
+
+      - name: Stop and start with the normal configuration (tmpfs /tmp) shuts down cleanly
+        run: |
+          docker compose stop app
+          container="$(docker compose ps -a -q app)"
+          exit_code="$(docker inspect -f '{{.State.ExitCode}}' "$container")"
+          echo "app exit code after stop: $exit_code"
+          # 137 would mean the grace period ran out and the process was killed; uvicorn re-raises SIGTERM, so 143 is normal too.
+          [ "$exit_code" = "0" ] || [ "$exit_code" = "143" ]
+          docker compose logs --no-log-prefix app | grep -F "Application shutdown complete"
+          docker compose start app
+          for attempt in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q app)")" = "healthy" ] && exit 0
+            sleep 2
+          done
+          exit 1
+
+      - name: MCP metadata setting - recreate app with /tmp on a volume, demo walkthrough, then stop and start (N8)
+        run: |
+          # compose.yaml keeps /tmp on tmpfs, which is emptied when the container stops; here /tmp is a
+          # named volume so that a leftover index directory would survive and be seen after the restart.
+          wait_healthy() {
+            for attempt in $(seq 1 60); do
+              [ "$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose ps -q app)" 2>/dev/null || true)" = "healthy" ] && return 0
+              sleep 2
+            done
+            echo "app did not become healthy" >&2
+            return 1
+          }
+          export QUERYSHIELD_METADATA_TOOLS=mcp
+          docker compose $COMPOSE_OVERRIDE up -d --no-deps app
+          wait_healthy
+          docker compose $COMPOSE_OVERRIDE exec -T app python scripts/demo_walkthrough.py --mode fake --metadata-tools mcp --evidence-dir /tmp/evidence-mcp
+          docker compose $COMPOSE_OVERRIDE exec -T app cat /tmp/evidence-mcp/b4b-walkthrough-summary.json > "$RUNNER_TEMP/compose-evidence/walkthrough-mcp-summary.json"
+          # 1. the MCP run created the index directory
+          docker compose $COMPOSE_OVERRIDE exec -T app sh -c 'ls -d /tmp/queryshield-mcp-index-*'
+          # 2. a normal stop: exit code 0 or 143 (not 137) and the shutdown record in the log
+          docker compose $COMPOSE_OVERRIDE stop app
+          exit_code="$(docker inspect -f '{{.State.ExitCode}}' "$(docker compose $COMPOSE_OVERRIDE ps -a -q app)")"
+          echo "app exit code after stop: $exit_code"
+          [ "$exit_code" = "0" ] || [ "$exit_code" = "143" ]
+          docker compose $COMPOSE_OVERRIDE logs --no-log-prefix app | grep -F "Application shutdown complete"
+          # 3. after the start there is no index directory (the volume would still hold one)
+          docker compose $COMPOSE_OVERRIDE start app
+          wait_healthy
+          if docker compose $COMPOSE_OVERRIDE exec -T app sh -c 'ls -d /tmp/queryshield-mcp-index-* 2>/dev/null'; then
+            echo "an MCP index directory was left behind" >&2
+            exit 1
+          fi
+          echo "no MCP index directory after stop and start"
+
+      - name: Show the service log when a step failed
+        if: failure()
+        run: |
+          docker compose $COMPOSE_OVERRIDE ps -a || true
+          docker compose $COMPOSE_OVERRIDE logs --no-color --tail 200 || true
+
+      - name: Upload summaries
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compose-evidence
+          path: ${{ runner.temp }}/compose-evidence/*.json
+          if-no-files-found: warn
+
+      - name: Remove the stack and its volumes
+        if: always()
+        run: docker compose $COMPOSE_OVERRIDE down -v

@@ -1,0 +1,160 @@
+{
+  "registry_version": "knowledge-demo-v1-registry-2026-10-01",
+  "sources": [
+    {
+      "source_id": "demo-ambiguity-sales",
+      "path": "shared/ambiguity-sales.md",
+      "version": "2026-10-01",
+      "tenant_scope": "global",
+      "allowed_roles": [
+        "requester",
+        "approver"
+      ],
+      "status": "active",
+      "updated_at": "2026-10-01T00:00:00Z"
+    },
+    {
+      "source_id": "demo-data-dictionary",
+      "path": "shared/data-dictionary.md",
+      "version": "2026-10-01",
+      "tenant_scope": "global",
+      "allowed_roles": [
+        "requester",
+        "approver"
+      ],
+      "status": "active",
+      "updated_at": "2026-10-01T00:00:00Z"
+    },
+    {
+      "source_id": "demo-faq",
+      "path": "shared/faq.md",
+      "version": "2026-10-01",
+      "tenant_scope": "global",
+      "allowed_roles": [
+        "requester",
+        "approver"
+      ],
+      "status": "active",
+      "updated_at": "2026-10-01T00:00:00Z"
+    },
+    {
+      "source_id": "demo-metric-gross",
+      "path": "shared/metric-gross.md",
+      "version": "2026-10-01",
+      "tenant_scope": "global",
+      "allowed_roles": [
+        "requester",
+        "approver"
+      ],
+      "status": "active",
+      "updated_at": "2026-10-01T00:00:00Z"
+    },
+    {
+      "source_id": "demo-metric-net",
+      "path": "shared/metric-net.md",
+      "version": "2026-10-01",
+      "tenant_scope": "global",
+      "allowed_roles": [
+        "requester",
+        "approver"
+      ],
+      "status": "active",
+      "updated_at": "2026-10-01T00:00:00Z"
+    },
+    {
+      "source_id": "demo-metric-paid-count",
+      "path": "shared/metric-paid-count.md",
+      "version": "2026-10-01",
+      "tenant_scope": "global",
+      "allowed_roles": [
+        "requester",
+        "approver"
+      ],
+      "status": "active",
+      "updated_at": "2026-10-01T00:00:00Z"
+    },
+    {
+      "source_id": "demo-metric-refund",
+      "path": "shared/metric-refund.md",
+      "version": "2026-10-01",
+      "tenant_scope": "global",
+      "allowed_roles": [
+        "requester",
+        "approver"
+      ],
+      "status": "active",
+      "updated_at": "2026-10-01T00:00:00Z"
+    },
+    {
+      "source_id": "demo-refund-policy-v1",
+      "path": "shared/refund-policy-v1.md",
+      "version": "2026-08-01",
+      "tenant_scope": "global",
+      "allowed_roles": [
+        "requester",
+        "approver"
+      ],
+      "status": "deleted",
+      "updated_at": "2026-08-01T00:00:00Z"
+    },
+    {
+      "source_id": "demo-refund-policy-v2",
+      "path": "shared/refund-policy-v2.md",
+      "version": "2026-10-01",
+      "tenant_scope": "global",
+      "allowed_roles": [
+        "requester",
+        "approver"
+      ],
+      "status": "active",
+      "updated_at": "2026-10-01T00:00:00Z"
+    },
+    {
+      "source_id": "demo-sensitive-customer-name",
+      "path": "shared/sensitive-customer-name.md",
+      "version": "2026-10-01",
+      "tenant_scope": "global",
+      "allowed_roles": [
+        "approver"
+      ],
+      "status": "active",
+      "updated_at": "2026-10-01T00:00:00Z"
+    },
+    {
+      "source_id": "demo-tenant-a-overview",
+      "path": "tenant-a/overview.md",
+      "version": "2026-10-01",
+      "tenant_scope": "A",
+      "allowed_roles": [
+        "requester",
+        "approver"
+      ],
+      "status": "active",
+      "updated_at": "2026-10-01T00:00:00Z"
+    },
+    {
+      "source_id": "demo-tenant-b-overview",
+      "path": "tenant-b/overview.md",
+      "version": "2026-10-01",
+      "tenant_scope": "B",
+      "allowed_roles": [
+        "requester",
+        "approver"
+      ],
+      "status": "active",
+      "updated_at": "2026-10-01T00:00:00Z"
+    },
+    {
+      "source_id": "demo-time-window",
+      "path": "shared/time-window.md",
+      "version": "2026-10-01",
+      "tenant_scope": "global",
+      "allowed_roles": [
+        "requester",
+        "approver"
+      ],
+      "status": "active",
+      "updated_at": "2026-10-01T00:00:00Z"
+    }
+  ]
+}

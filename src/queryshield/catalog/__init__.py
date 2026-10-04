@@ -1,0 +1,41 @@
+"""Versioned, server-authored business semantics for QueryShield."""
+
+from queryshield.catalog.catalog import (
+    CATALOG_VERSION,
+    CATALOG_V2_VERSION,
+    CATALOG_V3_VERSION,
+    CATALOG_V4_VERSION,
+    DEFAULT_CATALOG_PATH,
+    DEFAULT_CATALOG_VERSION,
+    CatalogEntry,
+    CatalogOverlay,
+    CatalogValidationError,
+    ClarificationRule,
+    ClarificationValue,
+    SemanticCatalog,
+    load_catalog,
+    load_catalog_overlay,
+    load_default_catalog,
+    validate_catalog_document,
+    validate_catalog_overlay_document,
+)
+
+__all__ = [
+    "CATALOG_VERSION",
+    "CATALOG_V2_VERSION",
+    "CATALOG_V3_VERSION",
+    "CATALOG_V4_VERSION",
+    "DEFAULT_CATALOG_PATH",
+    "DEFAULT_CATALOG_VERSION",
+    "CatalogEntry",
+    "CatalogOverlay",
+    "CatalogValidationError",
+    "ClarificationRule",
+    "ClarificationValue",
+    "SemanticCatalog",
+    "load_catalog",
+    "load_catalog_overlay",
+    "load_default_catalog",
+    "validate_catalog_document",
+    "validate_catalog_overlay_document",
+]

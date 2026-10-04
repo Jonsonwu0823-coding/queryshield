@@ -1,0 +1,131 @@
+{
+  "registry_version": "knowledge-v1-registry-2026-09-21",
+  "sources": [
+    {
+      "source_id": "tenant-a-orders-overview",
+      "path": "tenant-a/orders-overview.md",
+      "version": "2026-09-21",
+      "tenant_scope": "A",
+      "allowed_roles": ["requester", "approver"],
+      "status": "active",
+      "updated_at": "2026-09-21T00:00:00Z"
+    },
+    {
+      "source_id": "tenant-b-orders-overview",
+      "path": "tenant-b/orders-overview.md",
+      "version": "2026-09-21",
+      "tenant_scope": "B",
+      "allowed_roles": ["requester", "approver"],
+      "status": "active",
+      "updated_at": "2026-09-21T00:00:00Z"
+    },
+    {
+      "source_id": "semantic-ambiguity-sales",
+      "path": "shared/ambiguity-sales.md",
+      "version": "2026-09-21",
+      "tenant_scope": "global",
+      "allowed_roles": ["requester", "approver"],
+      "status": "active",
+      "updated_at": "2026-09-21T00:00:00Z"
+    },
+    {
+      "source_id": "semantic-metric-gross",
+      "path": "shared/metric-gross.md",
+      "version": "2026-09-21",
+      "tenant_scope": "global",
+      "allowed_roles": ["requester", "approver"],
+      "status": "active",
+      "updated_at": "2026-09-21T00:00:00Z"
+    },
+    {
+      "source_id": "semantic-metric-net",
+      "path": "shared/metric-net.md",
+      "version": "2026-09-21",
+      "tenant_scope": "global",
+      "allowed_roles": ["requester", "approver"],
+      "status": "active",
+      "updated_at": "2026-09-21T00:00:00Z"
+    },
+    {
+      "source_id": "semantic-metric-paid-count",
+      "path": "shared/metric-paid-count.md",
+      "version": "2026-09-21",
+      "tenant_scope": "global",
+      "allowed_roles": ["requester", "approver"],
+      "status": "active",
+      "updated_at": "2026-09-21T00:00:00Z"
+    },
+    {
+      "source_id": "semantic-metric-refund",
+      "path": "shared/metric-refund.md",
+      "version": "2026-09-21",
+      "tenant_scope": "global",
+      "allowed_roles": ["requester", "approver"],
+      "status": "active",
+      "updated_at": "2026-09-21T00:00:00Z"
+    },
+    {
+      "source_id": "semantic-refund-policy-v1",
+      "path": "shared/refund-policy-v1.md",
+      "version": "2026-09-01",
+      "tenant_scope": "global",
+      "allowed_roles": ["requester", "approver"],
+      "status": "deleted",
+      "updated_at": "2026-09-20T00:00:00Z"
+    },
+    {
+      "source_id": "semantic-refund-policy-v2",
+      "path": "shared/refund-policy-v2.md",
+      "version": "2026-09-20",
+      "tenant_scope": "global",
+      "allowed_roles": ["requester", "approver"],
+      "status": "active",
+      "updated_at": "2026-09-20T00:00:00Z"
+    },
+    {
+      "source_id": "semantic-schema-customers",
+      "path": "shared/schema-customers.md",
+      "version": "2026-09-21",
+      "tenant_scope": "global",
+      "allowed_roles": ["requester", "approver"],
+      "status": "active",
+      "updated_at": "2026-09-21T00:00:00Z"
+    },
+    {
+      "source_id": "semantic-schema-orders",
+      "path": "shared/schema-orders.md",
+      "version": "2026-09-21",
+      "tenant_scope": "global",
+      "allowed_roles": ["requester", "approver"],
+      "status": "active",
+      "updated_at": "2026-09-21T00:00:00Z"
+    },
+    {
+      "source_id": "semantic-schema-refunds",
+      "path": "shared/schema-refunds.md",
+      "version": "2026-09-21",
+      "tenant_scope": "global",
+      "allowed_roles": ["requester", "approver"],
+      "status": "active",
+      "updated_at": "2026-09-21T00:00:00Z"
+    },
+    {
+      "source_id": "semantic-sensitive-customer-name",
+      "path": "shared/sensitive-customer-name.md",
+      "version": "2026-09-21",
+      "tenant_scope": "global",
+      "allowed_roles": ["approver"],
+      "status": "active",
+      "updated_at": "2026-09-21T00:00:00Z"
+    },
+    {
+      "source_id": "semantic-time-window",
+      "path": "shared/time-window.md",
+      "version": "2026-09-21",
+      "tenant_scope": "global",
+      "allowed_roles": ["requester", "approver"],
+      "status": "active",
+      "updated_at": "2026-09-21T00:00:00Z"
+    }
+  ]
+}

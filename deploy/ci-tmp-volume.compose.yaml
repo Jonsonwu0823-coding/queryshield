@@ -1,0 +1,17 @@
+# CI only (B4b, N8): not part of the normal setup.
+#
+# compose.yaml keeps /tmp on tmpfs. A tmpfs is emptied whenever the container stops, so
+# "after stop and start there is no MCP index directory" would hold even if the service
+# never cleaned it up. This override puts /tmp on a named volume instead, which survives a
+# stop and start, so a leftover queryshield-mcp-index-* directory stays visible.
+#
+#   docker compose -f compose.yaml -f deploy/ci-tmp-volume.compose.yaml up -d --no-deps app
+services:
+  app:
+    tmpfs: !reset []
+    volumes:
+      - qs_state:/var/lib/queryshield
+      - qs_tmp:/tmp
+
+volumes:
+  qs_tmp:

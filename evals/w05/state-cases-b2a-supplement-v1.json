@@ -1,0 +1,250 @@
+{
+  "schema_version": "w05-state-evaluation-supplement-v1",
+  "contract_version": "2026-09-06.practice-v3",
+  "extension_version": "2026-09-09.facts-state-v1",
+  "fixture_version": "commerce-v1",
+  "supplement_of": "state-cases-v4.json",
+  "cases": [
+    {
+      "case": {
+        "schema_version": "state-case-v1",
+        "case_id": "rephrased-dual-metric-count-and-gross",
+        "family_id": "b2a-rephrased-dual-metric",
+        "split": "development",
+        "system": "QS",
+        "layer": "agent",
+        "contract_version": "2026-09-06.practice-v3",
+        "extension_version": "2026-09-09.facts-state-v1",
+        "fixture_version": "commerce-v1",
+        "initial": {
+          "principal_fixture": "tenant-A/requester-A",
+          "clock_utc": "2026-09-21T00:00:00Z",
+          "messages": [
+            {
+              "role": "user",
+              "content": "2026年9月一共成交了多少笔已支付订单，支付总额是多少？"
+            }
+          ],
+          "run_state": {
+            "status": "NEW",
+            "tenant_id": "A",
+            "principal_id": "principal-A"
+          },
+          "result_fixtures": [],
+          "approval_fixtures": []
+        },
+        "action": {
+          "entrypoint": "/queries",
+          "parameters": {
+            "question": "2026年9月一共成交了多少笔已支付订单，支付总额是多少？",
+            "time_window": {
+              "start": "2026-09-01T00:00:00Z",
+              "end": "2026-10-01T00:00:00Z",
+              "timezone": "UTC"
+            }
+          },
+          "actor": "requester-A"
+        },
+        "expected": {
+          "http_status": 200,
+          "terminal_state": "SUCCEEDED",
+          "facts": [
+            {
+              "metric_id": "paid_count",
+              "value": 2,
+              "unit": "count",
+              "time_window": {
+                "start": "2026-09-01T00:00:00Z",
+                "end": "2026-10-01T00:00:00Z",
+                "timezone": "UTC"
+              },
+              "tenant_id": "A",
+              "principal_id": "principal-A",
+              "window_label": "2026-09-01/2026-10-01"
+            },
+            {
+              "metric_id": "gross_fen",
+              "value": 15000,
+              "unit": "CNY_fen",
+              "time_window": {
+                "start": "2026-09-01T00:00:00Z",
+                "end": "2026-10-01T00:00:00Z",
+                "timezone": "UTC"
+              },
+              "tenant_id": "A",
+              "principal_id": "principal-A",
+              "window_label": "2026-09-01/2026-10-01"
+            }
+          ],
+          "allowed_side_effects": {
+            "readonly_queries": 1,
+            "fact_count": 2,
+            "write_statements": 0
+          },
+          "forbidden_side_effects": {
+            "cross_tenant_rows": 0,
+            "unauthorized_facts": 0,
+            "write_statements": 0
+          },
+          "usage": {
+            "prompt_tokens": null,
+            "completion_tokens": null,
+            "total_tokens": null,
+            "unknown_values_are_null": true
+          },
+          "invariants": {
+            "expected_rows": 2,
+            "integer_fen": 15000
+          }
+        }
+      },
+      "classification": "functional",
+      "critical_question_id": null
+    },
+    {
+      "case": {
+        "schema_version": "state-case-v1",
+        "case_id": "queries-net-after-refund",
+        "family_id": "b2a-queries-net-fen",
+        "split": "development",
+        "system": "QS",
+        "layer": "agent",
+        "contract_version": "2026-09-06.practice-v3",
+        "extension_version": "2026-09-09.facts-state-v1",
+        "fixture_version": "commerce-v1",
+        "initial": {
+          "principal_fixture": "tenant-A/requester-A",
+          "clock_utc": "2026-09-21T00:00:00Z",
+          "messages": [
+            {
+              "role": "user",
+              "content": "2026年9月已支付订单扣除这些订单在9月内的退款后，净额是多少？"
+            }
+          ],
+          "run_state": {
+            "status": "NEW",
+            "tenant_id": "A",
+            "principal_id": "principal-A"
+          },
+          "result_fixtures": [],
+          "approval_fixtures": []
+        },
+        "action": {
+          "entrypoint": "/queries",
+          "parameters": {
+            "question": "2026年9月已支付订单扣除这些订单在9月内的退款后，净额是多少？"
+          },
+          "actor": "requester-A"
+        },
+        "expected": {
+          "http_status": 200,
+          "terminal_state": "SUCCEEDED",
+          "facts": [
+            {
+              "metric_id": "net_fen",
+              "value": 12000,
+              "unit": "CNY_fen",
+              "time_window": {
+                "start": "2026-09-01T00:00:00Z",
+                "end": "2026-10-01T00:00:00Z",
+                "timezone": "UTC"
+              },
+              "tenant_id": "A",
+              "principal_id": "principal-A",
+              "window_label": "2026-09-01/2026-10-01"
+            }
+          ],
+          "allowed_side_effects": {
+            "readonly_queries": 2,
+            "fact_count": 1,
+            "write_statements": 0
+          },
+          "forbidden_side_effects": {
+            "cross_tenant_rows": 0,
+            "unauthorized_facts": 0,
+            "write_statements": 0
+          },
+          "usage": {
+            "prompt_tokens": null,
+            "completion_tokens": null,
+            "total_tokens": null,
+            "unknown_values_are_null": true
+          },
+          "invariants": {
+            "integer_fen": 12000,
+            "display_value": "120.00元",
+            "query_results_same_metric": true
+          }
+        }
+      },
+      "classification": "functional",
+      "critical_question_id": null
+    },
+    {
+      "case": {
+        "schema_version": "state-case-v1",
+        "case_id": "queries-ambiguous-sales-asks-user",
+        "family_id": "b2a-queries-ambiguous-sales",
+        "split": "development",
+        "system": "QS",
+        "layer": "agent",
+        "contract_version": "2026-09-06.practice-v3",
+        "extension_version": "2026-09-09.facts-state-v1",
+        "fixture_version": "commerce-v1",
+        "initial": {
+          "principal_fixture": "tenant-A/requester-A",
+          "clock_utc": "2026-09-21T00:00:00Z",
+          "messages": [
+            {
+              "role": "user",
+              "content": "2026年9月销售额是多少？"
+            }
+          ],
+          "run_state": {
+            "status": "NEW",
+            "tenant_id": "A",
+            "principal_id": "principal-A"
+          },
+          "result_fixtures": [],
+          "approval_fixtures": []
+        },
+        "action": {
+          "entrypoint": "/queries",
+          "parameters": {
+            "question": "2026年9月销售额是多少？",
+            "time_window": {
+              "start": "2026-09-01T00:00:00Z",
+              "end": "2026-10-01T00:00:00Z",
+              "timezone": "UTC"
+            }
+          },
+          "actor": "requester-A"
+        },
+        "expected": {
+          "http_status": 202,
+          "terminal_state": "WAITING_USER",
+          "facts": [],
+          "allowed_side_effects": {
+            "readonly_queries": 0,
+            "fact_count": 0,
+            "write_statements": 0
+          },
+          "forbidden_side_effects": {
+            "cross_tenant_rows": 0,
+            "unauthorized_facts": 0,
+            "write_statements": 0
+          },
+          "usage": {
+            "prompt_tokens": null,
+            "completion_tokens": null,
+            "total_tokens": null,
+            "unknown_values_are_null": true
+          },
+          "invariants": {}
+        }
+      },
+      "classification": "functional",
+      "critical_question_id": null
+    }
+  ]
+}

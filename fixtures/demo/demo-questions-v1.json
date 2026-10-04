@@ -1,0 +1,591 @@
+{
+  "version": "demo-questions-v1",
+  "data_version": "commerce-demo-v1",
+  "note": "Public demo questions with expected answers computed by generate_demo_data.py and re-checked by verify_demo_expected.py. Not a blind test set.",
+  "questions": [
+    {
+      "id": "Q01",
+      "identity": "a-requester",
+      "tenant": "A",
+      "question": "2026年7月已支付订单数是多少？",
+      "request_time_window": null,
+      "kind": "metric",
+      "window": {
+        "start": "2026-07-01T00:00:00Z",
+        "end": "2026-08-01T00:00:00Z"
+      },
+      "fake_supported": true,
+      "expected": {
+        "metric_id": "paid_count",
+        "value": 124
+      }
+    },
+    {
+      "id": "Q02",
+      "identity": "a-requester",
+      "tenant": "A",
+      "question": "2026年8月已支付订单总额是多少？",
+      "request_time_window": null,
+      "kind": "metric",
+      "window": {
+        "start": "2026-08-01T00:00:00Z",
+        "end": "2026-09-01T00:00:00Z"
+      },
+      "fake_supported": true,
+      "expected": {
+        "metric_id": "gross_fen",
+        "value": 2830010
+      }
+    },
+    {
+      "id": "Q03",
+      "identity": "a-requester",
+      "tenant": "A",
+      "question": "2026年8月退款后净额是多少？",
+      "request_time_window": null,
+      "kind": "metric",
+      "window": {
+        "start": "2026-08-01T00:00:00Z",
+        "end": "2026-09-01T00:00:00Z"
+      },
+      "fake_supported": true,
+      "expected": {
+        "metric_id": "net_fen",
+        "value": 2622277
+      }
+    },
+    {
+      "id": "Q04",
+      "identity": "b-requester",
+      "tenant": "B",
+      "question": "2026年7月退款后净额是多少？",
+      "request_time_window": null,
+      "kind": "metric",
+      "window": {
+        "start": "2026-07-01T00:00:00Z",
+        "end": "2026-08-01T00:00:00Z"
+      },
+      "fake_supported": true,
+      "expected": {
+        "metric_id": "net_fen",
+        "value": 62155327
+      }
+    },
+    {
+      "id": "Q04b",
+      "identity": "b-requester",
+      "tenant": "B",
+      "question": "2026年7月的退款总额是多少？",
+      "request_time_window": null,
+      "kind": "observe_refund",
+      "window": {
+        "start": "2026-07-01T00:00:00Z",
+        "end": "2026-08-01T00:00:00Z"
+      },
+      "fake_supported": false,
+      "expected": {
+        "refund_fen": 5373903
+      }
+    },
+    {
+      "id": "Q05",
+      "identity": "a-requester",
+      "tenant": "A",
+      "question": "2026年7月至9月的退款后净额是多少？",
+      "request_time_window": null,
+      "kind": "metric",
+      "window": {
+        "start": "2026-07-01T00:00:00Z",
+        "end": "2026-10-01T00:00:00Z"
+      },
+      "fake_supported": true,
+      "expected": {
+        "metric_id": "net_fen",
+        "value": 7354063
+      }
+    },
+    {
+      "id": "Q06",
+      "identity": "a-requester",
+      "tenant": "A",
+      "question": "按客户汇总2026年6月的已支付金额，列出金额最高的5个客户，只要客户编号和金额。",
+      "request_time_window": null,
+      "kind": "rowset",
+      "window": {
+        "start": "2026-06-01T00:00:00Z",
+        "end": "2026-07-01T00:00:00Z"
+      },
+      "fake_supported": true,
+      "expected": {
+        "metric_id": "gross_fen",
+        "top_n": 5,
+        "rows": [
+          {
+            "customer_id": "c01",
+            "name": "何文博",
+            "value": 347220
+          },
+          {
+            "customer_id": "c03",
+            "name": "马嘉怡",
+            "value": 177660
+          },
+          {
+            "customer_id": "c02",
+            "name": "孙思远",
+            "value": 134460
+          },
+          {
+            "customer_id": "c18",
+            "name": "周子轩",
+            "value": 112050
+          },
+          {
+            "customer_id": "c05",
+            "name": "吴浩然",
+            "value": 103460
+          }
+        ],
+        "all_values": {
+          "c01": 347220,
+          "c02": 134460,
+          "c03": 177660,
+          "c04": 98760,
+          "c05": 103460,
+          "c06": 95580,
+          "c07": 49650,
+          "c08": 95150,
+          "c09": 48620,
+          "c10": 17230,
+          "c11": 21210,
+          "c12": 97830,
+          "c13": 18450,
+          "c14": 23280,
+          "c15": 56370,
+          "c16": 40380,
+          "c18": 112050,
+          "c20": 27670,
+          "c21": 34300,
+          "c22": 19050,
+          "c23": 8080,
+          "c24": 12850,
+          "c25": 48930,
+          "c26": 4390,
+          "c27": 55490,
+          "c28": 13690,
+          "c30": 15080,
+          "c31": 24110,
+          "c32": 37220,
+          "c33": 16760,
+          "c34": 5970,
+          "c35": 8000,
+          "c37": 26480
+        }
+      }
+    },
+    {
+      "id": "Q06b",
+      "identity": "a-requester",
+      "tenant": "A",
+      "question": "按客户汇总2026年6月的已支付金额。",
+      "request_time_window": null,
+      "kind": "observe_rowset",
+      "window": {
+        "start": "2026-06-01T00:00:00Z",
+        "end": "2026-07-01T00:00:00Z"
+      },
+      "fake_supported": true,
+      "expected": {
+        "metric_id": "gross_fen",
+        "rows": [
+          {
+            "customer_id": "c01",
+            "name": "何文博",
+            "value": 347220
+          },
+          {
+            "customer_id": "c02",
+            "name": "孙思远",
+            "value": 134460
+          },
+          {
+            "customer_id": "c03",
+            "name": "马嘉怡",
+            "value": 177660
+          },
+          {
+            "customer_id": "c04",
+            "name": "吴静怡",
+            "value": 98760
+          },
+          {
+            "customer_id": "c05",
+            "name": "吴浩然",
+            "value": 103460
+          },
+          {
+            "customer_id": "c06",
+            "name": "郑静怡",
+            "value": 95580
+          },
+          {
+            "customer_id": "c07",
+            "name": "谢静怡",
+            "value": 49650
+          },
+          {
+            "customer_id": "c08",
+            "name": "陈俊杰",
+            "value": 95150
+          },
+          {
+            "customer_id": "c09",
+            "name": "高浩然",
+            "value": 48620
+          },
+          {
+            "customer_id": "c10",
+            "name": "吴诗琪",
+            "value": 17230
+          },
+          {
+            "customer_id": "c11",
+            "name": "冯晓彤",
+            "value": 21210
+          },
+          {
+            "customer_id": "c12",
+            "name": "韩佳颖",
+            "value": 97830
+          },
+          {
+            "customer_id": "c13",
+            "name": "吴宇航",
+            "value": 18450
+          },
+          {
+            "customer_id": "c14",
+            "name": "梁明哲",
+            "value": 23280
+          },
+          {
+            "customer_id": "c15",
+            "name": "马静怡",
+            "value": 56370
+          },
+          {
+            "customer_id": "c16",
+            "name": "林欣妍",
+            "value": 40380
+          },
+          {
+            "customer_id": "c18",
+            "name": "周子轩",
+            "value": 112050
+          },
+          {
+            "customer_id": "c20",
+            "name": "陈欣妍",
+            "value": 27670
+          },
+          {
+            "customer_id": "c21",
+            "name": "周梓涵",
+            "value": 34300
+          },
+          {
+            "customer_id": "c22",
+            "name": "郭晓彤",
+            "value": 19050
+          },
+          {
+            "customer_id": "c23",
+            "name": "周静怡",
+            "value": 8080
+          },
+          {
+            "customer_id": "c24",
+            "name": "谢俊杰",
+            "value": 12850
+          },
+          {
+            "customer_id": "c25",
+            "name": "冯思远",
+            "value": 48930
+          },
+          {
+            "customer_id": "c26",
+            "name": "梁思远",
+            "value": 4390
+          },
+          {
+            "customer_id": "c27",
+            "name": "马俊杰",
+            "value": 55490
+          },
+          {
+            "customer_id": "c28",
+            "name": "马浩然",
+            "value": 13690
+          },
+          {
+            "customer_id": "c30",
+            "name": "朱静怡",
+            "value": 15080
+          },
+          {
+            "customer_id": "c31",
+            "name": "郭静怡",
+            "value": 24110
+          },
+          {
+            "customer_id": "c32",
+            "name": "罗思远",
+            "value": 37220
+          },
+          {
+            "customer_id": "c33",
+            "name": "朱俊杰",
+            "value": 16760
+          },
+          {
+            "customer_id": "c34",
+            "name": "梁浩然",
+            "value": 5970
+          },
+          {
+            "customer_id": "c35",
+            "name": "徐佳颖",
+            "value": 8000
+          },
+          {
+            "customer_id": "c37",
+            "name": "韩浩然",
+            "value": 26480
+          }
+        ],
+        "all_values": {
+          "c01": 347220,
+          "c02": 134460,
+          "c03": 177660,
+          "c04": 98760,
+          "c05": 103460,
+          "c06": 95580,
+          "c07": 49650,
+          "c08": 95150,
+          "c09": 48620,
+          "c10": 17230,
+          "c11": 21210,
+          "c12": 97830,
+          "c13": 18450,
+          "c14": 23280,
+          "c15": 56370,
+          "c16": 40380,
+          "c18": 112050,
+          "c20": 27670,
+          "c21": 34300,
+          "c22": 19050,
+          "c23": 8080,
+          "c24": 12850,
+          "c25": 48930,
+          "c26": 4390,
+          "c27": 55490,
+          "c28": 13690,
+          "c30": 15080,
+          "c31": 24110,
+          "c32": 37220,
+          "c33": 16760,
+          "c34": 5970,
+          "c35": 8000,
+          "c37": 26480
+        }
+      }
+    },
+    {
+      "id": "Q07",
+      "identity": "a-requester",
+      "tenant": "A",
+      "question": "2026年7月已支付金额最高的客户姓名是什么？",
+      "request_time_window": null,
+      "kind": "top_customer",
+      "window": {
+        "start": "2026-07-01T00:00:00Z",
+        "end": "2026-08-01T00:00:00Z"
+      },
+      "fake_supported": true,
+      "expected": {
+        "customer_id": "c01",
+        "name": "何文博",
+        "value": 287280
+      }
+    },
+    {
+      "id": "Q08",
+      "identity": "a-requester",
+      "tenant": "A",
+      "question": "2026年8月销售额是多少？",
+      "request_time_window": null,
+      "kind": "clarify_resume",
+      "window": {
+        "start": "2026-08-01T00:00:00Z",
+        "end": "2026-09-01T00:00:00Z"
+      },
+      "fake_supported": true,
+      "resume_answer": "按支付金额统计",
+      "expected": {
+        "metric_id": "gross_fen",
+        "value": 2830010
+      }
+    },
+    {
+      "id": "Q09",
+      "identity": "a-requester",
+      "tenant": "A",
+      "question": "退款后净额是怎么算的？",
+      "request_time_window": null,
+      "kind": "knowledge",
+      "window": null,
+      "fake_supported": true,
+      "expected": {
+        "expected_source_id": "demo-metric-net"
+      }
+    },
+    {
+      "id": "Q10",
+      "identity": "a-requester",
+      "tenant": "A",
+      "question": "你好，你能做什么？",
+      "request_time_window": null,
+      "kind": "no_data",
+      "window": null,
+      "fake_supported": true,
+      "expected": {}
+    },
+    {
+      "id": "Q11",
+      "identity": "a-requester",
+      "tenant": "A",
+      "question": "2026年5月的退款后净额是多少？",
+      "request_time_window": null,
+      "kind": "empty_window",
+      "window": {
+        "start": "2026-05-01T00:00:00Z",
+        "end": "2026-06-01T00:00:00Z"
+      },
+      "fake_supported": true,
+      "expected": {
+        "metric_id": "net_fen",
+        "value": 0
+      }
+    },
+    {
+      "id": "Q12",
+      "identity": "a-requester",
+      "tenant": "A",
+      "question": "B租户2026年8月的退款后净额是多少？",
+      "request_time_window": null,
+      "kind": "isolation",
+      "window": {
+        "start": "2026-08-01T00:00:00Z",
+        "end": "2026-09-01T00:00:00Z"
+      },
+      "fake_supported": true,
+      "expected": {
+        "forbidden_values": [
+          78194535,
+          82829280
+        ]
+      }
+    }
+  ],
+  "retrieval_probes": [
+    {
+      "id": "P01",
+      "identity": "a-requester",
+      "query": "销售额，口径，先问清楚",
+      "expected_source_id": "demo-ambiguity-sales"
+    },
+    {
+      "id": "P02",
+      "identity": "a-requester",
+      "query": "时间窗口，按月，半开区间",
+      "expected_source_id": "demo-time-window"
+    },
+    {
+      "id": "P03",
+      "identity": "a-requester",
+      "query": "已取消，订单，已支付订单数",
+      "expected_source_id": "demo-metric-paid-count"
+    },
+    {
+      "id": "P04",
+      "identity": "a-requester",
+      "query": "退款后净额是怎么算的？",
+      "expected_source_id": "demo-metric-net"
+    },
+    {
+      "id": "P05",
+      "identity": "a-approver",
+      "query": "审批人，客户姓名，核对",
+      "expected_source_id": "demo-sensitive-customer-name"
+    },
+    {
+      "id": "P06",
+      "identity": "a-requester",
+      "query": "网店，业务概况",
+      "expected_source_id": "demo-tenant-a-overview"
+    },
+    {
+      "id": "P07",
+      "identity": "b-requester",
+      "query": "批发商，业务概况",
+      "expected_source_id": "demo-tenant-b-overview"
+    }
+  ],
+  "isolation_probes": [
+    {
+      "id": "I01",
+      "identity": "a-requester",
+      "query": "批发商，业务概况",
+      "forbidden_source_ids": [
+        "demo-tenant-b-overview"
+      ]
+    },
+    {
+      "id": "I02",
+      "identity": "b-requester",
+      "query": "网店，业务概况",
+      "forbidden_source_ids": [
+        "demo-tenant-a-overview"
+      ]
+    },
+    {
+      "id": "I03",
+      "identity": "a-requester",
+      "query": "审批人，客户姓名，核对",
+      "forbidden_source_ids": [
+        "demo-sensitive-customer-name"
+      ]
+    },
+    {
+      "id": "I04",
+      "identity": "a-approver",
+      "query": "旧版，退款规则，整单退回",
+      "forbidden_source_ids": [
+        "demo-refund-policy-v1"
+      ]
+    }
+  ],
+  "table_counts": {
+    "A": {
+      "customers": 40,
+      "orders": 600,
+      "refunds": 113
+    },
+    "B": {
+      "customers": 15,
+      "orders": 150,
+      "refunds": 46
+    }
+  }
+}

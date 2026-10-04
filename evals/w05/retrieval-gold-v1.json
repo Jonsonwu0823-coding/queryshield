@@ -1,0 +1,77 @@
+{
+  "schema_version": "w05-retrieval-gold-v1",
+  "catalog_version": "catalog-v2",
+  "gold_by_family_id": {
+    "metric-gross": [
+      {
+        "source_id": "semantic-metric-gross",
+        "version": "2026-09-21"
+      }
+    ],
+    "metric-sales-ambiguous": [
+      {
+        "source_id": "semantic-metric-gross",
+        "version": "2026-09-21"
+      },
+      {
+        "source_id": "semantic-metric-net",
+        "version": "2026-09-21"
+      }
+    ],
+    "metric-net": [
+      {
+        "source_id": "semantic-metric-net",
+        "version": "2026-09-21"
+      }
+    ],
+    "metric-refund": [
+      {
+        "source_id": "semantic-metric-refund",
+        "version": "2026-09-21"
+      }
+    ],
+    "metric-paid-count": [
+      {
+        "source_id": "semantic-metric-paid-count",
+        "version": "2026-09-21"
+      }
+    ],
+    "metric-paid-count-synonym": [
+      {
+        "source_id": "semantic-metric-paid-count",
+        "version": "2026-09-21"
+      }
+    ],
+    "orders-status": [
+      {
+        "source_id": "semantic-schema-orders",
+        "version": "2026-09-21"
+      }
+    ],
+    "orders-amount-unit": [
+      {
+        "source_id": "semantic-schema-orders",
+        "version": "2026-09-21"
+      }
+    ],
+    "customers-tenant": [
+      {
+        "source_id": "semantic-schema-customers",
+        "version": "2026-09-21"
+      }
+    ],
+    "refund-order-join": [
+      {
+        "source_id": "semantic-schema-refunds",
+        "version": "2026-09-21"
+      }
+    ],
+    "time-window": [
+      {
+        "source_id": "semantic-time-window",
+        "version": "2026-09-21"
+      }
+    ],
+    "empty-hit": []
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "schema_version": "w05-execution-profile-budgets-v1",
+  "profiles": {
+    "B0": {
+      "max_model_calls": 1,
+      "max_tool_calls": 1,
+      "max_active_seconds": null
+    },
+    "B1": {
+      "max_model_calls": 6,
+      "max_tool_calls": 8,
+      "max_active_seconds": 60
+    }
+  },
+  "pre_model_rejections_require_zero_calls": true,
+  "classification_independent": true
+}

@@ -1,0 +1,2 @@
+"""QueryShield application package."""
+

@@ -1,0 +1,217 @@
+# 架构说明
+
+QueryShield 把“理解问题”交给模型，把“谁能看什么、执行什么、哪个数可信”留在服务端。本文按组件说明代码在哪里、各自守什么边界，再给出一次请求的完整流程和主要的设计取舍。代码位置都相对于本目录；写的是符号名，行号会随代码变化。
+
+## 总览
+
+```mermaid
+flowchart TB
+    subgraph HTTP["HTTP 入口"]
+        API["api/main.py<br/>路由、错误码与 HTTP 码"]
+        AUTH["auth/identity.py<br/>令牌 → 租户、用户、角色"]
+    end
+    subgraph RUN["运行服务"]
+        SVC["approval/service.py<br/>W04RunService：run、审批、取消、恢复"]
+        STATE[("db/w04_state.py<br/>SQLite 状态库")]
+    end
+    subgraph AGENT["有界 Agent"]
+        GRAPH["agent/graph.py<br/>LangGraph 状态图、预算、退回"]
+        PROP["agent/proposals.py<br/>动作解析"]
+        CTX["agent/context.py<br/>给模型的上下文"]
+    end
+    subgraph TOOLS["受控工具"]
+        SEM["tools/semantic.py<br/>ControlledTools"]
+        POL["policy/sql.py<br/>SQL 子集解析"]
+        EXE["db/guarded.py<br/>租户受限执行"]
+        CAT["catalog/<br/>指标、说法表、追问"]
+        KN["knowledge/<br/>快照、权限、混合检索"]
+    end
+    FACTS["facts/<br/>已核实事实与渲染"]
+    MODEL["providers/<br/>Fake / OpenAI 兼容"]
+    MCPS["mcp_metadata/<br/>可选的 MCP stdio 服务进程"]
+    PG[("PostgreSQL<br/>只读角色 + 行级安全")]
+
+    API --> AUTH
+    API --> SVC
+    SVC <--> STATE
+    SVC --> GRAPH
+    GRAPH --> PROP
+    GRAPH --> CTX
+    GRAPH <--> MODEL
+    GRAPH --> SEM
+    GRAPH --> FACTS
+    SEM --> POL --> EXE --> PG
+    SEM --> CAT
+    SEM --> KN
+    SEM -. "QUERYSHIELD_METADATA_TOOLS=mcp" .-> MCPS
+```
+
+## 组件
+
+### API 与身份
+
+HTTP 接口都在 `src/queryshield/api/main.py`：
+
+| 方法与路径 | 作用 |
+|---|---|
+| `POST /queries` | 提交问题。默认同步返回；带 `Prefer: respond-async` 时返回 202 和 `Location: /runs/{id}` |
+| `POST /query-proposals` | 单次提案入口：客户端直接提交一条 `query_readonly` 提议，不经过模型。服务端照样核身份、SQL 子集、租户和敏感字段；请求人查客户姓名返回 403 `approval_required`，审批人照常执行 |
+| `GET /runs/{id}`、`GET /runs/{id}/result` | 查状态、取结果。取结果时服务端重新核对存下的结果证据和事实，不通过返回 502 `evidence_validation_failed` |
+| `POST /runs/{id}/resume` | 回答追问后继续，只在 `WAITING_USER` 时可用，否则 409 `invalid_run_state` |
+| `POST /runs/{id}/approval` | 审批人批准或拒绝 |
+| `POST /runs/{id}/cancel` | 取消 |
+| `GET /runs/{id}/events` | 事件流（SSE） |
+| `GET`/`PUT`/`DELETE /preferences/{key}` | 用户偏好 |
+| `GET /health` | 健康检查 |
+
+身份：`src/queryshield/auth/identity.py` 的 `resolve_identity` 把 `Authorization: Bearer <令牌>` 映射到四个固定身份之一（租户 A、B 各一个请求人、一个审批人），令牌来自环境变量；有两个令牌相同时整张映射作废。服务端用认证结果构造 `ExecutionContext`，之后所有工具调用都用它。用哪种配置（B1 有界 Agent 或 B0 基线）由服务端设置 `QUERYSHIELD_AGENT_PROFILE` 决定，客户端选不了。
+
+### 运行服务与状态库
+
+`src/queryshield/approval/service.py` 的 `W04RunService` 管理 run 的生命周期：同步执行（`run_sync`）、异步执行（`start_async`，后台线程）、追问后继续（`resume_waiting_user`）、审批（`approve`）、取消（`cancel`）、按身份读取（`visible_run`）。状态存在 `src/queryshield/db/w04_state.py` 的 `StateStore`（SQLite），表有 runs、approvals、events、preferences、knowledge_snapshots、knowledge_acl、parallel_groups、parallel_branches 等。
+
+- **可见性。** run 只对同租户的发起人可见；同租户的审批人只在 `WAITING_APPROVAL` 时能看到去掉结果的版本。其他人一律 404。
+- **审批。** 进入审批时，`build_pending_action` 把要执行的动作（SQL、参数、指标、时间窗、租户、请求人、SQL 策略版本、catalog 版本）连同权限来源 id 和权限版本一起存下，并记动作的哈希。`approve` 在 `_approval_lock` 里完成“检查再执行”：同租户、审批人角色、不是请求人本人、没过期（10 分钟）、权限来源仍然有效且版本不变，然后只执行被批准的那一条。找不到有效的权限来源时，`_approval_permission` 让这次查询以 503 `approval_permission_unavailable` 结束，不建审批。
+- **容量与取消。** 同时活跃的 run 最多 2 个（`MAX_ACTIVE_RUNS`）。取消运行中的 run 只记“请求取消”，等执行真正退出后再落终态；等待中的 run 直接变成 `CANCELLED`。
+- **恢复。** 应用启动时，`recover_parallel_groups` 扫描状态库里的并行分支组：全部已提交的复用结果，状态不确定的标 `FAILED/recovery_required`，不重跑 SQL（`src/queryshield/agent/parallel_durable.py` 的 `recover_on_startup`）。
+
+### 有界 Agent
+
+`src/queryshield/agent/graph.py` 的 `BoundedAgent` 用 LangGraph 的 `StateGraph`，四个节点：`model_decision`、`execute_tool`、`execute_parallel`、`finish`。模型每一步输出一个 JSON 动作（`src/queryshield/agent/proposals.py`），类型只有 `tool_call`、`parallel_readonly`、`ask_user`、`final_answer`、`deny`；工具只有 `search_catalog`、`describe_tables`、`query_readonly`。
+
+- **预算**（`src/queryshield/agent/runtime.py` 的 `build_b1_agent`，产品和评测共用这一个装配函数）：每个 run 最多 6 次模型调用、8 次工具调用、60 秒。另有三种各 1 次的机会，互不占用：SQL 修复（`MAX_QUERY_REPAIRS`）、追问退回（`MAX_CLARIFICATION_BOUNCES`）、回答退回（`MAX_ANSWER_BOUNCES`）。
+- **修复与退回。** 可修复的 SQL 错误（例如语法不在子集里、参数个数不对、没声明指标）给模型一次修复机会，用完以 502 `query_repair_limit` 结束；安全类拒绝直接以 DENIED 结束，不给修复。追问和回答的核对见下面的 catalog 和已核实事实两节。
+- **并行。** 动作类型里有 `parallel_readonly`（2–3 个指标的只读并行），但只在服务端给了并行计划和调度器时可用。产品的 B1 装配不带调度器，所以 HTTP 路径上没有并行分支；并行调度和它的崩溃恢复由历史检查覆盖（`src/queryshield/agent/parallel.py`、`src/queryshield/agent/parallel_durable.py`）。
+
+### 工具与受限执行器
+
+`src/queryshield/tools/semantic.py` 的 `ControlledTools` 是模型能碰到的全部工具。工具参数里不能带身份字段，身份只来自 `ExecutionContext`。
+
+- `query_readonly` 是唯一读业务数据的工具。SQL 先过 `src/queryshield/policy/sql.py` 的 `parse_readonly_select`：项目自己的分词器和解析器，只接受单条 SELECT，表只能是 customers、orders、refunds，函数只有 `SUM`、`COUNT`、`COALESCE`，只支持内连接，不接受 CTE、集合运算、注释和类型转换，长度不超过 4000 字符。
+- 执行在 `src/queryshield/db/guarded.py`：只按解析结果重新渲染 SQL，每张表替换成 `(SELECT * FROM t WHERE tenant_id = %s)` 子查询（`_scoped_table`），没有 LIMIT 时补 `LIMIT 101`，多于 100 行以 422 `result_row_limit` 结束。连接来自 `src/queryshield/db/readonly.py` 的 `connect_readonly`：只读角色、`default_transaction_read_only=on`、`statement_timeout=2000`，并在事务里设置 `queryshield.tenant_id`，配合 `migrations/002_w04_rls.sql` 里三张表的行级安全（ENABLE + FORCE）。
+- 查客户姓名（`customers.name` 或 `customers.*`）时，非审批人会得到 `approval_required`，run 进入等待审批（`check_sensitive_access`）。单次提案入口 `POST /query-proposals` 用同一个检查，请求人查姓名直接返回 403。
+
+### catalog：指标、说法表、追问
+
+`src/queryshield/catalog/catalog.py` 读 `fixtures/semantic/catalog-v4.json`。四个指标：`paid_count`（已支付订单数）、`gross_fen`（支付订单总额）、`refund_fen`（退款总额）、`net_fen`（退款后净额），金额单位是分。三条追问规则：口径（“销售额”“营收”等在总额与净额之间含糊）、订单范围、退款窗口。
+
+`src/queryshield/catalog/phrases.py` 的 `PhraseIndex` 是说法表：每个指标的明确说法、每条追问规则的含糊说法，按最长匹配、不重叠扫描。说法表**只用来核对**，不替模型选指标：
+
+- 问题里只有含糊说法，模型却直接声明了口径：不执行 SQL，改为用 catalog 里的固定问题追问；
+- 问题里已有明确说法，模型却追问：退回一次，让它直接查；
+- 模型声明的指标与问题里的明确说法矛盾：在执行 SQL 之前拒绝。
+
+核对的入口是 `src/queryshield/agent/tool_execution.py` 的 `check_clarification`。
+
+### 已核实事实
+
+“已核实”是服务端给的标签，规则写在一处、五个地方共用（B1 图、B0、审批前存下的结果、批准后的执行、事实解析）：
+
+- 结果必须有指标绑定、恰好一行、不分组（`src/queryshield/facts/facts.py` 的 `is_scalar_metric_result`）；
+- WHERE 里只能是服务端绑定的条件：支付状态、时间窗的两端、租户（`src/queryshield/agent/tool_execution.py` 的 `_metric_scope_filters_match`；`net_fen` 是服务端的两段计划，单独核对）；
+- 只能连客户表，ON 恰好是 `tenant_id`、`customer_id` 两个等式，即客户表的主键（`_has_trusted_customer_join`）。
+
+已核实的回答整段由 `src/queryshield/facts/render.py` 的 `render_verified_answer` 渲染：“已核实：指标：值（时间窗，时区）”，再加一句口径和依据；不用模型写的文字和数字。
+
+回答契约：模型在 `final_answer` 里声明依据 `basis`（`query` 默认、`knowledge`、`no_data`），服务端在 `_verified_answer` 里按依据核对。`query` 要求本 run 有成功的查询；`knowledge` 只认本 run 的检索来源，来源 id 由服务端给出；`no_data` 的回复由服务端用固定文字写。没有依据时退回一次，再犯就终止；模型声明 `knowledge` 却没有检索时，服务端用原问题检索一次再退回。响应里的 `answer_status` 是 `verified`（服务端渲染且至少一条事实）、`unverified`（模型文字，例如口径定义、行集）或 `no_data`。
+
+### 知识库与检索
+
+`src/queryshield/knowledge/`：
+
+- **导入与快照**（`ingest.py`）：按来源登记表导入文档，切块（每块最多 800 字、重叠 100 字），快照 id 是版本加内容清单哈希的前 16 位，内容不变 id 就不变。
+- **权限**（`retrieval.py`）：来源必须是 active、角色在允许列表里、租户范围是全局或本租户；catalog 里要审批的条目对非审批人不可见。
+- **混合检索**（`retrieval.py` 的 `HybridRetriever`）：关键词路（词频加同义词扩展）和向量路（余弦相似度，下限 0.60）各取最多 10 个候选，用 RRF（k=60）融合。支持可选的重排，产品路径不启用。
+- **快照发布**：产品服务在第一次运行前把实际使用的快照和权限表写进状态库，同一个快照 id 只发布一次；权限变化时版本号加 1，等待中的审批据此失效（`W04RunService.product_knowledge`）。
+
+### MCP 元数据工具
+
+服务端设置 `QUERYSHIELD_METADATA_TOOLS=mcp` 时，`search_catalog`、`describe_tables` 改走官方 SDK 的 MCP stdio 会话，一个 run 一个服务进程（`src/queryshield/mcp_metadata/`）。宿主按 run 的身份生成启动参数，发送前用本地同一组函数校验参数，收到后逐条核对（`verify.py`），交给 Agent 的是宿主按自己的记录重建的数据；错误码只原样接受 `retrieval_unavailable`，其余按固定规则映射。任何失败都关闭会话，不退回本地工具。`query_readonly` 始终在本地。详见 [MCP 只读元数据工具](mcp.md)。
+
+### 模型适配器
+
+`src/queryshield/providers/`：`QUERYSHIELD_PROVIDER_MODE` 为 `fake`（默认）时用确定性的 `FakeModel`，为 `real` 时用 OpenAI 兼容的 `OpenAICompatibleModel`（`/chat/completions`，超时默认 15 秒，输出上限默认 512 tokens）。缺配置以 503 结束，不退回 Fake。用量只记提供方返回的值：没有就记 `unknown`，不补 0；Fake 的用量一律是 `unknown`。另有嵌入（`embedding.py`）和重排（`rerank.py`）适配器。
+
+### 评测（W05）
+
+`src/queryshield/evaluation/` 用同一个模型、同一组受控工具、同一个身份，成对运行两种配置：
+
+- **B0**（`run_b0_single_pass`）：一次模型生成、一次受控执行，不检索、不追问、不修复，作对照基线；
+- **B1**（`build_b1_agent`）：产品的有界 Agent。
+
+题目在 `evals/w05/`：冻结的 20 道题（其中 8 道关键题，`state_cases.py` 要求关键题集合恰好是这 8 道）和 3 道补充题。安全违规按安全题的禁止副作用计数（`state_oracle.py`）。评测直接构造 `W04RunService`，走的是与 HTTP 相同的 Agent 装配和受控工具。
+
+## 一次请求的完整流程
+
+以一道需要审批的问题为例（请求人问客户姓名，审批人批准）：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as 请求人
+    participant API as API
+    participant S as 运行服务
+    participant A as 有界 Agent
+    participant M as 模型
+    participant T as 受控工具
+    participant DB as PostgreSQL
+    participant R as 审批人
+
+    U->>API: POST /queries（Bearer 令牌）
+    API->>API: resolve_identity → ExecutionContext
+    API->>S: run_sync
+    S->>S: 发布知识快照（首次）、建 run
+    loop 最多 6 次模型调用、8 次工具调用、60 秒
+        S->>A: 运行
+        A->>M: 上下文（问题、工具、规则）
+        M-->>A: JSON 动作
+        A->>T: search_catalog / describe_tables / query_readonly
+        T->>T: 校验参数、说法表核对、敏感字段检查
+    end
+    T-->>A: approval_required
+    A-->>S: waiting_approval
+    S->>S: 绑定动作 + 权限来源 + 权限版本
+    S-->>U: 202 WAITING_APPROVAL
+    R->>API: POST /runs/{id}/approval（approve）
+    API->>S: approve（_approval_lock）
+    S->>S: 同租户、审批人、非本人、未过期、权限版本未变
+    S->>T: 只执行被批准的那一条
+    T->>DB: 租户子查询 + 只读事务 + RLS
+    DB-->>T: 行集
+    S-->>R: 200 SUCCEEDED（行集，unverified）
+    U->>API: GET /runs/{id}/result
+    API-->>U: 200（重新核对证据后返回）
+```
+
+数据题不需要审批时，循环里的 `query_readonly` 直接执行；`finish` 节点核对回答依据，符合已核实规则的结果由服务端渲染成回答，返回 200。
+
+### run 状态与 HTTP 码
+
+内部状态到 HTTP 码的对照表在 `src/queryshield/agent/runtime.py`（`RUN_OUTCOMES`、`FAILED_ERROR_HTTP`）。同步 `POST /queries` 的响应按这张表；resume 和审批后失败的查询也用它（resume 的等待和成功一律 200）；异步查状态 `GET /runs/{id}` 一律 200，状态看响应体；`CANCELLED` 的 409 在 `src/queryshield/api/main.py` 里单独处理：
+
+| 状态 | HTTP | 说明 |
+|---|---|---|
+| `SUCCEEDED` | 200 | 回答带 `answer_status` |
+| `WAITING_USER` | 202 | 追问，带 `pending_question` |
+| `WAITING_APPROVAL` | 202 | 等同租户审批人 |
+| `DENIED` | 403 | 服务端的安全拒绝（带具体错误码）；模型自己的 `deny` 也落在这里，错误码是兜底的 `run_failed` |
+| `FAILED` | 502 | 默认；按错误码细化，见下 |
+| `LIMIT_REACHED` | 502 | 预算用完仍没有回答，对外状态是 `unknown` |
+| `CANCELLED` | 409 | 错误码 `run_cancelled` |
+
+`FAILED` 按错误码细化的几类：配置、数据库、知识库、权限来源不可用是 503（例如 `missing_model_configuration`、`database_unavailable`、`knowledge_unavailable`、`approval_permission_unavailable`、`mcp_unavailable`）；超时是 504（`upstream_timeout`、`query_timeout`、`mcp_timeout`）；问题本身无法在边界内回答是 422（`result_row_limit`、`clarification_value_unsupported`）；模型输出用不了是 502（`query_repair_limit`、`answer_not_grounded`、`answer_basis_conflict`、`clarification_not_needed`、`metric_contradicts_question`、`invalid_json` 等）。
+
+## 设计取舍
+
+每条写：选了什么、为什么、代价。
+
+1. **单一产品运行时。** HTTP 和评测共用同一套 Agent 装配（`build_b1_agent`）、同一组受控工具和运行服务，评测只构造服务、比较结果，`src/` 里没有评测专用的执行路径。为什么：评测分数要能代表产品；两条路径迟早会分叉。代价：评测要通过事件和状态库取观察数据，接口要为此留出足够的记录。
+2. **数字只取自服务端的结果证据，不信模型。** 模型声明指标、写 SQL，服务端执行并绑定结果；已核实的回答整段由服务端渲染。为什么：产品的核心承诺是“给出的数经过核实”，模型抄错一个数就破坏它。代价：回答的措辞固定、不够自然；模型写的行集只能标“未核实”。
+3. **只有行范围等于口径范围的聚合才算已核实。** 分组、明细、带额外过滤或非主键连接的结果一律是行集。为什么：值是真的、含义是错的（例如“第一名客户的金额”被当成“全月总额”）比算错更难发现；按根因定一条规则，比逐个修写法可靠。代价：一些本来正确的单值（例如某个客户的金额）也只能作为行集返回。
+4. **追问由模型判断，服务端从两个方向核对。** 服务端不看问题文字选指标，只在模型的决定与说法表明显矛盾时拦下或退回。为什么：完全交给模型，真实模型在“该问不问、不该问却问”两头都出过错；完全由服务端按关键词路由，又会把说法表以外的写法判错。代价：说法表要保守维护，泛词（“总额”“金额”）故意不列；表以外的写法仍靠模型。
+5. **回答契约：先声明依据，再给一次退回。** 为什么：没查询就回答、只看过表结构就回答，都要能被识别；直接 502 又太粗，模型常常第二次就能答对。代价：多一次模型调用；提示管不住的情形（定义题不先检索）由服务端补一次检索。
+6. **审批绑定权限来源和版本。** 为什么：审批是“这个人在这个权限下看这条数据”，权限变了，旧的批准就不该再生效。代价：权限版本变化会让等待中的审批失效，需要重新发起。
+7. **SQL 三层限制。** 项目自己的 SQL 子集解析器、按租户的子查询、行级安全加只读角色，任何一层单独失守都不会越过租户。为什么：模型写的 SQL 是不可信输入；只靠解析器或只靠数据库都是单点。代价：SQL 能力很窄（没有 LEFT JOIN、CTE、类型转换），复杂问题需要模型拆成多步。
+8. **MCP 只是传输，外部错误码走白名单。** 结果逐条与宿主自己的记录比对，错误码也不原样采信。为什么：终态（尤其 DENIED）是安全语义，不能由不可信的一方决定。代价：宿主要维护与服务进程完全一致的目录和索引；恶意服务端仍能把失败标成上游故障，只是失败原因的标注不准。
+9. **只能单进程部署。** 审批的“检查再执行”靠进程内的锁。为什么：状态库是 SQLite，单进程足够演示和评测，跨进程的原子状态转换要先改状态库接口。代价：不能横向扩展；见[运维说明](operations.md)第 6 节。
+10. **Fake 与真实模型严格分开。** 缺配置时服务以 503 结束（检查脚本记为 blocked），不会退回 Fake；用量未知记 `unknown`，不补 0。为什么：“跑通了”必须能说明跑的是什么。代价：没有密钥时只能看 Fake 结果，Fake 只认演示和评测里写好的题。

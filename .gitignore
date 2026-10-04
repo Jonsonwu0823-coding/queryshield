@@ -1,0 +1,26 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.vscode/
+.idea/
+.env
+.env.*
+!.env.example
+本地密码.txt
+*.local
+*.secret
+*.code-workspace
+
+# Local run evidence, encrypted evaluation material, raw records and cloud session state never enter the repository.
+/evidence/
+*.enc
+*.aesgcm
+*.dpapi
+*-raw.json
+.cloud/

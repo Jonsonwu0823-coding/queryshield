@@ -1,0 +1,37 @@
+# Credentials never enter the build context.
+.env
+.env.*
+!.env.example
+*.local
+*.secret
+本地密码.txt
+
+# Local environments, caches and build output.
+.venv
+.git
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+**/*.egg-info
+build
+dist
+.vscode
+.idea
+
+# Evidence and local state.
+evidence
+**/evidence
+*.sqlite3
+*.sqlite3-*
+
+# Not needed to run the service (the Dockerfile copies an explicit list anyway).
+tests
+evals
+docs
+README.md
+Dockerfile
+compose.yaml
+.dockerignore
+deploy

@@ -1,0 +1,549 @@
+{
+  "catalog_version": "catalog-v4",
+  "fixture_version": "commerce-v1",
+  "source": {
+    "source_id": "commerce-v1",
+    "version": "commerce-v1",
+    "kind": "synthetic_fixture",
+    "files": [
+      "migrations/001_commerce_v1.sql",
+      "fixtures/commerce-v1.sql",
+      "fixtures/commerce-v1.md"
+    ],
+    "note": "Synthetic commerce fixture only; it is not production business volume."
+  },
+  "time_window": {
+    "start": "2026-09-01T00:00:00Z",
+    "end": "2026-10-01T00:00:00Z",
+    "timezone": "UTC",
+    "interval": "[start,end)"
+  },
+  "access_scope": {
+    "roles": [
+      "requester",
+      "approver"
+    ],
+    "tenant_key": "tenant_id",
+    "database_access": "guarded_query_executor_only",
+    "read_only": true,
+    "model_may_supply_identity": false,
+    "catalog_search": "authenticated_principal",
+    "sensitive_data_approval": "customers.name values require the existing approval path"
+  },
+  "entries": [
+    {
+      "id": "table.customers",
+      "kind": "table",
+      "text": "客户表；同一 customer_id 可以在不同租户重复，所有业务读取必须按 tenant_id 归属。",
+      "source_id": "commerce-v1",
+      "version": "commerce-v1",
+      "source_locator": "migrations/001_commerce_v1.sql:1-6",
+      "table": "customers",
+      "column": null,
+      "field_refs": [
+        "customers.tenant_id",
+        "customers.customer_id",
+        "customers.name"
+      ],
+      "access_scope": "tenant_scoped_readonly",
+      "requires_approval": false
+    },
+    {
+      "id": "field.customers.tenant_id",
+      "kind": "field",
+      "text": "customers.tenant_id 是客户行的租户归属键，由服务端身份提供，不能由模型或请求体覆盖。",
+      "source_id": "commerce-v1",
+      "version": "commerce-v1",
+      "source_locator": "migrations/001_commerce_v1.sql:2",
+      "table": "customers",
+      "column": "tenant_id",
+      "field_refs": [
+        "customers.tenant_id"
+      ],
+      "data_type": "text",
+      "semantic_role": "tenant_scope_key",
+      "access_scope": "tenant_scoped_readonly",
+      "requires_approval": false
+    },
+    {
+      "id": "field.customers.customer_id",
+      "kind": "field",
+      "text": "customers.customer_id 是租户内客户标识；只在与同租户订单关联时使用。",
+      "source_id": "commerce-v1",
+      "version": "commerce-v1",
+      "source_locator": "migrations/001_commerce_v1.sql:3",
+      "table": "customers",
+      "column": "customer_id",
+      "field_refs": [
+        "customers.customer_id"
+      ],
+      "data_type": "text",
+      "semantic_role": "tenant_local_key",
+      "access_scope": "tenant_scoped_readonly",
+      "requires_approval": false
+    },
+    {
+      "id": "field.customers.name",
+      "kind": "field",
+      "text": "customers.name 是客户姓名；它属于敏感业务值，读取姓名仍需已有审批/权限路径。",
+      "source_id": "commerce-v1",
+      "version": "commerce-v1",
+      "source_locator": "migrations/001_commerce_v1.sql:4",
+      "table": "customers",
+      "column": "name",
+      "field_refs": [
+        "customers.name"
+      ],
+      "data_type": "text",
+      "semantic_role": "sensitive_dimension",
+      "access_scope": "tenant_scoped_readonly",
+      "requires_approval": true
+    },
+    {
+      "id": "table.orders",
+      "kind": "table",
+      "text": "订单表；订单状态、金额和创建时间用于受控的订单统计，订单键是 tenant_id 加 order_id。",
+      "source_id": "commerce-v1",
+      "version": "commerce-v1",
+      "source_locator": "migrations/001_commerce_v1.sql:8-17",
+      "table": "orders",
+      "column": null,
+      "field_refs": [
+        "orders.tenant_id",
+        "orders.order_id",
+        "orders.customer_id",
+        "orders.status",
+        "orders.amount_fen",
+        "orders.created_at"
+      ],
+      "access_scope": "tenant_scoped_readonly",
+      "requires_approval": false
+    },
+    {
+      "id": "field.orders.order_id",
+      "kind": "field",
+      "text": "orders.order_id 是订单标识；数据库没有 orders.id，订单关联和结果排序必须使用 order_id。",
+      "source_id": "commerce-v1",
+      "version": "commerce-v1",
+      "source_locator": "migrations/001_commerce_v1.sql:10",
+      "table": "orders",
+      "column": "order_id",
+      "field_refs": [
+        "orders.order_id"
+      ],
+      "data_type": "text",
+      "semantic_role": "tenant_local_key",
+      "access_scope": "tenant_scoped_readonly",
+      "requires_approval": false
+    },
+    {
+      "id": "field.orders.customer_id",
+      "kind": "field",
+      "text": "orders.customer_id 通过同一 tenant_id 与 customers.customer_id 组成复合外键。",
+      "source_id": "commerce-v1",
+      "version": "commerce-v1",
+      "source_locator": "migrations/001_commerce_v1.sql:11,16-17",
+      "table": "orders",
+      "column": "customer_id",
+      "field_refs": [
+        "orders.customer_id",
+        "customers.customer_id",
+        "orders.tenant_id",
+        "customers.tenant_id"
+      ],
+      "data_type": "text",
+      "semantic_role": "customer_join_key",
+      "access_scope": "tenant_scoped_readonly",
+      "requires_approval": false
+    },
+    {
+      "id": "field.orders.status",
+      "kind": "field",
+      "text": "orders.status 是订单状态枚举，只允许 paid 或 cancelled；paid 统计不包含 cancelled。",
+      "source_id": "commerce-v1",
+      "version": "commerce-v1",
+      "source_locator": "migrations/001_commerce_v1.sql:12",
+      "table": "orders",
+      "column": "status",
+      "field_refs": [
+        "orders.status"
+      ],
+      "data_type": "enum",
+      "enum_values": [
+        "paid",
+        "cancelled"
+      ],
+      "access_scope": "tenant_scoped_readonly",
+      "requires_approval": false
+    },
+    {
+      "id": "field.orders.amount_fen",
+      "kind": "field",
+      "text": "orders.amount_fen 是以人民币分保存的非负整数金额；展示为元时必须由服务端定点转换。",
+      "source_id": "commerce-v1",
+      "version": "commerce-v1",
+      "source_locator": "migrations/001_commerce_v1.sql:13",
+      "table": "orders",
+      "column": "amount_fen",
+      "field_refs": [
+        "orders.amount_fen"
+      ],
+      "data_type": "bigint",
+      "unit": "CNY_fen",
+      "semantic_role": "paid_order_amount_input",
+      "access_scope": "tenant_scoped_readonly",
+      "requires_approval": false
+    },
+    {
+      "id": "field.orders.created_at",
+      "kind": "field",
+      "text": "orders.created_at 是带时区时间；指标统计按 UTC 左闭右开窗口过滤。",
+      "source_id": "commerce-v1",
+      "version": "commerce-v1",
+      "source_locator": "migrations/001_commerce_v1.sql:14",
+      "table": "orders",
+      "column": "created_at",
+      "field_refs": [
+        "orders.created_at"
+      ],
+      "data_type": "timestamptz",
+      "semantic_role": "time_window_field",
+      "access_scope": "tenant_scoped_readonly",
+      "requires_approval": false
+    },
+    {
+      "id": "table.refunds",
+      "kind": "table",
+      "text": "退款表；退款通过同一租户的 order_id 归属订单，不能脱离订单或租户单独汇总。",
+      "source_id": "commerce-v1",
+      "version": "commerce-v1",
+      "source_locator": "migrations/001_commerce_v1.sql:19-29",
+      "table": "refunds",
+      "column": null,
+      "field_refs": [
+        "refunds.tenant_id",
+        "refunds.refund_id",
+        "refunds.order_id",
+        "refunds.amount_fen",
+        "refunds.created_at"
+      ],
+      "access_scope": "tenant_scoped_readonly",
+      "requires_approval": false
+    },
+    {
+      "id": "field.refunds.refund_id",
+      "kind": "field",
+      "text": "refunds.refund_id 是租户内退款记录标识；同一订单可以有多笔退款。",
+      "source_id": "commerce-v1",
+      "version": "commerce-v1",
+      "source_locator": "migrations/001_commerce_v1.sql:22",
+      "table": "refunds",
+      "column": "refund_id",
+      "field_refs": [
+        "refunds.refund_id"
+      ],
+      "data_type": "text",
+      "semantic_role": "tenant_local_key",
+      "access_scope": "tenant_scoped_readonly",
+      "requires_approval": false
+    },
+    {
+      "id": "field.refunds.order_id",
+      "kind": "field",
+      "text": "refunds.order_id 与 orders.order_id 关联，并且必须同时匹配 tenant_id。",
+      "source_id": "commerce-v1",
+      "version": "commerce-v1",
+      "source_locator": "migrations/001_commerce_v1.sql:23,27-29",
+      "table": "refunds",
+      "column": "order_id",
+      "field_refs": [
+        "refunds.order_id",
+        "orders.order_id",
+        "refunds.tenant_id",
+        "orders.tenant_id"
+      ],
+      "data_type": "text",
+      "semantic_role": "order_join_key",
+      "access_scope": "tenant_scoped_readonly",
+      "requires_approval": false
+    },
+    {
+      "id": "field.refunds.amount_fen",
+      "kind": "field",
+      "text": "refunds.amount_fen 是以人民币分保存的非负退款金额；退款汇总要避免一单多退款重复累计订单金额。",
+      "source_id": "commerce-v1",
+      "version": "commerce-v1",
+      "source_locator": "migrations/001_commerce_v1.sql:24",
+      "table": "refunds",
+      "column": "amount_fen",
+      "field_refs": [
+        "refunds.amount_fen"
+      ],
+      "data_type": "bigint",
+      "unit": "CNY_fen",
+      "semantic_role": "refund_amount_input",
+      "access_scope": "tenant_scoped_readonly",
+      "requires_approval": false
+    },
+    {
+      "id": "field.refunds.created_at",
+      "kind": "field",
+      "text": "refunds.created_at 是退款发生时间；refund_fen 只取固定 UTC 窗口内的退款。",
+      "source_id": "commerce-v1",
+      "version": "commerce-v1",
+      "source_locator": "migrations/001_commerce_v1.sql:25",
+      "table": "refunds",
+      "column": "created_at",
+      "field_refs": [
+        "refunds.created_at"
+      ],
+      "data_type": "timestamptz",
+      "semantic_role": "time_window_field",
+      "access_scope": "tenant_scoped_readonly",
+      "requires_approval": false
+    },
+    {
+      "id": "metric.paid_count",
+      "kind": "metric",
+      "name": "已支付订单数",
+      "text": "paid_count：固定 UTC 窗口内、当前租户 status=paid 的订单数量；cancelled 不计入。",
+      "source_id": "commerce-v1",
+      "version": "commerce-v1",
+      "source_locator": "fixtures/commerce-v1.md:15,35-36",
+      "table": null,
+      "column": null,
+      "field_refs": [
+        "orders.status",
+        "orders.created_at"
+      ],
+      "unit": "count",
+      "definition": "COUNT(*) over paid orders in the half-open time window",
+      "access_scope": "tenant_scoped_readonly",
+      "requires_approval": false,
+      "phrases": [
+        "已支付订单数",
+        "已支付订单数量",
+        "已支付订单笔数",
+        "支付订单数",
+        "paid_count"
+      ]
+    },
+    {
+      "id": "metric.gross_fen",
+      "kind": "metric",
+      "name": "支付订单总额",
+      "text": "gross_fen：固定 UTC 窗口内、当前租户 paid 订单的 amount_fen 总和，单位是人民币分。",
+      "source_id": "commerce-v1",
+      "version": "commerce-v1",
+      "source_locator": "fixtures/commerce-v1.md:16,36",
+      "table": null,
+      "column": null,
+      "field_refs": [
+        "orders.status",
+        "orders.amount_fen",
+        "orders.created_at"
+      ],
+      "unit": "CNY_fen",
+      "definition": "SUM(amount_fen) over paid orders in the half-open time window",
+      "access_scope": "tenant_scoped_readonly",
+      "requires_approval": false,
+      "phrases": [
+        "支付订单总额",
+        "已支付订单总额",
+        "支付金额",
+        "支付总额",
+        "已支付金额",
+        "付款金额",
+        "付款总额",
+        "毛额",
+        "gross_fen"
+      ]
+    },
+    {
+      "id": "metric.refund_fen",
+      "kind": "metric",
+      "name": "退款金额",
+      "text": "refund_fen：固定 UTC 窗口内、当前租户且归属于窗口内 paid 订单的退款金额总和，单位是人民币分。",
+      "source_id": "commerce-v1",
+      "version": "commerce-v1",
+      "source_locator": "fixtures/commerce-v1.md:17-21",
+      "table": null,
+      "column": null,
+      "field_refs": [
+        "orders.status",
+        "orders.created_at",
+        "orders.order_id",
+        "refunds.tenant_id",
+        "refunds.order_id",
+        "refunds.amount_fen",
+        "refunds.created_at"
+      ],
+      "unit": "CNY_fen",
+      "definition": "SUM(refunds.amount_fen) after same-tenant paid-order membership and window checks",
+      "access_scope": "tenant_scoped_readonly",
+      "requires_approval": false,
+      "phrases": [
+        "退款金额",
+        "refund_fen"
+      ]
+    },
+    {
+      "id": "metric.net_fen",
+      "kind": "metric",
+      "name": "退款后净额",
+      "text": "net_fen：gross_fen 减去 refund_fen；服务端以整数分核实并以两位小数展示为元。",
+      "source_id": "commerce-v1",
+      "version": "commerce-v1",
+      "source_locator": "fixtures/commerce-v1.md:18,38,45",
+      "table": null,
+      "column": null,
+      "field_refs": [
+        "orders.status",
+        "orders.amount_fen",
+        "orders.created_at",
+        "orders.order_id",
+        "refunds.tenant_id",
+        "refunds.order_id",
+        "refunds.amount_fen",
+        "refunds.created_at"
+      ],
+      "unit": "CNY_fen",
+      "definition": "gross_fen - refund_fen; database value remains integer fen",
+      "derived_from": [
+        "metric.gross_fen",
+        "metric.refund_fen"
+      ],
+      "access_scope": "tenant_scoped_readonly",
+      "requires_approval": false,
+      "phrases": [
+        "退款后净额",
+        "净额",
+        "退款后",
+        "扣除退款",
+        "净收入",
+        "net_fen"
+      ]
+    }
+  ],
+  "clarifications": [
+    {
+      "id": "clarify.metric_basis",
+      "condition": "问题只用了含糊的金额说法（如销售额、营业额、收入、营收），没有写明支付订单总额还是退款后净额。",
+      "question": "你要看支付订单总额（gross_fen），还是退款后净额（net_fen）？",
+      "allowed_values": [
+        "gross_fen",
+        "net_fen"
+      ],
+      "ambiguous_phrases": [
+        "销售额",
+        "营业额",
+        "收入",
+        "营收"
+      ],
+      "ask_markers": [
+        "clarify.metric_basis",
+        "口径",
+        "统计方式"
+      ],
+      "values": [
+        {
+          "value": "gross_fen",
+          "metric": "gross_fen"
+        },
+        {
+          "value": "net_fen",
+          "metric": "net_fen"
+        }
+      ],
+      "resolution": "只有用户明确选择一个 metric_id 后才继续查询；否则保持 WAITING_USER。"
+    },
+    {
+      "id": "clarify.order_status_scope",
+      "condition": "问题要求订单数量（如订单数、订单数量），但没有说明只统计已支付订单，还是要包含已取消订单。",
+      "question": "请确认订单范围：只统计已支付（paid），还是需要包含已取消（cancelled）？",
+      "allowed_values": [
+        "paid",
+        "cancelled",
+        "all"
+      ],
+      "ambiguous_phrases": [
+        "订单数",
+        "订单数量",
+        "多少订单"
+      ],
+      "ask_markers": [
+        "clarify.order_status_scope",
+        "取消",
+        "订单状态",
+        "订单范围"
+      ],
+      "values": [
+        {
+          "value": "paid",
+          "metric": "paid_count",
+          "phrases": [
+            "已支付订单",
+            "已支付",
+            "已付款",
+            "只统计已支付"
+          ],
+          "definition": "只统计 status=paid 的订单；已取消订单不计入。"
+        },
+        {
+          "value": "cancelled",
+          "phrases": [
+            "已取消",
+            "取消的订单",
+            "cancelled"
+          ],
+          "definition": "只统计 status=cancelled 的订单。",
+          "supported": false,
+          "unsupported_note": "目前只核实已支付订单的数量；已取消订单或全部订单没有受支持的统计口径，所以没有执行查询。"
+        },
+        {
+          "value": "all",
+          "phrases": [
+            "全部订单",
+            "所有订单",
+            "包含已取消",
+            "包括取消"
+          ],
+          "definition": "统计全部状态的订单（已支付和已取消）。",
+          "supported": false,
+          "unsupported_note": "目前只核实已支付订单的数量；已取消订单或全部订单没有受支持的统计口径，所以没有执行查询。"
+        }
+      ],
+      "resolution": "paid 才能直接绑定 paid_count；其它范围必须先得到明确的受支持查询口径，不能让模型自行扩大指标定义。"
+    },
+    {
+      "id": "clarify.refund_window",
+      "condition": "单一取值：退款固定按同一 UTC 窗口、只计该窗口内已支付订单的退款；服务端不追问，而在回答里写明这一前提。",
+      "question": "请确认退款是否使用同一 UTC 窗口，并且只计算该窗口内已支付订单的退款？",
+      "allowed_values": [
+        "same_window_paid_orders"
+      ],
+      "ambiguous_phrases": [],
+      "ask_markers": [
+        "clarify.refund_window",
+        "退款窗口",
+        "退款时间",
+        "哪些退款",
+        "退款范围"
+      ],
+      "values": [
+        {
+          "value": "same_window_paid_orders",
+          "metric": "net_fen",
+          "phrases": [
+            "同一窗口",
+            "同一 UTC 窗口",
+            "窗口内已支付订单的退款",
+            "same_window_paid_orders"
+          ],
+          "definition": "退款按同一 UTC 窗口内、已支付订单的退款计算。"
+        }
+      ],
+      "resolution": "只有一个受支持的口径；净额结果按它计算，并在回答里写明。"
+    }
+  ]
+}
