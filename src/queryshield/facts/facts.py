@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 import hashlib
 
-from queryshield.agent.proposals import ExecutionContext, FactRef, ResultEvidence
+from queryshield.agent.proposals import ExecutionContext, FactRef, MetricBinding, ResultEvidence
 from queryshield.agent.context import NET_FEN_PLAN_ID
 from queryshield.catalog import SemanticCatalog, load_default_catalog
 
@@ -68,7 +68,7 @@ class FactsEnvelope:
 
 
 def is_scalar_metric_result(evidence: ResultEvidence) -> bool:
-    """The one rule for "this result is a tenant-wide metric value" (B3e).
+    """The one rule for "this result is a tenant-wide metric value".
 
     Exactly one row, server-bound metric bindings, and no binding from a
     grouped query.  A grouped result is a rowset of per-group values even
@@ -87,8 +87,6 @@ def is_scalar_metric_result(evidence: ResultEvidence) -> bool:
 
 
 def _metric_name(metric_id: str) -> str:
-    if not isinstance(metric_id, str) or not metric_id.strip():
-        raise FactResolutionError("invalid_metric", "metric_id must be a non-empty string")
     normalized = metric_id.removeprefix("metric.")
     if normalized not in _METRIC_LABELS:
         raise FactResolutionError("evidence_validation_failed", "metric is not in the trusted catalog")
@@ -111,11 +109,7 @@ def _fact_id(evidence: ResultEvidence, metric_id: str) -> str:
 def _display_value(metric_id: str, value: int) -> str:
     if metric_id == "paid_count":
         return f"{value}笔"
-    try:
-        yuan = Decimal(value) / Decimal(100)
-    except (InvalidOperation, ValueError) as exc:
-        raise FactResolutionError("evidence_validation_failed", "fact value cannot be displayed") from exc
-    return f"{yuan:.2f}元"
+    return f"{Decimal(value) / Decimal(100):.2f}元"
 
 
 class FactResolver:
@@ -133,7 +127,7 @@ class FactResolver:
     ) -> FactsEnvelope:
         if not isinstance(context, ExecutionContext):
             raise FactResolutionError("unauthorized", "facts require a server-created execution context")
-        if type(fact_refs) is not tuple and not isinstance(fact_refs, Sequence):
+        if not isinstance(fact_refs, Sequence):
             raise FactResolutionError("invalid_fact_refs", "fact_refs must be a sequence")
         if len(fact_refs) > 10:
             raise FactResolutionError("invalid_fact_refs", "fact_refs has too many items")
@@ -149,63 +143,9 @@ class FactResolver:
                 raise FactResolutionError("invalid_fact_refs", "fact_refs must be deduplicated")
             seen.add(key)
 
-            evidence = evidences.get(ref.result_id)
-            if not isinstance(evidence, ResultEvidence):
-                raise FactResolutionError("evidence_validation_failed", "result evidence was not found")
-            if evidence.result_id != ref.result_id:
-                raise FactResolutionError("evidence_validation_failed", "result identity does not match")
-            if (
-                evidence.run_id != context.run_id
-                or evidence.tenant_id != context.tenant_id
-                or evidence.principal_id != context.principal_id
-            ):
-                raise FactResolutionError("evidence_validation_failed", "result evidence is outside the current subject")
-            if evidence.catalog_version != self._catalog.catalog_version:
-                raise FactResolutionError("evidence_validation_failed", "result uses an incompatible catalog version")
-            if evidence.row_count != 1 or len(evidence.rows) != 1:
-                raise FactResolutionError("evidence_validation_failed", "a metric fact needs one aggregate result row")
-
-            entry = self._catalog.metric(metric_id)
-            binding = next(
-                (
-                    item
-                    for item in evidence.metric_bindings
-                    if item.metric_id.removeprefix("metric.") == metric_id
-                ),
-                None,
-            )
-            if binding is None:
-                raise FactResolutionError("evidence_validation_failed", "result has no trusted binding for the metric")
-            if binding.grouped:
-                raise FactResolutionError("evidence_validation_failed", "a grouped result is a rowset, not a metric fact")
-            if (
-                binding.catalog_source_id != entry.source_id
-                or binding.catalog_version != evidence.catalog_version
-                or binding.unit != entry.payload.get("unit")
-                or not isinstance(binding.result_position, str)
-            ):
-                raise FactResolutionError("evidence_validation_failed", "metric binding does not match the catalog")
-            if metric_id == "net_fen" and (
-                binding.plan_id != NET_FEN_PLAN_ID
-                or evidence.metric_plan_id != NET_FEN_PLAN_ID
-                or binding.time_window.get("timezone") != "UTC"
-            ):
-                raise FactResolutionError(
-                    "evidence_validation_failed",
-                    "net_fen binding does not match the controlled metric plan",
-                )
-
-            row = evidence.rows[0]
-            if binding.result_position not in row:
-                raise FactResolutionError("evidence_validation_failed", "bound result column is absent")
-            value = row[binding.result_position]
-            if type(value) is not int:
-                raise FactResolutionError("evidence_validation_failed", "fact values must be integer count or fen")
-            if metric_id == "paid_count" and value < 0:
-                raise FactResolutionError("evidence_validation_failed", "count facts cannot be negative")
-            if metric_id in {"gross_fen", "refund_fen"} and value < 0:
-                raise FactResolutionError("evidence_validation_failed", "raw money facts cannot be negative")
-
+            evidence = self._owned_evidence(ref, context, evidences)
+            binding = self._trusted_binding(evidence, metric_id)
+            value = _bound_value(evidence, binding, metric_id)
             facts.append(
                 Fact(
                     fact_id=_fact_id(evidence, metric_id),
@@ -221,6 +161,77 @@ class FactResolver:
                 )
             )
         return FactsEnvelope(schema_version=FACTS_SCHEMA_VERSION, facts=tuple(facts))
+
+    def _owned_evidence(
+        self,
+        ref: FactRef,
+        context: ExecutionContext,
+        evidences: Mapping[str, ResultEvidence],
+    ) -> ResultEvidence:
+        """The referenced evidence, when it belongs to this subject and is one aggregate row."""
+
+        evidence = evidences.get(ref.result_id)
+        if not isinstance(evidence, ResultEvidence):
+            raise FactResolutionError("evidence_validation_failed", "result evidence was not found")
+        if evidence.result_id != ref.result_id:
+            raise FactResolutionError("evidence_validation_failed", "result identity does not match")
+        if (
+            evidence.run_id != context.run_id
+            or evidence.tenant_id != context.tenant_id
+            or evidence.principal_id != context.principal_id
+        ):
+            raise FactResolutionError("evidence_validation_failed", "result evidence is outside the current subject")
+        if evidence.catalog_version != self._catalog.catalog_version:
+            raise FactResolutionError("evidence_validation_failed", "result uses an incompatible catalog version")
+        if evidence.row_count != 1 or len(evidence.rows) != 1:
+            raise FactResolutionError("evidence_validation_failed", "a metric fact needs one aggregate result row")
+        return evidence
+
+    def _trusted_binding(self, evidence: ResultEvidence, metric_id: str) -> MetricBinding:
+        """The server binding for the metric, when it is ungrouped and matches the catalog."""
+
+        entry = self._catalog.metric(metric_id)
+        binding = next(
+            (item for item in evidence.metric_bindings if item.metric_id.removeprefix("metric.") == metric_id),
+            None,
+        )
+        if binding is None:
+            raise FactResolutionError("evidence_validation_failed", "result has no trusted binding for the metric")
+        if binding.grouped:
+            raise FactResolutionError("evidence_validation_failed", "a grouped result is a rowset, not a metric fact")
+        if (
+            binding.catalog_source_id != entry.source_id
+            or binding.catalog_version != evidence.catalog_version
+            or binding.unit != entry.payload.get("unit")
+            or not isinstance(binding.result_position, str)
+        ):
+            raise FactResolutionError("evidence_validation_failed", "metric binding does not match the catalog")
+        if metric_id == "net_fen" and (
+            binding.plan_id != NET_FEN_PLAN_ID
+            or evidence.metric_plan_id != NET_FEN_PLAN_ID
+            or binding.time_window.get("timezone") != "UTC"
+        ):
+            raise FactResolutionError(
+                "evidence_validation_failed",
+                "net_fen binding does not match the controlled metric plan",
+            )
+        return binding
+
+
+def _bound_value(evidence: ResultEvidence, binding: MetricBinding, metric_id: str) -> int:
+    """The value in the bound column: an integer count or fen, never negative where it is raw."""
+
+    row = evidence.rows[0]
+    if binding.result_position not in row:
+        raise FactResolutionError("evidence_validation_failed", "bound result column is absent")
+    value = row[binding.result_position]
+    if type(value) is not int:
+        raise FactResolutionError("evidence_validation_failed", "fact values must be integer count or fen")
+    if metric_id == "paid_count" and value < 0:
+        raise FactResolutionError("evidence_validation_failed", "count facts cannot be negative")
+    if metric_id in {"gross_fen", "refund_fen"} and value < 0:
+        raise FactResolutionError("evidence_validation_failed", "raw money facts cannot be negative")
+    return value
 
 
 def resolve_fact_refs(

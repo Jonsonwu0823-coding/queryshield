@@ -25,7 +25,7 @@ CATALOG_V2_PATH = Path(__file__).parents[1] / "fixtures" / "semantic" / "catalog
 def test_catalog_v1_is_traceable_and_search_shape_is_narrow() -> None:
     catalog = load_default_catalog()
 
-    # The product default is catalog-v4 (B3c-1); its version constant is the one
+    # The product default is catalog-v4; its version constant is the one
     # every default executor/run config/approval reads.
     assert catalog.catalog_version == DEFAULT_CATALOG_VERSION == CATALOG_V4_VERSION
     assert DEFAULT_CATALOG_PATH.name == "catalog-v4.json"

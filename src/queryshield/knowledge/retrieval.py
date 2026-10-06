@@ -1,22 +1,24 @@
-"""Hybrid catalog/knowledge retrieval for the W03 semantic tool boundary."""
+"""Hybrid catalog/knowledge retrieval behind the semantic search tool."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
-import math
-import re
 from time import perf_counter
 from uuid import uuid4
 
 from queryshield.agent.proposals import ExecutionContext
-from queryshield.catalog.catalog import CatalogEntry, SemanticCatalog
+from queryshield.catalog.catalog import SemanticCatalog
+from queryshield.catalog.search_terms import expanded_query_terms
+from queryshield.knowledge.acl import catalog_entry_visible, source_visible
 from queryshield.knowledge.index import EmbeddingAdapter, EmbeddingIndex, cosine_similarity
-from queryshield.knowledge.ingest import KnowledgeSnapshot, SourceRecord
+from queryshield.knowledge.ingest import KnowledgeSnapshot
+from queryshield.policy.argument_limits import TOP_K_RANGE
 from queryshield.providers.embedding import EmbeddingCallResult
 from queryshield.providers.rerank import (
     RerankAdapter,
+    RerankCallRecord,
     RerankCandidate,
     rerank_authorized_candidates,
 )
@@ -26,23 +28,11 @@ RETRIEVAL_VERSION = "hybrid-v1"
 KEYWORD_SYNONYM_VERSION = "keyword-synonym-v1"
 RRF_K = 60
 MAX_ROUTE_CANDIDATES = 10
-# W03 uses a conservative absolute floor for vector-only evidence.  A
-# positive cosine value is not enough: unrelated real embeddings commonly
-# have a small positive cosine against some corpus item.  W05 may calibrate
-# this policy on the development set; it must not be changed per probe.
+# A conservative absolute floor for vector-only evidence.  A positive cosine
+# value is not enough: unrelated real embeddings commonly have a small positive
+# cosine against some corpus item.  Calibrate it on the development set, never
+# per probe.
 VECTOR_MIN_SIMILARITY = 0.60
-_TOKEN_RE = re.compile(r"[a-z0-9_]+|[\u4e00-\u9fff]+")
-_SYNONYMS: dict[str, tuple[str, ...]] = {
-    "已支付订单数": ("paid_count", "paid"),
-    "订单数量": ("paid_count",),
-    "营业额": ("gross_fen",),
-    "支付订单总额": ("gross_fen",),
-    "销售额": ("gross_fen", "net_fen"),
-    "退款": ("refund_fen",),
-    "退款金额": ("refund_fen",),
-    "净额": ("net_fen",),
-    "退款后": ("net_fen",),
-}
 
 
 class RetrievalConfigurationError(ValueError):
@@ -51,35 +41,6 @@ class RetrievalConfigurationError(ValueError):
 
 def _query_hash(query: str) -> str:
     return sha256(query.encode("utf-8")).hexdigest()
-
-
-def _tokens(value: str) -> set[str]:
-    return set(_TOKEN_RE.findall(value.lower()))
-
-
-def _expanded_query_terms(query: str) -> set[str]:
-    terms = _tokens(query)
-    for phrase, replacements in _SYNONYMS.items():
-        if phrase in query:
-            for replacement in replacements:
-                terms.update(_tokens(replacement))
-    return terms
-
-
-def _tenant_matches(scope: str, tenant_id: str) -> bool:
-    """Match the fixture's trusted A/B scope to the server identity only."""
-
-    if scope == "global":
-        return True
-    return tenant_id == scope or tenant_id == f"tenant-{scope}"
-
-
-def _source_visible(source: SourceRecord, context: ExecutionContext) -> bool:
-    return (
-        source.status == "active"
-        and context.role in source.allowed_roles
-        and _tenant_matches(source.tenant_scope, context.tenant_id)
-    )
 
 
 @dataclass(frozen=True)
@@ -185,18 +146,11 @@ def _keyword_score(candidate: RetrievalCandidate, query: str, terms: set[str]) -
     return score
 
 
-def _rank_keyword(
-    candidates: Mapping[str, RetrievalCandidate],
-    query: str,
-) -> tuple[str, ...]:
-    return tuple(candidate_id for candidate_id, _ in _rank_keyword_scored(candidates, query))
-
-
 def _rank_keyword_scored(
     candidates: Mapping[str, RetrievalCandidate],
     query: str,
 ) -> tuple[tuple[str, int], ...]:
-    terms = _expanded_query_terms(query)
+    terms = expanded_query_terms(query)
     scored = [
         (score, candidate_id)
         for candidate_id, candidate in candidates.items()
@@ -216,7 +170,7 @@ def _visible_candidates(
         raise RetrievalConfigurationError("retrieval requires a server-created context")
     candidates: dict[str, RetrievalCandidate] = {}
     for entry in catalog.entries:
-        if entry.requires_approval and context.role != "approver":
+        if not catalog_entry_visible(entry, context.role):
             continue
         candidate = RetrievalCandidate(
             candidate_id=entry.id,
@@ -238,7 +192,7 @@ def _visible_candidates(
         source = sources.get(source_id) if type(source_id) is str else None
         if source is None or source.version != source_version:
             raise RetrievalConfigurationError("index chunk is not bound to the snapshot source")
-        if not _source_visible(source, context):
+        if not source_visible(source, context):
             continue
         if any(type(value) is not str for value in (chunk_id, chunk_text, source_version)):
             raise RetrievalConfigurationError("snapshot chunk has invalid identity or content")
@@ -331,6 +285,108 @@ def _embedding_actual_return(result: EmbeddingCallResult) -> dict[str, object]:
     }
 
 
+def _check_search_args(query: object, top_k: object) -> None:
+    if type(query) is not str or not query.strip():
+        raise RetrievalConfigurationError("query must be a non-empty string")
+    if type(top_k) is not int or not TOP_K_RANGE[0] <= top_k <= TOP_K_RANGE[1]:
+        raise RetrievalConfigurationError("top_k must be between one and five")
+
+
+def _rerank_ranking(
+    reranker: RerankAdapter,
+    query: str,
+    ranking: tuple[RetrievalRank, ...],
+    candidates: Mapping[str, RetrievalCandidate],
+) -> tuple[tuple[RetrievalRank, ...], RerankCallRecord | None]:
+    """Reorder the top candidates by the reranker; a failed rerank leaves no ranking at all."""
+
+    candidate_pool = ranking[:MAX_ROUTE_CANDIDATES]
+    rerank_candidates = tuple(
+        RerankCandidate(
+            candidate_id=rank.candidate_id,
+            text=candidates[rank.candidate_id].text,
+            source_id=candidates[rank.candidate_id].source_id,
+            version=candidates[rank.candidate_id].version,
+        )
+        for rank in candidate_pool
+    )
+    rerank_call, _filtered_ids = rerank_authorized_candidates(
+        reranker,
+        query,
+        rerank_candidates,
+        authorized_candidate_ids=frozenset(candidates),
+        # Overfetch within the existing <=10 candidate bound so
+        # catalog fields from one source do not crowd out documents.
+        top_n=len(rerank_candidates),
+    )
+    if rerank_call is None or rerank_call.status != "succeeded":
+        # Do not hide a failed rerank by silently returning the pre-rerank hybrid
+        # ranking as if it succeeded.
+        return (), rerank_call
+    ranks_by_id = {rank.candidate_id: rank for rank in candidate_pool}
+    scores_by_id = dict(zip(rerank_call.returned_candidate_ids, rerank_call.scores, strict=True))
+    reranked = tuple(
+        RetrievalRank(
+            candidate_id=candidate_id,
+            keyword_rank=ranks_by_id[candidate_id].keyword_rank,
+            vector_rank=ranks_by_id[candidate_id].vector_rank,
+            rrf_score=ranks_by_id[candidate_id].rrf_score,
+            final_rank=rank,
+            rerank_score=scores_by_id[candidate_id],
+            keyword_score=ranks_by_id[candidate_id].keyword_score,
+        )
+        for rank, candidate_id in enumerate(rerank_call.returned_candidate_ids, start=1)
+    )
+    return reranked, rerank_call
+
+
+def _finish(
+    *,
+    started: float,
+    retrieval_id: str,
+    context: ExecutionContext,
+    query: str,
+    snapshot_id: str,
+    strategy_version: str,
+    candidates: Mapping[str, RetrievalCandidate],
+    keyword_ids: Sequence[str],
+    vector_ids: Sequence[str],
+    ranking: tuple[RetrievalRank, ...],
+    top_k: int,
+    embedding: EmbeddingCallResult | None = None,
+    rerank_call: RerankCallRecord | None = None,
+) -> RetrievalResult:
+    # Catalog entries and knowledge chunks may come from one shared source.
+    # Returning several catalog fields from that source can crowd out the
+    # separately versioned documents that explain the same answer. Keep the
+    # ranked evidence intact, but expose at most one result per source.
+    selected = _select_top_k(ranking, candidates, top_k)
+    elapsed_ms = max(0, int(round((perf_counter() - started) * 1000)))
+    evidence = RetrievalEvidence(
+        retrieval_id=retrieval_id,
+        run_id=context.run_id,
+        query_sha256=_query_hash(query),
+        snapshot_id=snapshot_id,
+        strategy_version=strategy_version,
+        visible_candidate_ids=tuple(sorted(candidates)),
+        keyword_candidate_ids=tuple(keyword_ids),
+        vector_candidate_ids=tuple(vector_ids),
+        ranking=ranking,
+        selected_ids=tuple(item.candidate_id for item in selected),
+        embedding_call_id=embedding.model_call_id if embedding is not None else None,
+        embedding_provider_call_id=embedding.provider_call_id if embedding is not None else None,
+        embedding_provider_request_id=embedding.provider_request_id if embedding is not None else None,
+        embedding_actual_return=_embedding_actual_return(embedding) if embedding is not None else None,
+        rerank_call_id=rerank_call.call_id if rerank_call is not None else None,
+        rerank_call=rerank_call.as_dict() if rerank_call is not None else None,
+        elapsed_ms=elapsed_ms,
+    )
+    return RetrievalResult(
+        items=tuple(candidates[item.candidate_id].as_public_item() for item in selected),
+        evidence=evidence,
+    )
+
+
 @dataclass
 class HybridRetriever:
     """Two-route retrieval over catalog entries and one versioned knowledge index."""
@@ -348,6 +404,10 @@ class HybridRetriever:
             raise RetrievalConfigurationError("snapshot and index model revisions do not match")
         if self.snapshot.embedding_dimensions != self.index.dimensions:
             raise RetrievalConfigurationError("snapshot and index dimensions do not match")
+        if self.embedder.model_revision != self.index.model_revision:
+            raise RetrievalConfigurationError("query embedding revision does not match the index")
+        if self.embedder.dimensions != self.index.dimensions:
+            raise RetrievalConfigurationError("query embedding dimensions do not match the index")
 
     def _visible_candidates(self, context: ExecutionContext) -> dict[str, RetrievalCandidate]:
         return _visible_candidates(self.catalog, self.snapshot, context, self.index.chunks)
@@ -359,11 +419,7 @@ class HybridRetriever:
         context: ExecutionContext,
         top_k: int = 3,
     ) -> RetrievalResult:
-        if type(query) is not str or not query.strip():
-            raise RetrievalConfigurationError("query must be a non-empty string")
-        if type(top_k) is not int or not 1 <= top_k <= 5:
-            raise RetrievalConfigurationError("top_k must be between one and five")
-
+        _check_search_args(query, top_k)
         started = perf_counter()
         retrieval_id = f"retrieval-{uuid4()}"
         candidates = self._visible_candidates(context)
@@ -374,90 +430,25 @@ class HybridRetriever:
             request_id=f"{retrieval_id}-request",
             model_call_id=f"{retrieval_id}-embedding",
         )
-        if not isinstance(embedding, EmbeddingCallResult):
-            raise RetrievalConfigurationError("embedding adapter returned an invalid result")
-        if embedding.model_revision != self.index.model_revision:
-            raise RetrievalConfigurationError("query embedding revision does not match the index")
-        if embedding.dimensions != self.index.dimensions:
-            raise RetrievalConfigurationError("query embedding dimensions do not match the index")
-        if len(embedding.vectors) != 1:
-            raise RetrievalConfigurationError("query embedding must return one vector")
-        if embedding.usage.model_call_id != embedding.model_call_id:
-            raise RetrievalConfigurationError("query embedding usage is not call-bound")
         vector_ids = _rank_vector(candidates, self.index, embedding.vectors[0])
-        ranking = _rrf_ranking(
-            keyword_ids,
-            vector_ids,
-            keyword_scores=dict(keyword_scored),
-        )
+        ranking = _rrf_ranking(keyword_ids, vector_ids, keyword_scores=dict(keyword_scored))
         rerank_call = None
         if self.reranker is not None and ranking:
-            candidate_pool = ranking[:MAX_ROUTE_CANDIDATES]
-            rerank_candidates = tuple(
-                RerankCandidate(
-                    candidate_id=rank.candidate_id,
-                    text=candidates[rank.candidate_id].text,
-                    source_id=candidates[rank.candidate_id].source_id,
-                    version=candidates[rank.candidate_id].version,
-                )
-                for rank in candidate_pool
-            )
-            rerank_call, _filtered_ids = rerank_authorized_candidates(
-                self.reranker,
-                query,
-                rerank_candidates,
-                authorized_candidate_ids=frozenset(candidates),
-                # Overfetch within the existing <=10 candidate bound so
-                # catalog fields from one source do not crowd out documents.
-                top_n=len(rerank_candidates),
-            )
-            if rerank_call is not None and rerank_call.status == "succeeded":
-                ranks_by_id = {rank.candidate_id: rank for rank in candidate_pool}
-                scores_by_id = dict(zip(rerank_call.returned_candidate_ids, rerank_call.scores, strict=True))
-                ranking = tuple(
-                    RetrievalRank(
-                        candidate_id=candidate_id,
-                        keyword_rank=ranks_by_id[candidate_id].keyword_rank,
-                        vector_rank=ranks_by_id[candidate_id].vector_rank,
-                        rrf_score=ranks_by_id[candidate_id].rrf_score,
-                        final_rank=rank,
-                        rerank_score=scores_by_id[candidate_id],
-                        keyword_score=ranks_by_id[candidate_id].keyword_score,
-                    )
-                    for rank, candidate_id in enumerate(rerank_call.returned_candidate_ids, start=1)
-                )
-            else:
-                # A failed rerank remains a failed retrieval operation. Do not hide it
-                # by silently returning the pre-rerank hybrid ranking as if it succeeded.
-                ranking = ()
-        # Catalog entries and knowledge chunks may come from one shared source.
-        # Returning several catalog fields from that source can crowd out the
-        # separately versioned documents that explain the same answer. Keep the
-        # ranked evidence intact, but expose at most one result per source.
-        selected = _select_top_k(ranking, candidates, top_k)
-        elapsed_ms = max(0, int(round((perf_counter() - started) * 1000)))
-        evidence = RetrievalEvidence(
+            ranking, rerank_call = _rerank_ranking(self.reranker, query, ranking, candidates)
+        return _finish(
+            started=started,
             retrieval_id=retrieval_id,
-            run_id=context.run_id,
-            query_sha256=_query_hash(query),
+            context=context,
+            query=query,
             snapshot_id=self.index.snapshot_id,
             strategy_version=RETRIEVAL_VERSION,
-            visible_candidate_ids=tuple(sorted(candidates)),
-            keyword_candidate_ids=tuple(keyword_ids),
-            vector_candidate_ids=tuple(vector_ids),
+            candidates=candidates,
+            keyword_ids=keyword_ids,
+            vector_ids=vector_ids,
             ranking=ranking,
-            selected_ids=tuple(item.candidate_id for item in selected),
-            embedding_call_id=embedding.model_call_id,
-            embedding_provider_call_id=embedding.provider_call_id,
-            embedding_provider_request_id=embedding.provider_request_id,
-            embedding_actual_return=_embedding_actual_return(embedding),
-            rerank_call_id=rerank_call.call_id if rerank_call is not None else None,
-            rerank_call=rerank_call.as_dict() if rerank_call is not None else None,
-            elapsed_ms=elapsed_ms,
-        )
-        return RetrievalResult(
-            items=tuple(candidates[item.candidate_id].as_public_item() for item in selected),
-            evidence=evidence,
+            top_k=top_k,
+            embedding=embedding,
+            rerank_call=rerank_call,
         )
 
 
@@ -475,11 +466,7 @@ class KeywordSynonymRetriever:
         context: ExecutionContext,
         top_k: int = 3,
     ) -> RetrievalResult:
-        if type(query) is not str or not query.strip():
-            raise RetrievalConfigurationError("query must be a non-empty string")
-        if type(top_k) is not int or not 1 <= top_k <= 5:
-            raise RetrievalConfigurationError("top_k must be between one and five")
-
+        _check_search_args(query, top_k)
         started = perf_counter()
         retrieval_id = f"retrieval-{uuid4()}"
         candidates = _visible_candidates(
@@ -489,7 +476,6 @@ class KeywordSynonymRetriever:
             self.snapshot.chunk_records,
         )
         keyword_scored = _rank_keyword_scored(candidates, query)
-        keyword_ids = tuple(candidate_id for candidate_id, _ in keyword_scored)
         ranking = tuple(
             RetrievalRank(
                 candidate_id=candidate_id,
@@ -501,30 +487,18 @@ class KeywordSynonymRetriever:
             )
             for rank, (candidate_id, score) in enumerate(keyword_scored, start=1)
         )
-        selected = _select_top_k(ranking, candidates, top_k)
-        elapsed_ms = max(0, int(round((perf_counter() - started) * 1000)))
-        evidence = RetrievalEvidence(
+        return _finish(
+            started=started,
             retrieval_id=retrieval_id,
-            run_id=context.run_id,
-            query_sha256=_query_hash(query),
+            context=context,
+            query=query,
             snapshot_id=self.snapshot.snapshot_id,
             strategy_version=KEYWORD_SYNONYM_VERSION,
-            visible_candidate_ids=tuple(sorted(candidates)),
-            keyword_candidate_ids=keyword_ids,
-            vector_candidate_ids=(),
+            candidates=candidates,
+            keyword_ids=tuple(candidate_id for candidate_id, _ in keyword_scored),
+            vector_ids=(),
             ranking=ranking,
-            selected_ids=tuple(item.candidate_id for item in selected),
-            embedding_call_id=None,
-            embedding_provider_call_id=None,
-            embedding_provider_request_id=None,
-            embedding_actual_return=None,
-            rerank_call_id=None,
-            rerank_call=None,
-            elapsed_ms=elapsed_ms,
-        )
-        return RetrievalResult(
-            items=tuple(candidates[item.candidate_id].as_public_item() for item in selected),
-            evidence=evidence,
+            top_k=top_k,
         )
 
 

@@ -16,7 +16,7 @@ TENANT_FIXTURE_COUNTS = {"A": (2, 3, 2), "B": (1, 1, 1)}
 def tenant_bound_counts(conn) -> dict[str, tuple[int, int, int]]:
     """Row counts per tenant, read with the server-bound tenant context.
 
-    Since W04 the tables force row-level security keyed on the transaction's
+    The tables force row-level security keyed on the transaction's
     tenant, so an unbound read sees no rows; each count binds its tenant first,
     the way the product does.  Each read runs in its own transaction.
     """

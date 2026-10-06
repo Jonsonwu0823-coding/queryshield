@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, TypeAlias
+
+from queryshield.catalog.catalog import ALLOWED_TABLE_COLUMNS
 
 
 class SQLPolicyError(ValueError):
@@ -29,7 +32,6 @@ TokenKind = Literal[
 class _Token:
     kind: TokenKind
     text: str
-    position: int
 
 
 @dataclass(frozen=True)
@@ -57,12 +59,6 @@ class Star:
 class FunctionCall:
     name: str
     arguments: tuple[Expression, ...]
-
-
-@dataclass(frozen=True)
-class UnaryExpression:
-    operator: str
-    operand: Expression
 
 
 @dataclass(frozen=True)
@@ -97,7 +93,6 @@ Expression: TypeAlias = (
     | ParameterRef
     | Star
     | FunctionCall
-    | UnaryExpression
     | BinaryExpression
 )
 Condition: TypeAlias = Comparison | BooleanExpression | NotExpression
@@ -144,6 +139,15 @@ class SelectStatement:
         return (self.from_table.name,) + tuple(join.table.name for join in self.joins)
 
     @property
+    def table_aliases(self) -> dict[str, str]:
+        """The table behind each name the query uses for it (the alias, else the table name)."""
+
+        return {
+            table.alias or table.name: table.name
+            for table in (self.from_table,) + tuple(join.table for join in self.joins)
+        }
+
+    @property
     def function_names(self) -> tuple[str, ...]:
         names: list[str] = []
         for item in self.projection:
@@ -155,7 +159,10 @@ class SelectStatement:
         return tuple(names)
 
 
-ALLOWED_TABLES = frozenset({"customers", "orders", "refunds"})
+# The version recorded on every result, run configuration and approval.  Bump it
+# when the accepted SQL subset or the rendering rules change.
+SQL_POLICY_VERSION = "qs-sql-v1"
+ALLOWED_TABLES = frozenset(ALLOWED_TABLE_COLUMNS)
 ALLOWED_FUNCTIONS = frozenset({"SUM", "COUNT", "COALESCE"})
 MAX_SQL_LENGTH = 4000
 MAX_RESULT_ROWS = 100
@@ -212,6 +219,7 @@ _KEYWORDS = frozenset(
 _MULTI_OPERATORS = frozenset({"<=", ">=", "<>", "!=", "::"})
 _SYMBOLS = frozenset({"(", ")", ",", ".", "*", ";"})
 _SINGLE_OPERATORS = frozenset({"=", "<", ">", "+", "-"})
+_ASCII_DIGITS = frozenset("0123456789")
 
 
 def parse_readonly_select(sql: str) -> SelectStatement:
@@ -243,43 +251,43 @@ def _tokenize(sql: str) -> tuple[_Token, ...]:
             end = index + 1
             while end < len(sql) and (sql[end].isalnum() or sql[end] == "_"):
                 end += 1
-            tokens.append(_Token("word", sql[index:end], index))
+            tokens.append(_Token("word", sql[index:end]))
             index = end
             continue
 
-        if char.isdigit():
+        if char in _ASCII_DIGITS:
             end = index + 1
-            while end < len(sql) and sql[end].isdigit():
+            while end < len(sql) and sql[end] in _ASCII_DIGITS:
                 end += 1
             if end < len(sql) and sql[end] == ".":
                 end += 1
                 fraction_start = end
-                while end < len(sql) and sql[end].isdigit():
+                while end < len(sql) and sql[end] in _ASCII_DIGITS:
                     end += 1
                 if end == fraction_start:
                     raise SQLPolicyError("invalid_sql", "invalid numeric literal")
-            tokens.append(_Token("number", sql[index:end], index))
+            tokens.append(_Token("number", sql[index:end]))
             index = end
             continue
 
         if char == "'":
             value, end = _read_string(sql, index)
-            tokens.append(_Token("string", value, index))
+            tokens.append(_Token("string", value))
             index = end
             continue
 
         if char == '"':
             value, end = _read_quoted_identifier(sql, index)
-            tokens.append(_Token("quoted_identifier", value, index))
+            tokens.append(_Token("quoted_identifier", value))
             index = end
             continue
 
         if sql.startswith("%s", index):
-            tokens.append(_Token("parameter", "%s", index))
+            tokens.append(_Token("parameter", "%s"))
             index += 2
             continue
         if char == "?":
-            tokens.append(_Token("parameter", "?", index))
+            tokens.append(_Token("parameter", "?"))
             index += 1
             continue
 
@@ -287,21 +295,21 @@ def _tokenize(sql: str) -> tuple[_Token, ...]:
         if operator in _MULTI_OPERATORS:
             if operator == "::":
                 raise SQLPolicyError("unsupported_syntax", "casts are not supported")
-            tokens.append(_Token("operator", operator, index))
+            tokens.append(_Token("operator", operator))
             index += 2
             continue
         if char in _SINGLE_OPERATORS:
-            tokens.append(_Token("operator", char, index))
+            tokens.append(_Token("operator", char))
             index += 1
             continue
         if char in _SYMBOLS:
-            tokens.append(_Token("symbol", char, index))
+            tokens.append(_Token("symbol", char))
             index += 1
             continue
 
         raise SQLPolicyError("invalid_sql", "SQL contains an unsupported character")
 
-    tokens.append(_Token("eof", "", len(sql)))
+    tokens.append(_Token("eof", ""))
     return tuple(tokens)
 
 
@@ -501,7 +509,12 @@ class _Parser:
             return parameter
         if token.kind == "number":
             self._advance()
-            return LiteralValue(float(token.text) if "." in token.text else int(token.text))
+            if "." not in token.text:
+                return LiteralValue(int(token.text))
+            number = float(token.text)
+            if not math.isfinite(number):
+                raise SQLPolicyError("invalid_sql", "invalid numeric literal")
+            return LiteralValue(number)
         if token.kind == "string":
             self._advance()
             return LiteralValue(token.text)
@@ -538,9 +551,8 @@ class _Parser:
         expected_arguments = {"SUM": 1, "COUNT": 1, "COALESCE": 2}[name]
         if len(arguments) != expected_arguments:
             raise SQLPolicyError("invalid_sql", f"{name} received the wrong number of arguments")
-        if name in {"SUM", "COUNT"} and len(arguments) == 1 and isinstance(arguments[0], Star):
-            if name != "COUNT":
-                raise SQLPolicyError("invalid_sql", "SUM does not accept wildcard input")
+        if name == "SUM" and isinstance(arguments[0], Star):
+            raise SQLPolicyError("invalid_sql", "SUM does not accept wildcard input")
         return FunctionCall(name=name, arguments=tuple(arguments))
 
     def _parse_column(self) -> ColumnRef:
@@ -648,8 +660,6 @@ def _collect_function_names(expression: Expression, names: list[str]) -> None:
         names.append(expression.name)
         for argument in expression.arguments:
             _collect_function_names(argument, names)
-    elif isinstance(expression, UnaryExpression):
-        _collect_function_names(expression.operand, names)
     elif isinstance(expression, BinaryExpression):
         _collect_function_names(expression.left, names)
         _collect_function_names(expression.right, names)

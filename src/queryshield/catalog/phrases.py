@@ -69,7 +69,10 @@ class PhraseIndex:
             for value in rule.values:
                 for phrase in value.phrases:
                     self._explicit[phrase.casefold()] = (phrase, frozenset(), frozenset({(rule.id, value.value)}))
-        self._ambiguous = tuple((phrase.casefold(), rule.id) for rule in self.rules for phrase in rule.ambiguous_phrases)
+        # (casefolded phrase, rule id, catalog spelling)
+        self._ambiguous = tuple(
+            (phrase.casefold(), rule.id, phrase) for rule in self.rules for phrase in rule.ambiguous_phrases
+        )
         # Recognizing which rule a model's question is about (never the user's
         # text).  A metric phrase points at a rule only when that metric is one
         # of the rule's options ("退款后净额" asks about metric_basis, not about
@@ -86,7 +89,7 @@ class PhraseIndex:
                 self._add_ask_term(key, {rule_id for metric in metrics for rule_id in option_rules.get(metric, ())})
             else:
                 self._add_ask_term(key, {rule_id for rule_id, _ in values})
-        for key, rule_id in self._ambiguous:
+        for key, rule_id, _ in self._ambiguous:
             self._add_ask_term(key, {rule_id})
         for rule in self.rules:
             for marker in rule.ask_markers:
@@ -109,13 +112,11 @@ class PhraseIndex:
 
         folded = text.casefold()
         found: list[tuple[str, str]] = []
-        for key, rule_id in self._ambiguous:
+        for key, rule_id, spelling in self._ambiguous:
             start = folded.find(key)
             while start >= 0:
                 end = start + len(key)
                 if not any(hit.start <= start and end <= hit.end for hit in hits):
-                    rule = self.catalog.clarification(rule_id)
-                    spelling = next(item for item in rule.ambiguous_phrases if item.casefold() == key)
                     found.append((rule_id, spelling))
                 start = folded.find(key, start + 1)
         return tuple(found)
@@ -141,7 +142,7 @@ class PhraseIndex:
         signals: dict[str, tuple[str, ...]] = {}
         for rule in self.rules:
             kinds = []
-            if len(rule.values) > 1 and len(_values_named(hits, rule.id)) >= 2:
+            if _names_two_values(hits, rule):
                 kinds.append("two_values")
             if any(marker.casefold() in folded for marker in rule.ask_markers):
                 kinds.append("marker")
@@ -149,14 +150,13 @@ class PhraseIndex:
                 signals[rule.id] = tuple(kinds)
         return signals
 
-    def rules_asked_by(self, text: str) -> frozenset[str]:
-        """Rules the ask's wording really asks the user to choose in (strong signal)."""
-
-        return frozenset(self.ask_signals(text))
-
 
 def _values_named(hits: Iterable[PhraseHit], rule_id: str) -> frozenset[str]:
     return frozenset(value for hit in hits for owner, value in hit.values if owner == rule_id)
+
+
+def _names_two_values(hits: Iterable[PhraseHit], rule: ClarificationRule) -> bool:
+    return len(rule.values) > 1 and len(_values_named(hits, rule.id)) >= 2
 
 
 RuleStatus = Literal["single", "resolved", "open", "mixed", "silent"]
@@ -375,11 +375,11 @@ def _window_only(window: Mapping[str, str] | None) -> dict[str, str] | None:
     return {"start": window["start"], "end": window["end"]} if window is not None else None
 
 
-# The B3b text, with or without a request window.  A request without a window
-# usually still states the month in the question (every W05 critical case), so
+# The text sent with or without a request window.  A request without a window
+# usually still states the month in the question (every critical case), so
 # a hint that also allowed "ask only for the time range" sent a real model back
-# to asking about the basis (B3c-1 R2).  The time-range rule stays in the
-# contract (CLARIFICATION_APPLY_RULE).
+# to asking about the basis.  The time-range rule stays in the contract
+# (CLARIFICATION_APPLY_RULE).
 NOT_NEEDED_ACTION = (
     "Do not ask_user about this rule: the question already names its value (or the rule has one value). "
     "Send a tool_call named query_readonly that declares the named metric."
@@ -390,18 +390,29 @@ CONTRADICTION_ACTION = (
 )
 
 
+def _repair_hint(
+    action: str,
+    reading: ClarificationReading,
+    rule: ClarificationRule,
+    request_time_window: Mapping[str, str] | None,
+) -> dict[str, object]:
+    """Fixed action text plus catalog strings and the request window; never model or user text."""
+
+    return {
+        "action": action,
+        **_named_content(reading, rule),
+        "request_time_window": _window_only(request_time_window),
+    }
+
+
 def not_needed_hint(
     reading: ClarificationReading,
     rule: ClarificationRule,
     request_time_window: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
-    """Repair content for an ask the wording settles: fixed text and catalog strings only."""
+    """Repair content for an ask the wording settles."""
 
-    return {
-        "action": NOT_NEEDED_ACTION,
-        **_named_content(reading, rule),
-        "request_time_window": _window_only(request_time_window),
-    }
+    return _repair_hint(NOT_NEEDED_ACTION, reading, rule, request_time_window)
 
 
 def contradiction_hint(
@@ -409,13 +420,9 @@ def contradiction_hint(
     rule: ClarificationRule,
     request_time_window: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
-    """Repair content for a declaration the question contradicts: fixed text and catalog strings only."""
+    """Repair content for a declaration the question contradicts."""
 
-    return {
-        "action": CONTRADICTION_ACTION,
-        **_named_content(reading, rule),
-        "request_time_window": _window_only(request_time_window),
-    }
+    return _repair_hint(CONTRADICTION_ACTION, reading, rule, request_time_window)
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +437,7 @@ def rule_named_by_waiting_question(catalog: SemanticCatalog, question: str) -> C
     index = PhraseIndex(catalog)
     hits = index.explicit_hits(question)
     for rule in index.rules:
-        if len(rule.values) > 1 and len(_values_named(hits, rule.id)) >= 2:
+        if _names_two_values(hits, rule):
             return rule
     return None
 
@@ -463,12 +470,10 @@ def metric_basis_note(reading: ClarificationReading, metric_id: str) -> str:
     rules = reading.index.rules
     in_question = _hits_for_metric(reading.question_hits, rules, metric_id)
     in_answer = _hits_for_metric(reading.answer_hits, rules, metric_id)
-    if in_question:
-        phrase = max(in_question, key=lambda hit: hit.end - hit.start).phrase
-        note = f"{head}；依据：问题中提到‘{phrase}’。"
-    elif in_answer:
-        phrase = max(in_answer, key=lambda hit: hit.end - hit.start).phrase
-        note = f"{head}；依据：你在追问中选择了‘{phrase}’。"
+    if in_question or in_answer:
+        hits, source = (in_question, "问题中提到") if in_question else (in_answer, "你在追问中选择了")
+        phrase = max(hits, key=lambda hit: hit.end - hit.start).phrase
+        note = f"{head}；依据：{source}‘{phrase}’。"
     elif metric_id in reading.confirmed_metrics:
         note = f"{head}；依据：你在追问中选择了‘{name}’。"
     else:
@@ -477,12 +482,10 @@ def metric_basis_note(reading: ClarificationReading, metric_id: str) -> str:
             None,
         )
         item = reading.rule(rule.id) if rule is not None else None
-        if item is not None and item.named:
-            # The question (or the user) names another value of this rule: never
-            # claim the wording left the basis open.  The declaration gate stops
-            # this before SQL, so this is only a guard.
-            note = f"{head}；依据：按目录定义统计。"
-        elif rule is not None:
+        # When the question (or the user) names another value of this rule, never
+        # claim the wording left the basis open.  The declaration gate stops that
+        # before SQL, so this is only a guard.
+        if rule is not None and not (item is not None and item.named):
             others = "或".join(
                 catalog.metric_name(value.value)
                 for value in rule.values

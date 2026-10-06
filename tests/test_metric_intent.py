@@ -1,4 +1,4 @@
-"""B2a: the model declares catalog metrics; the server builds and verifies bindings."""
+"""The model declares catalog metrics; the server builds and verifies bindings."""
 
 from __future__ import annotations
 
@@ -480,7 +480,7 @@ def test_clarification_apply_rule_asks_only_when_several_options_fit() -> None:
     assert "clarification_id" in apply_rule
     assert "支付金额=gross_fen" in apply_rule and "query directly" in apply_rule
     assert "The server checks both ways" in apply_rule
-    # B3c-1: no time range in the question or request -> ask only for it, never guess.
+    # No time range in the question or request -> ask only for it, never guess.
     assert "If neither the question nor request_time_window states a time range" in apply_rule
     assert "ask_user only for it, without clarification_id; never guess one" in apply_rule
     assert "queried and reported as 0" in apply_rule
@@ -538,9 +538,9 @@ def test_every_example_shown_to_the_model_passes_the_real_checks(request_window)
 
 # The server message's real worst case, over every parameter that changes its
 # length, stays at most 11,500 characters: the 12,000 cap less the 500 test
-# margin (policy limit, ticket B3c-2 3.4).  B3c-1 held it at 11,100 with a
-# 15-character run alias; B3c-2 measures the longest identities the product
-# actually builds (review A3) and adds the final_answer basis rule.
+# margin (policy limit).  It was 11,100 with a
+# 15-character run alias; it now measures the longest identities the product
+# actually builds and adds the final_answer basis rule.
 WORST_SERVER_CONTEXT_CHARS = 11_500
 
 
@@ -548,10 +548,10 @@ def _longest_real_identities() -> dict[str, str]:
     """The longest identity values that reach build_context, from their real sources.
 
     Every identity is server-made (no client text): HTTP uses uuid4 run ids and
-    the fixed IDENTITY_CONFIG principals; W05 builds
+    the fixed IDENTITY_CONFIG principals; the evaluation builds
     ``w05-{profile}-{32hex}-state-{alias}`` run ids (stateful_replay and
     stateful_product) from the frozen and supplement case aliases, with
-    ``principal-{tenant}`` principals; the W05 Fake regression pair uses
+    ``principal-{tenant}`` principals; the Fake regression pair uses
     ``w05-requester-A``; the EN03 RAG run is ``w05-en03-rag-{mode}-{32hex}``
     on gross-total-fen.  A longer identity added later changes this maximum.
     """
@@ -560,9 +560,9 @@ def _longest_real_identities() -> dict[str, str]:
 
     from queryshield.auth.identity import IDENTITY_CONFIG
     from queryshield.evaluation.state_cases import (
-        load_w05_development_cases,
-        load_w05_supplement_cases,
-        resolve_w05_principal_fixture,
+        load_state_cases,
+        load_supplement_cases,
+        resolve_principal_fixture,
     )
 
     hex32 = "a" * 32
@@ -570,12 +570,12 @@ def _longest_real_identities() -> dict[str, str]:
     principals = [item["principal_id"] for item in IDENTITY_CONFIG.values()] + ["w05-requester-A"]
     tenants = [item["tenant_id"] for item in IDENTITY_CONFIG.values()]
     roles = [item["role"] for item in IDENTITY_CONFIG.values()]
-    for case in load_w05_development_cases() + load_w05_supplement_cases():
+    for case in load_state_cases() + load_supplement_cases():
         initial = case.case["initial"]
         parameters = case.case["action"]["parameters"]
         aliases.append(str(parameters.get("run_id", initial["run_state"].get("run_id", f"case-{case.case_id}"))))
         aliases.extend(str(fixture["run_id"]) for fixture in initial["result_fixtures"])
-        fixture_identity = resolve_w05_principal_fixture(str(initial["principal_fixture"]))
+        fixture_identity = resolve_principal_fixture(str(initial["principal_fixture"]))
         principals.append(fixture_identity["principal_id"])
         tenants.append(fixture_identity["tenant_id"])
     run_ids = [str(uuid4())]
@@ -591,7 +591,7 @@ def _longest_real_identities() -> dict[str, str]:
 
 def test_longest_real_identities_are_the_known_ones() -> None:
     identities = _longest_real_identities()
-    # W05 run id: 7 + 32 + 7 + 46 ("case-tool-text-injection-untrusted-instruction") = 92.
+    # Run id: 7 + 32 + 7 + 46 ("case-tool-text-injection-untrusted-instruction") = 92.
     assert len(identities["run_id"]) == 92
     assert identities["run_id"].endswith("-state-case-tool-text-injection-untrusted-instruction")
     assert identities["principal_id"] == "w05-requester-A"
@@ -637,9 +637,9 @@ def test_worst_case_b1_context_fits_total_byte_budget() -> None:
     import sys
 
     sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "scripts")]
-    from check_w05 import _build_retrieval_runtime
+    from check_eval import _build_retrieval_runtime
     from queryshield.agent.metric_intent import undeclared_metric_hint
-    from queryshield.evaluation.state_cases import load_w05_development_cases, load_w05_supplement_cases
+    from queryshield.evaluation.state_cases import load_state_cases, load_supplement_cases
 
     snapshot = _build_retrieval_runtime("fake")[1]
     catalog = load_default_catalog()
@@ -651,7 +651,7 @@ def test_worst_case_b1_context_fits_total_byte_budget() -> None:
     question = max(
         (
             str(case.case["action"]["parameters"].get("question") or "")
-            for case in load_w05_development_cases() + load_w05_supplement_cases()
+            for case in load_state_cases() + load_supplement_cases()
         ),
         key=lambda text: len(text.encode()),
     )
@@ -799,7 +799,7 @@ def test_b1_answer_must_cite_every_verified_metric() -> None:
 
 
 def test_b0_and_b1_without_declaration_return_no_facts() -> None:
-    from queryshield.evaluation.w05_runner import run_b0_single_pass
+    from queryshield.evaluation.profile_runner import run_b0_single_pass
 
     tools, _ = _tools()
     b0 = run_b0_single_pass(_DynamicModel([_query_step()]), tools, _context("run-b0-undeclared"), "q")
@@ -819,7 +819,7 @@ def test_b0_and_b1_without_declaration_return_no_facts() -> None:
 
 
 def test_b0_uses_declared_metrics_for_facts() -> None:
-    from queryshield.evaluation.w05_runner import run_b0_single_pass
+    from queryshield.evaluation.profile_runner import run_b0_single_pass
 
     tools, _ = _tools()
     output = run_b0_single_pass(
@@ -858,7 +858,7 @@ def test_declaration_error_consumes_single_repair_budget() -> None:
     assert result.facts is None
 
 
-def test_checkpoint_v2_preserves_request_time_window() -> None:
+def test_checkpoint_v4_preserves_request_time_window() -> None:
     from queryshield.agent import BoundedAgent, ModelCallStore
 
     tools, _ = _tools()
@@ -887,8 +887,9 @@ def test_checkpoint_v2_preserves_request_time_window() -> None:
     assert {event["error_code"] for event in failed} == {"time_window_mismatch"}
 
 
-def test_checkpoint_v1_still_restores() -> None:
+def test_checkpoint_v1_is_refused() -> None:
     from queryshield.agent import BoundedAgent, ModelCallStore
+    from queryshield.agent.graph import RunResumeError
 
     tools, _ = _tools()
     context = _context("run-b1-checkpoint-v1")
@@ -903,19 +904,11 @@ def test_checkpoint_v1_still_restores() -> None:
     }
     legacy["checkpoint_version"] = "qs-bounded-agent-checkpoint-v1"
 
-    second = _DynamicModel([_query_step(sql=GROSS_SQL, metrics=["gross_fen"], time_window=SEPTEMBER), _cite_verified])
-    resumed = BoundedAgent(second, tools=tools, call_store=ModelCallStore(), run_config=runtime.run_config)
-    result = resumed.resume_from_checkpoint(context, "2026年9月", legacy)
-    assert result.status == "succeeded"
-    assert [fact["value"] for fact in result.facts["facts"]] == [15000]
-
-    with_unknown_field = dict(legacy, request_time_window=None)
-    from queryshield.agent.graph import RunResumeError
-
-    with pytest.raises(RunResumeError):
-        BoundedAgent(_DynamicModel([]), tools=tools, call_store=ModelCallStore(), run_config=runtime.run_config).resume_from_checkpoint(
-            context, "2026年9月", with_unknown_field
-        )
+    for refused in (legacy, dict(legacy, request_time_window=None)):
+        resumed = BoundedAgent(_DynamicModel([]), tools=tools, call_store=ModelCallStore(), run_config=runtime.run_config)
+        with pytest.raises(RunResumeError) as caught:
+            resumed.resume_from_checkpoint(context, "2026年9月", refused)
+        assert caught.value.code == "invalid_checkpoint"
 
 
 # --- round 2: undeclared fact refs, window guidance, provider error code -----
@@ -1215,7 +1208,7 @@ def test_real_run_3_placeholder_answer_takes_the_repair_path() -> None:
     )
 
     assert result.status == "succeeded"
-    # B3c-2 (controller Q2, intended change): citing results before any query
+    # Intended change: citing results before any query
     # now uses the answer send-back, not the SQL repair.
     assert result.repair_count == 0
     assert {fact["metric_id"] for fact in result.facts["facts"]} == {"paid_count", "gross_fen"}
@@ -1237,7 +1230,7 @@ def test_real_run_3_placeholder_answer_takes_the_repair_path() -> None:
 
 
 def test_answer_without_query_fails_closed_when_the_answer_bounce_is_spent() -> None:
-    # B3c-2 (controller Q2, intended change): a spent SQL repair no longer
+    # Intended change: a spent SQL repair no longer
     # ends this case; the answer send-back is its own budget.  The second
     # answer without a query is terminal.
     model = _DynamicModel([
@@ -1274,7 +1267,7 @@ def test_copied_contract_placeholder_parses_and_takes_the_repair_path() -> None:
     model = _DynamicModel([lambda messages: copied, _query_step(sql=GROSS_SQL, metrics=["gross_fen"], time_window=SEPTEMBER), _cite_verified])
     result = _agent(model, _tools()[0]).run(_context("run-b1-copied-placeholder"), "q")
     assert result.status == "succeeded"
-    # B3c-2 (controller Q2, intended change): the answer send-back, not the SQL repair.
+    # Intended change: the answer send-back, not the SQL repair.
     assert result.repair_count == 0
     assert [event.get("error_code") for event in result.events if event.get("kind") == "answer_validation"] == ["answer_without_query_result"]
     assert [event.get("error_code") for event in result.events if event.get("kind") == "answer_bounce"] == ["answer_without_query_result"]
@@ -1318,7 +1311,7 @@ def test_graph_passes_parallel_capability_explicitly() -> None:
 
 
 def test_b0_context_never_mentions_parallel_readonly() -> None:
-    from queryshield.evaluation.w05_runner import run_b0_single_pass
+    from queryshield.evaluation.profile_runner import run_b0_single_pass
 
     model = _DynamicModel([lambda messages: {"type": "deny", "reason": "done"}])
     run_b0_single_pass(model, _tools()[0], _context("run-b0-no-parallel"), "q")

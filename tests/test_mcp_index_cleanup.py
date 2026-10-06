@@ -61,7 +61,7 @@ def test_a_normal_stop_by_sigterm_leaves_no_index_directory(tmp_path):
     env.update(
         {
             "QUERYSHIELD_METADATA_TOOLS": "mcp",
-            "QUERYSHIELD_W04_FAKE_DB": "1",
+            "QUERYSHIELD_FAKE_DB": "1",
             "QUERYSHIELD_PROVIDER_MODE": "fake",
             "QUERYSHIELD_STATE_STORE_PATH": str(tmp_path / "state.sqlite3"),
             "QUERYSHIELD_CALL_STORE_PATH": str(tmp_path / "calls.sqlite3"),

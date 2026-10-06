@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-
-from queryshield.db.w04_state import StateStore
+from queryshield.db.state_store import StateStore
 
 
 PREFERENCE_KEYS = frozenset({"display_language", "answer_style"})
@@ -34,7 +32,7 @@ class PreferenceStore:
 
     def put(self, *, tenant_id: str, principal_id: str, key: str, value: object, confirmed: object) -> dict[str, object]:
         self._validate_key(key)
-        if type(confirmed) is not bool or confirmed is not True:
+        if confirmed is not True:
             raise PreferenceError("confirmation_required", "confirmed must be the boolean true")
         if type(value) is not str or value not in ALLOWED_PREFERENCE_VALUES[key]:
             raise PreferenceError("invalid_preference_value", "value is not allowed for this key")

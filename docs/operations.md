@@ -2,7 +2,7 @@
 
 本文说明怎么用 Docker Compose 把 QueryShield 跑起来、怎么接真实模型、怎么跑检查，以及已知的部署限制。命令里的凭据一律由脚本生成或在你自己的 shell 里设置，不要写进文件、命令历史、日志或截图。
 
-引用的“验收编号”（例如“B3e 验收 H7”）是项目验收记录里的条目编号，每个编号的含义和对应的代码位置见 [能力证据清单的编号对照](evidence.md#编号对照)；代码位置都在本目录（`queryshield/`）内。
+引用的“验收编号”（例如“验收 H7”）是项目验收记录里的条目编号，每个编号的含义和对应的代码位置见 [能力证据清单的编号对照](evidence.md#编号对照)；代码位置都在本目录（`queryshield/`）内。
 
 ## 1. 用 Compose 跑起来
 
@@ -72,6 +72,7 @@ docker compose exec app python scripts/demo_run.py --mode fake --base-url http:/
 | `QUERYSHIELD_TOKEN_A_REQUESTER`、`QUERYSHIELD_TOKEN_A_APPROVER`、`QUERYSHIELD_TOKEN_B_REQUESTER`、`QUERYSHIELD_TOKEN_B_APPROVER` | 四个身份令牌（租户 A、B；请求人、审批人），**四个值必须互不相同** | 无，必须设置 | 是 |
 | `QUERYSHIELD_HTTP_PORT` | 发布到本机 `127.0.0.1` 的端口 | `8000` | 否 |
 | `QUERYSHIELD_PROVIDER_MODE` | `fake` 或 `real`；两者从不混用 | `fake` | 否 |
+| `QUERYSHIELD_MODEL_PROTOCOL` | 模型怎样给出动作：`json`（回复正文里的 JSON）或 `native`（原生 function calling）；其它值以 503 结束，不退回 `json` | `json` | 否 |
 | `QUERYSHIELD_MODEL_BASE_URL`、`QUERYSHIELD_MODEL_NAME` | 真实模型（OpenAI 兼容）的地址和名字 | 未设置 | 地址不算敏感，见下 |
 | `QUERYSHIELD_MODEL_API_KEY` | 真实模型的密钥 | 未设置 | **是** |
 | `QUERYSHIELD_MODEL_MAX_TOKENS` | 模型单次输出上限 | 代码内 512 | 否 |
@@ -102,6 +103,8 @@ read -rs QUERYSHIELD_MODEL_API_KEY; export QUERYSHIELD_MODEL_API_KEY QUERYSHIELD
 docker compose up -d --build
 ```
 
+要让模型用原生 function calling，再设置 `QUERYSHIELD_MODEL_PROTOCOL=native`（Windows 脚本用 `-ModelProtocol native`）。
+
 缺配置时服务以 503 结束（检查脚本记为 blocked），不会退回 Fake，也不会把未知的用量补成 0。Windows 上可以用 `scripts/compose-real-demo.ps1 -BailianBaseUrl '<地址>'`：隐藏输入密钥、只放进本进程、起 Compose、跑整套演示题和演示脚本、把两份摘要拷到证据目录、最后 `docker compose down`。
 
 真实模型的行为问题（例如自己定月份、被退回一次才答对）按已知缺口记录，不当作服务端失败；判定口径与 HTTP 冒烟一致。
@@ -120,14 +123,14 @@ docker compose up -d --build
 pwsh -NoProfile -File scripts/check-all.ps1 -EvidenceDir "$PWD/evidence/check-all"
 ```
 
-它依次运行：全量测试；经 `check.ps1` 的 DB-SMOKE、W01、W02（fake）、W03、W04、W05（fake）；Fake 冒烟（HTTP、MCP、演示题）。结果汇总在 `check-all-summary.json`，全部通过才退出 0。需要演示库的测试必须真的运行，被跳过就失败。
+它依次运行：全量测试；经 `check.ps1` 的 DB-SMOKE、BASE、PROPOSAL（fake）、AGENT、STATE、EVAL（fake）；Fake 冒烟（HTTP、MCP、演示题）。结果汇总在 `check-all-summary.json`，全部通过才退出 0。需要演示库的测试必须真的运行，被跳过就失败。
 
 没有在这里运行的检查，都写在 `check-all.ps1` 的一个清单里，每项带原因，并且“清单 + 实际运行的检查”必须正好等于 `check.ps1` 登记的全部检查，多一项少一项都失败：
 
 | 检查 | 原因 |
 |---|---|
-| `W05-R01`、`W05-R06` | 需要封存的保留集，只在本机、不在仓库里；本机用 `scripts/w05-local-real.ps1` 的完整模式 |
-| `W04-X01`、`W05-X01` | 读上游资产登记表和两个验收标签；登记表或标签不在时记 `not_applicable` 并写明原因（例如导出的公开仓库）。CI 取完整历史和标签，所以在 CI 里跑 |
+| `EVAL-R01`、`EVAL-R06` | 需要封存的保留集，只在本机、不在仓库里；本机用 `scripts/eval-local-real.ps1` 的完整模式 |
+| `STATE-X01`、`EVAL-X01` | 读上游资产登记表和两个验收标签；登记表或标签不在时记 `not_applicable` 并写明原因（例如导出的公开仓库）。CI 取完整历史和标签，所以在 CI 里跑 |
 
 CI（`.github/workflows/queryshield-ci.yml`）有两个任务：`checks`（起 PostgreSQL，`setup_databases.py --test --demo`，再 `check-all.ps1`）和 `compose`（从空环境起 Compose、跑两遍演示脚本——先默认设置、再 MCP 设置——并做停止与重启的检查）。不使用仓库密钥：数据库密码和令牌在运行时随机生成并遮蔽；上传的产物只有摘要和检查的文字输出，不含 `*-raw.json`。
 
@@ -155,10 +158,10 @@ CI（`.github/workflows/queryshield-ci.yml`）有两个任务：`checks`（起 P
 
 每条写明原因、建议和依据。
 
-1. **只能单进程部署。** 审批的“检查再执行”只靠进程内的锁（`approval/service.py` 的 `_approval_lock`）串行化。两个进程共用同一个状态库时，同时批准同一条审批，可能让业务查询执行两次。另外，resume 期间被取消时，正在执行的 SQL 可能跑完才被丢弃。建议：Compose 里 `app` 只起一个容器，镜像里 uvicorn 不加 `--workers`。依据：B2b 验收 K6，B3e 验收 H7。上多进程之前，`decide_approval` 需要先返回“这次调用是否赢得了状态转换”。
-2. **要长期收窄某个角色，改登记表或用撤销。** 部署新内容的知识库时，已启用来源的角色和租户范围按登记表更新：运行期把角色收窄（例如去掉 approver）之后，部署新知识库会把它放宽回登记表；撤销（状态不是 active）则保留。依据：B3e 验收 H2。
-3. **连接串必须写明库名。** 演示设置没开时，不写库名（libpq 缺省取用户名）、用 `service=` 或 `PGSERVICE` 的连接，不在库名配对检查的范围内，指向 `_demo` 库也不会被拒。Compose 里连接串写明了 `queryshield_demo`。依据：`db/readonly.py` 的 `database_names_from_url`、`check_demo_pairing`；B3d 验收 G6。
-4. **停服务前，先等异步 run 结束。** MCP 索引目录在 FastAPI 关闭阶段清理；关闭之后如果还有后台 run 开新的 MCP 会话，目录会被重建，SIGTERM 下 `atexit` 不执行，目录会留下（里面有各租户的分块文字，权限 0700）。**不在容器里、又在 Windows 上被强制结束时**，索引目录会留在系统临时目录。Compose 里 `/tmp` 是 tmpfs，容器停止时整个消失。依据：`api/main.py` 的 lifespan 关闭阶段、`mcp_metadata/launch.py` 的 `cleanup_index_dir`；B4a 验收 N6，B4a 实现 D-2。
-5. **跑检查时不要设置 `QUERYSHIELD_METADATA_TOOLS`。** 设了以后 W04-EN04 稳定失败（SSE 初始事件多一条 `metadata_session`），评测和检查本来也只走本地元数据工具。`check.ps1` 和 `check-all.ps1` 会自动清掉它并在结束时恢复你原来的值；`b2b_http_smoke.py`、`demo_run.py` 也各自清掉。依据：MCP 验收 M11。
-6. **模型输出上限默认 512。** 按客户的全量列表（几十行）会被截断，所以演示用“前 N 名”的题。上限可以用 `QUERYSHIELD_MODEL_MAX_TOKENS` 调高，但评测数据都是在 512 下得到的。依据：`providers/openai_compatible.py` 里的 `QUERYSHIELD_MODEL_MAX_TOKENS` 默认值；B3d 演示题 Q06b。
+1. **只能单进程部署。** 审批的“检查再执行”只靠进程内的锁（`approval/service.py` 的 `_approval_lock`）串行化。两个进程共用同一个状态库时，同时批准同一条审批，可能让业务查询执行两次。另外，resume 期间被取消时，正在执行的 SQL 可能跑完才被丢弃。建议：Compose 里 `app` 只起一个容器，镜像里 uvicorn 不加 `--workers`。依据：验收 K6，验收 H7。上多进程之前，`decide_approval` 需要先返回“这次调用是否赢得了状态转换”。
+2. **要长期收窄某个角色，改登记表或用撤销。** 部署新内容的知识库时，已启用来源的角色和租户范围按登记表更新：运行期把角色收窄（例如去掉 approver）之后，部署新知识库会把它放宽回登记表；撤销（状态不是 active）则保留。依据：验收 H2。
+3. **连接串必须写明库名。** 演示设置没开时，不写库名（libpq 缺省取用户名）、用 `service=` 或 `PGSERVICE` 的连接，不在库名配对检查的范围内，指向 `_demo` 库也不会被拒。Compose 里连接串写明了 `queryshield_demo`。依据：`db/readonly.py` 的 `database_names_from_url`、`check_demo_pairing`；验收 G6。
+4. **停服务前，先等异步 run 结束。** MCP 索引目录在 FastAPI 关闭阶段清理；关闭之后如果还有后台 run 开新的 MCP 会话，目录会被重建，SIGTERM 下 `atexit` 不执行，目录会留下（里面有各租户的分块文字，权限 0700）。**不在容器里、又在 Windows 上被强制结束时**，索引目录会留在系统临时目录。Compose 里 `/tmp` 是 tmpfs，容器停止时整个消失。依据：`api/main.py` 的 lifespan 关闭阶段、`mcp_metadata/launch.py` 的 `cleanup_index_dir`；验收 N6，实现 D-2。
+5. **跑检查时不要设置 `QUERYSHIELD_METADATA_TOOLS`。** 设了以后 STATE-EN04 稳定失败（SSE 初始事件多一条 `metadata_session`），评测和检查本来也只走本地元数据工具。`check.ps1` 和 `check-all.ps1` 会自动清掉它并在结束时恢复你原来的值；`http_smoke.py`、`demo_run.py` 也各自清掉。依据：MCP 验收 M11。
+6. **模型输出上限默认 512。** 按客户的全量列表（几十行）会被截断，所以演示用“前 N 名”的题。上限可以用 `QUERYSHIELD_MODEL_MAX_TOKENS` 调高，但评测数据都是在 512 下得到的。依据：`providers/openai_compatible.py` 里的 `QUERYSHIELD_MODEL_MAX_TOKENS` 默认值；演示题 Q06b。
 7. **不用 Compose 时，状态库和调用记录默认在内存里。** `QUERYSHIELD_STATE_STORE_PATH`、`QUERYSHIELD_CALL_STORE_PATH` 不设就是 `:memory:`，服务一重启，run 和审批都没了。Compose 把它们放在命名卷里。依据：`approval/service.py` 的 `state_path_from_env`、`api/main.py` 的 `get_call_store`。

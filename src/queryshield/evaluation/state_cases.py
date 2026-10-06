@@ -1,4 +1,4 @@
-"""Strict W05 state-case-v1 loading and dataset integrity checks."""
+"""Strict state-case-v1 loading and dataset integrity checks."""
 
 from __future__ import annotations
 
@@ -13,9 +13,9 @@ import re
 
 
 STATE_CASE_VERSION = "state-case-v1"
-W05_CASE_SET_VERSION = "w05-state-evaluation-v1"
-W05_SUPPLEMENT_SET_VERSION = "w05-state-evaluation-supplement-v1"
-_W05_SUPPLEMENT_FILE = "state-cases-b2a-supplement-v1.json"
+STATE_CASE_SET_VERSION = "w05-state-evaluation-v1"
+SUPPLEMENT_CASE_SET_VERSION = "w05-state-evaluation-supplement-v1"
+_SUPPLEMENT_FILE = "state-cases-supplement-v1.json"
 CONTRACT_VERSION = "2026-09-06.practice-v3"
 EXTENSION_VERSION = "2026-09-09.facts-state-v1"
 FIXTURE_VERSION = "commerce-v1"
@@ -80,7 +80,7 @@ _CRITICAL_QUESTION_IDS = frozenset(
 )
 _FROZEN_DATASET_CONFIG = {
     "case_schema": STATE_CASE_VERSION,
-    "case_set": W05_CASE_SET_VERSION,
+    "case_set": STATE_CASE_SET_VERSION,
     "dataset_revision": "w05-development-erratum-r3",
     "contract_version": CONTRACT_VERSION,
     "extension_version": EXTENSION_VERSION,
@@ -93,14 +93,14 @@ _FROZEN_DATASET_CONFIG = {
 
 
 class StateCaseError(ValueError):
-    """The W05 case set is malformed or violates its frozen split contract."""
+    """The case set is malformed or violates its frozen split contract."""
 
 
 _PRINCIPAL_FIXTURE_RE = re.compile(r"^tenant-([A-Z])/requester-([A-Z])$")
 _ACTOR_FIXTURE_RE = re.compile(r"^(requester|approver)-([A-Z])$")
 
 
-def resolve_w05_principal_fixture(reference: str) -> dict[str, str]:
+def resolve_principal_fixture(reference: str) -> dict[str, str]:
     """Resolve the frozen fixture alias to the actual commerce-v1 identity key."""
 
     if type(reference) is not str:
@@ -112,7 +112,7 @@ def resolve_w05_principal_fixture(reference: str) -> dict[str, str]:
     return {"tenant_id": tenant, "principal_id": f"principal-{tenant}", "role": "requester"}
 
 
-def resolve_w05_actor_fixture(reference: str, *, tenant_id: str) -> dict[str, str]:
+def resolve_actor_fixture(reference: str, *, tenant_id: str) -> dict[str, str]:
     """Resolve requester/approver fixture names without accepting another tenant."""
 
     if type(reference) is not str or type(tenant_id) is not str:
@@ -126,7 +126,7 @@ def resolve_w05_actor_fixture(reference: str, *, tenant_id: str) -> dict[str, st
 
 
 @dataclass(frozen=True)
-class W05StateCase:
+class StateCase:
     case: Mapping[str, object]
     classification: str
     critical_question_id: str | None
@@ -294,18 +294,18 @@ def _validate_case(
     return case
 
 
-def load_w05_development_cases(path: str | Path | None = None) -> tuple[W05StateCase, ...]:
+def load_state_cases(path: str | Path | None = None) -> tuple[StateCase, ...]:
     fixture_path = (
         Path(path)
         if path is not None
-        else Path(__file__).resolve().parents[3] / "evals" / "w05" / "state-cases-v4.json"
+        else Path(__file__).resolve().parents[3] / "evals" / "development" / "state-cases-v4.json"
     )
     try:
         document = json.loads(fixture_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise StateCaseError(f"cannot load W05 state-case fixture: {fixture_path}") from exc
+        raise StateCaseError(f"cannot load state-case fixture: {fixture_path}") from exc
     if not isinstance(document, dict):
-        raise StateCaseError("W05 case-set root must be an object")
+        raise StateCaseError("case-set root must be an object")
     root_fields = {
         "schema_version",
         "contract_version",
@@ -316,19 +316,19 @@ def load_w05_development_cases(path: str | Path | None = None) -> tuple[W05State
         "cases",
     }
     _require_exact_fields(document, frozenset(root_fields), where="case-set")
-    if document["schema_version"] != W05_CASE_SET_VERSION:
-        raise StateCaseError("unsupported W05 case-set schema")
+    if document["schema_version"] != STATE_CASE_SET_VERSION:
+        raise StateCaseError("unsupported case-set schema")
     if document["contract_version"] != CONTRACT_VERSION:
-        raise StateCaseError("unsupported W05 contract version")
+        raise StateCaseError("unsupported contract version")
     if document["extension_version"] != EXTENSION_VERSION:
-        raise StateCaseError("unsupported W05 extension version")
+        raise StateCaseError("unsupported extension version")
     if document["fixture_version"] != FIXTURE_VERSION:
-        raise StateCaseError("unsupported W05 fixture version")
+        raise StateCaseError("unsupported fixture version")
     raw_cases = document.get("cases")
     if type(raw_cases) is not list:
         raise StateCaseError("case-set cases must be a list")
 
-    parsed: list[W05StateCase] = []
+    parsed: list[StateCase] = []
     for index, wrapper_raw in enumerate(raw_cases):
         wrapper = _require_mapping(wrapper_raw, where=f"cases[{index}]")
         _require_exact_fields(
@@ -343,18 +343,18 @@ def load_w05_development_cases(path: str | Path | None = None) -> tuple[W05State
         critical = wrapper.get("critical_question_id")
         if critical is not None and (type(critical) is not str or not critical.strip()):
             raise StateCaseError(f"cases[{index}].critical_question_id must be a string or null")
-        parsed.append(W05StateCase(case, str(classification), critical))
+        parsed.append(StateCase(case, str(classification), critical))
 
     ids = [item.case_id for item in parsed]
     if len(ids) != len(set(ids)):
         raise StateCaseError("case_id values must be unique")
     if len(parsed) != 20:
-        raise StateCaseError("W05 development set must contain exactly 20 task cases")
+        raise StateCaseError("development set must contain exactly 20 task cases")
     categories = Counter(item.classification for item in parsed)
     if categories != Counter({"functional": 12, "security": 8}):
-        raise StateCaseError(f"W05 development quotas mismatch: {dict(categories)}")
+        raise StateCaseError(f"development quotas mismatch: {dict(categories)}")
 
-    families: dict[str, list[W05StateCase]] = defaultdict(list)
+    families: dict[str, list[StateCase]] = defaultdict(list)
     for item in parsed:
         families[item.family_id].append(item)
     declared_pairs = document.get("paired_family_ids")
@@ -383,7 +383,7 @@ def load_w05_development_cases(path: str | Path | None = None) -> tuple[W05State
     return tuple(parsed)
 
 
-def w05_development_manifest(
+def state_case_manifest(
     path: str | Path | None = None,
     *,
     shared_runtime_config_sha256: str | None = None,
@@ -393,9 +393,9 @@ def w05_development_manifest(
     fixture_path = (
         Path(path)
         if path is not None
-        else Path(__file__).resolve().parents[3] / "evals" / "w05" / "state-cases-v4.json"
+        else Path(__file__).resolve().parents[3] / "evals" / "development" / "state-cases-v4.json"
     )
-    cases = load_w05_development_cases(fixture_path)
+    cases = load_state_cases(fixture_path)
     if shared_runtime_config_sha256 is not None and (
         type(shared_runtime_config_sha256) is not str
         or len(shared_runtime_config_sha256) != 64
@@ -403,7 +403,7 @@ def w05_development_manifest(
     ):
         raise StateCaseError("shared_runtime_config_sha256 must be a lowercase SHA256 digest")
     raw_bytes = fixture_path.read_bytes()
-    budget_path = Path(__file__).resolve().parents[3] / "evals" / "w05" / "execution-profiles-v1.json"
+    budget_path = Path(__file__).resolve().parents[3] / "evals" / "development" / "execution-profiles-v1.json"
     frozen_config_sha256 = canonical_sha256(_FROZEN_DATASET_CONFIG)
     case_entries = []
     for item in cases:
@@ -423,7 +423,7 @@ def w05_development_manifest(
             }
         )
     return {
-        "schema_version": W05_CASE_SET_VERSION,
+        "schema_version": STATE_CASE_SET_VERSION,
         "dataset_revision": _FROZEN_DATASET_CONFIG["dataset_revision"],
         "path": str(fixture_path),
         "sha256": hashlib.sha256(raw_bytes).hexdigest(),
@@ -442,7 +442,7 @@ def w05_development_manifest(
     }
 
 
-def load_w05_supplement_cases(path: str | Path | None = None) -> tuple[W05StateCase, ...]:
+def load_supplement_cases(path: str | Path | None = None) -> tuple[StateCase, ...]:
     """Load development cases added after the frozen 20-case set.
 
     Supplement cases are replayed and reported separately, so the frozen set's
@@ -453,36 +453,36 @@ def load_w05_supplement_cases(path: str | Path | None = None) -> tuple[W05StateC
     fixture_path = (
         Path(path)
         if path is not None
-        else Path(__file__).resolve().parents[3] / "evals" / "w05" / _W05_SUPPLEMENT_FILE
+        else Path(__file__).resolve().parents[3] / "evals" / "development" / _SUPPLEMENT_FILE
     )
     try:
         document = json.loads(fixture_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise StateCaseError(f"cannot load W05 supplement fixture: {fixture_path}") from exc
+        raise StateCaseError(f"cannot load supplement fixture: {fixture_path}") from exc
     if not isinstance(document, dict):
-        raise StateCaseError("W05 supplement root must be an object")
+        raise StateCaseError("supplement root must be an object")
     _require_exact_fields(
         document,
         frozenset({"schema_version", "contract_version", "extension_version", "fixture_version", "supplement_of", "cases"}),
         where="supplement",
     )
-    if document["schema_version"] != W05_SUPPLEMENT_SET_VERSION:
-        raise StateCaseError("unsupported W05 supplement schema")
+    if document["schema_version"] != SUPPLEMENT_CASE_SET_VERSION:
+        raise StateCaseError("unsupported supplement schema")
     if (
         document["contract_version"] != CONTRACT_VERSION
         or document["extension_version"] != EXTENSION_VERSION
         or document["fixture_version"] != FIXTURE_VERSION
     ):
-        raise StateCaseError("W05 supplement versions do not match the frozen development set")
+        raise StateCaseError("supplement versions do not match the frozen development set")
     if document["supplement_of"] != "state-cases-v4.json":
-        raise StateCaseError("W05 supplement must extend state-cases-v4.json")
+        raise StateCaseError("supplement must extend state-cases-v4.json")
     raw_cases = document["cases"]
     if type(raw_cases) is not list or not raw_cases:
-        raise StateCaseError("W05 supplement cases must be a non-empty list")
-    frozen = load_w05_development_cases()
+        raise StateCaseError("supplement cases must be a non-empty list")
+    frozen = load_state_cases()
     frozen_ids = {item.case_id for item in frozen}
     frozen_families = {item.family_id for item in frozen}
-    parsed: list[W05StateCase] = []
+    parsed: list[StateCase] = []
     for index, wrapper_raw in enumerate(raw_cases):
         wrapper = _require_mapping(wrapper_raw, where=f"cases[{index}]")
         _require_exact_fields(
@@ -493,7 +493,7 @@ def load_w05_supplement_cases(path: str | Path | None = None) -> tuple[W05StateC
         case = _validate_case(wrapper.get("case"), index=index)
         if wrapper.get("classification") != "functional" or wrapper.get("critical_question_id") is not None:
             raise StateCaseError(f"cases[{index}] supplement cases must be functional and non-critical")
-        parsed.append(W05StateCase(case, "functional", None))
+        parsed.append(StateCase(case, "functional", None))
     ids = [item.case_id for item in parsed]
     families = [item.family_id for item in parsed]
     if len(set(ids)) != len(ids) or len(set(families)) != len(families):
@@ -503,17 +503,17 @@ def load_w05_supplement_cases(path: str | Path | None = None) -> tuple[W05StateC
     return tuple(parsed)
 
 
-def w05_supplement_manifest(path: str | Path | None = None) -> dict[str, object]:
+def supplement_case_manifest(path: str | Path | None = None) -> dict[str, object]:
     """Content-addressed metadata for the supplement set."""
 
     fixture_path = (
         Path(path)
         if path is not None
-        else Path(__file__).resolve().parents[3] / "evals" / "w05" / _W05_SUPPLEMENT_FILE
+        else Path(__file__).resolve().parents[3] / "evals" / "development" / _SUPPLEMENT_FILE
     )
-    cases = load_w05_supplement_cases(fixture_path)
+    cases = load_supplement_cases(fixture_path)
     return {
-        "schema_version": W05_SUPPLEMENT_SET_VERSION,
+        "schema_version": SUPPLEMENT_CASE_SET_VERSION,
         "path": str(fixture_path),
         "sha256": hashlib.sha256(fixture_path.read_bytes()).hexdigest(),
         "supplement_of": "state-cases-v4.json",
@@ -539,15 +539,15 @@ __all__ = [
     "EXTENSION_VERSION",
     "FIXTURE_VERSION",
     "STATE_CASE_VERSION",
-    "W05_SUPPLEMENT_SET_VERSION",
-    "load_w05_supplement_cases",
-    "w05_supplement_manifest",
-    "W05_CASE_SET_VERSION",
+    "SUPPLEMENT_CASE_SET_VERSION",
+    "load_supplement_cases",
+    "supplement_case_manifest",
+    "STATE_CASE_SET_VERSION",
     "StateCaseError",
-    "W05StateCase",
-    "resolve_w05_actor_fixture",
-    "resolve_w05_principal_fixture",
+    "StateCase",
+    "resolve_actor_fixture",
+    "resolve_principal_fixture",
     "canonical_sha256",
-    "load_w05_development_cases",
-    "w05_development_manifest",
+    "load_state_cases",
+    "state_case_manifest",
 ]

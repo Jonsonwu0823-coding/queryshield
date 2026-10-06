@@ -50,11 +50,11 @@ WHERE o.tenant_id = %s
 
 
 def fetch_commerce_summary(tenant_id: str, start: datetime, end: datetime) -> dict[str, Any]:
-    """The W01 summary query, run the way the product runs it.
+    """The summary query, run the way the product runs it.
 
-    Since W04 the tables force row-level security keyed on the transaction's
+    The tables force row-level security keyed on the transaction's
     tenant, so a read without the server-bound tenant context sees no rows
-    (W01-FS01 reported ``A paid_count=0`` in the cloud).  The tenant is bound in
+    (BASE-FS01 reported ``A paid_count=0`` in the cloud).  The tenant is bound in
     the same read-only transaction; the SQL and every expected number are unchanged.
     """
 
@@ -297,7 +297,7 @@ def check_guarded_commerce(observed: list[dict[str, object]]) -> None:
 def _write_evidence(path: Path, *, status: str, observed: list[dict[str, object]], error: Exception | None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, object] = {
-        "check_id": "W05-DB01",
+        "check_id": "EVAL-DB01",
         "probe": "commerce_fixture",
         "mode": "real_postgres_guarded_query",
         "status": status,

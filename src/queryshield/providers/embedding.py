@@ -1,4 +1,4 @@
-"""Controlled embedding adapters for the W03 knowledge index.
+"""Controlled embedding adapters for the knowledge index.
 
 Chat completion remains exposed by ``OpenAICompatibleModel.complete``.  This
 module adds an explicit embedding operation with its own configuration,
@@ -14,12 +14,12 @@ from hashlib import sha256
 import json
 import math
 import os
-from typing import Literal
-from urllib.parse import urlparse
+from typing import Any, Literal
 
 import httpx
 
-from queryshield.providers.contracts import new_local_call_id, new_request_id
+from queryshield.providers.contracts import finite_float, new_local_call_id, new_request_id
+from queryshield.providers.http import base_url_is_valid, endpoint_url, json_headers, post_json
 
 
 EmbeddingMode = Literal["fake", "real"]
@@ -80,7 +80,7 @@ class OperationUsage:
 
 @dataclass(frozen=True)
 class EmbeddingCallResult:
-    """Validated vectors and the redacted operation evidence for one call."""
+    """Validated vectors and the operation usage of one call."""
 
     mode: EmbeddingMode
     provider: str
@@ -94,29 +94,6 @@ class EmbeddingCallResult:
     vectors: tuple[tuple[float, ...], ...]
     dimensions: int
     usage: OperationUsage
-
-    def to_redacted_record(self) -> dict[str, object]:
-        vector_bytes = json.dumps(
-            self.vectors,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        return {
-            "status": "succeeded",
-            "mode": self.mode,
-            "provider": self.provider,
-            "model": self.model,
-            "model_revision": self.model_revision,
-            "request_id": self.request_id,
-            "model_call_id": self.model_call_id,
-            "provider_call_id": self.provider_call_id,
-            "provider_request_id": self.provider_request_id,
-            "input_count": len(self.vectors),
-            "dimensions": self.dimensions,
-            "inputs_sha256": self.inputs_sha256,
-            "vectors_sha256": sha256(vector_bytes).hexdigest(),
-            "usage": self.usage.as_dict(),
-        }
 
 
 @dataclass(frozen=True)
@@ -133,10 +110,7 @@ class EmbeddingConfig:
     def __post_init__(self) -> None:
         if not self.base_url.strip():
             raise EmbeddingConfigurationError("missing_embedding_configuration", "base_url")
-        parsed = urlparse(self.base_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise EmbeddingConfigurationError("invalid_embedding_configuration", "base_url")
-        if parsed.username or parsed.password:
+        if not base_url_is_valid(self.base_url):
             raise EmbeddingConfigurationError("invalid_embedding_configuration", "base_url")
         if not self.api_key:
             raise EmbeddingConfigurationError("missing_embedding_configuration", "api_key")
@@ -181,10 +155,7 @@ class EmbeddingConfig:
 
     @property
     def endpoint(self) -> str:
-        base_url = self.base_url.rstrip("/")
-        if base_url.endswith("/embeddings"):
-            return base_url
-        return f"{base_url}/embeddings"
+        return endpoint_url(self.base_url, "/embeddings")
 
 
 def _normalize_inputs(inputs: Sequence[str]) -> tuple[str, ...]:
@@ -209,6 +180,30 @@ def _inputs_hash(inputs: Sequence[str]) -> str:
     return sha256(payload).hexdigest()
 
 
+def finite_vector(
+    vector: Sequence[object],
+    *,
+    dimensions: int,
+    label: str,
+    error: type[ValueError] = ValueError,
+) -> tuple[float, ...]:
+    """``vector`` as floats when it has exactly ``dimensions`` finite int/float values.
+
+    ``type(value) in {int, float}`` also rules out bool.  Each caller names the
+    vector in ``label`` and picks the exception type its own callers expect.
+    """
+
+    if isinstance(vector, (str, bytes)) or len(vector) != dimensions:
+        raise error(f"{label} has an unexpected dimension")
+    values: list[float] = []
+    for value in vector:
+        number = finite_float(value)
+        if number is None:
+            raise error(f"{label} contains a non-finite value")
+        values.append(number)
+    return tuple(values)
+
+
 def _validate_vectors(
     vectors: Sequence[Sequence[object]],
     *,
@@ -217,17 +212,10 @@ def _validate_vectors(
 ) -> tuple[tuple[float, ...], ...]:
     if isinstance(vectors, (str, bytes)) or len(vectors) != expected_count:
         raise ValueError("embedding response count does not match input count")
-    normalized: list[tuple[float, ...]] = []
-    for index, vector in enumerate(vectors):
-        if isinstance(vector, (str, bytes)) or len(vector) != dimensions:
-            raise ValueError(f"embedding vector {index} has an unexpected dimension")
-        values: list[float] = []
-        for value in vector:
-            if type(value) not in {int, float} or isinstance(value, bool) or not math.isfinite(float(value)):
-                raise ValueError(f"embedding vector {index} contains a non-finite value")
-            values.append(float(value))
-        normalized.append(tuple(values))
-    return tuple(normalized)
+    return tuple(
+        finite_vector(vector, dimensions=dimensions, label=f"embedding vector {index}")
+        for index, vector in enumerate(vectors)
+    )
 
 
 def _operation_usage(
@@ -240,8 +228,6 @@ def _operation_usage(
     total_tokens: int | None,
     usage_source: Literal["provider", "fake"],
 ) -> OperationUsage:
-    if total_tokens is not None and (type(total_tokens) is not int or total_tokens < 0):
-        raise ValueError("embedding total_tokens must be a non-negative integer or null")
     return OperationUsage(
         operation_kind="embedding",
         model=model,
@@ -376,43 +362,26 @@ class OpenAICompatibleEmbedding:
         normalized = _normalize_inputs(inputs)
         local_request_id = request_id or new_request_id()
         server_call_id = model_call_id or new_local_call_id()
+
+        def fail(code: str, **record_fields: Any) -> EmbeddingProviderError:
+            return EmbeddingProviderError(code, _failed_record(self, local_request_id, server_call_id, code, **record_fields))
+
         payload = {
             "model": self.config.model,
             "input": list(normalized),
             "dimensions": self.config.dimensions,
         }
-        headers = {
-            "Accept": "application/json",
-            "Authorization": f"Bearer {self.config.api_key}",
-            "Content-Type": "application/json",
-            "X-Client-Request-Id": local_request_id,
-        }
+        headers = json_headers(self.config.api_key, local_request_id)
         try:
-            response = self._post(payload, headers)
+            response = post_json(self._client, self.config.endpoint, payload, headers, self.config.timeout_seconds)
         except httpx.TimeoutException as exc:
-            raise EmbeddingProviderError(
-                "upstream_timeout",
-                _failed_record(self, local_request_id, server_call_id, "upstream_timeout"),
-            ) from exc
+            raise fail("upstream_timeout") from exc
         except httpx.RequestError as exc:
-            raise EmbeddingProviderError(
-                "upstream_request_error",
-                _failed_record(self, local_request_id, server_call_id, "upstream_request_error"),
-            ) from exc
+            raise fail("upstream_request_error") from exc
 
         provider_request_id = response.headers.get("x-request-id") or None
         if response.status_code < 200 or response.status_code >= 300:
-            raise EmbeddingProviderError(
-                "upstream_http_error",
-                _failed_record(
-                    self,
-                    local_request_id,
-                    server_call_id,
-                    "upstream_http_error",
-                    provider_request_id=provider_request_id,
-                    http_status=response.status_code,
-                ),
-            )
+            raise fail("upstream_http_error", provider_request_id=provider_request_id, http_status=response.status_code)
         try:
             body = response.json()
             provider_call_id, vectors, total_tokens = _parse_embedding_response(
@@ -421,17 +390,7 @@ class OpenAICompatibleEmbedding:
                 dimensions=self.config.dimensions,
             )
         except (ValueError, TypeError) as exc:
-            code = getattr(exc, "code", "invalid_response")
-            raise EmbeddingProviderError(
-                code,
-                _failed_record(
-                    self,
-                    local_request_id,
-                    server_call_id,
-                    code,
-                    provider_request_id=provider_request_id,
-                ),
-            ) from exc
+            raise fail(getattr(exc, "code", "invalid_response"), provider_request_id=provider_request_id) from exc
 
         usage = _operation_usage(
             model=self.config.model,
@@ -456,17 +415,6 @@ class OpenAICompatibleEmbedding:
             dimensions=self.config.dimensions,
             usage=usage,
         )
-
-    def _post(self, payload: dict[str, object], headers: dict[str, str]) -> httpx.Response:
-        if self._client is not None:
-            return self._client.post(
-                self.config.endpoint,
-                headers=headers,
-                json=payload,
-                timeout=self.config.timeout_seconds,
-            )
-        with httpx.Client(timeout=self.config.timeout_seconds) as client:
-            return client.post(self.config.endpoint, headers=headers, json=payload)
 
 
 class _InvalidEmbeddingResponse(ValueError):
@@ -500,8 +448,6 @@ def _parse_embedding_response(
         if not isinstance(vector, Sequence) or isinstance(vector, (str, bytes)):
             raise _InvalidEmbeddingResponse("invalid_response")
         indexed[index] = vector
-    if set(indexed) != set(range(expected_count)):
-        raise _InvalidEmbeddingResponse("invalid_response")
     try:
         vectors = _validate_vectors(
             [indexed[index] for index in range(expected_count)],
@@ -561,4 +507,5 @@ __all__ = [
     "FixedEmbedding",
     "OpenAICompatibleEmbedding",
     "OperationUsage",
+    "finite_vector",
 ]

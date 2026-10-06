@@ -135,7 +135,12 @@ def main() -> int:
     if not url:
         print("verify_demo_expected blocked: no demo database URL is configured")
         return 2
-    if not database_name(url).endswith("_demo"):
+    try:
+        name = database_name(url)
+    except ValueError:  # malformed URL; never echo it
+        print("verify_demo_expected blocked: the database URL cannot be parsed")
+        return 2
+    if not name.endswith("_demo"):
         print("verify_demo_expected blocked: the database name must end with _demo")
         return 2
     document = json.loads(QUESTIONS_PATH.read_text(encoding="utf-8"))

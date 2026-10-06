@@ -1,0 +1,406 @@
+{
+ "approval_required": {
+  "outcome": "waiting_approval/None",
+  "sha256": "1a13f3b2f78ba998ada59b51af5a4f07762555eae892fdb5d910c1e4bb435149"
+ },
+ "ask_names_the_catalog_rule": {
+  "outcome": "waiting_user/None",
+  "sha256": "eaff047b81ceb2f6e750961e63319e8ebdd20a3558b7229b5b400c542a5999ca"
+ },
+ "ask_not_needed_then_plain_ask": {
+  "outcome": "waiting_user/None",
+  "sha256": "814c2264e174aa7a7514b1e5c90e99958927b0c848025e83162f29e87fa55c6d"
+ },
+ "ask_not_needed_twice": {
+  "outcome": "failed/clarification_not_needed",
+  "sha256": "685fd6b4a9629848a2a6aef033dc669e6b80c1262ae859379dfd72c1bed9878a"
+ },
+ "b0_answer_citing_a_missing_result": {
+  "outcome": "failed/result_not_found",
+  "sha256": "693a35ef4523e4653a786ceaa10c85e68ff8ad04fb72eb57ed7cd2cc26e69691"
+ },
+ "b0_approval_required": {
+  "outcome": "denied/approval_required",
+  "sha256": "6b5ac3d127b0cee0ff8adf6e9753306342dd32038ad95f5273f4ca8da05b3e27"
+ },
+ "b0_ask_not_needed": {
+  "outcome": "failed/clarification_not_needed",
+  "sha256": "fe3a5539b5ff40f7e5a1494c2cb7fb60db97b2ab089f1b6b2e26333a190aa0f0"
+ },
+ "b0_bad_sql_is_failed_not_denied": {
+  "outcome": "failed/evidence_validation_failed",
+  "sha256": "372f946e46552d5727520d72c93e5ae751df332209ad157b24016234b870cbd8"
+ },
+ "b0_basis_conflict": {
+  "outcome": "failed/answer_basis_conflict",
+  "sha256": "73a0cb9e1d95ac9ba1e2d04acbea506c76b17f29859beb533cf57ec0f000ae8a"
+ },
+ "b0_clarification_required": {
+  "outcome": "waiting_user/None",
+  "sha256": "a4188b2d8e5a10cb49b5b91b709ba6dbdb7674c66cff2610cbfd7084e80bd928"
+ },
+ "b0_contradiction": {
+  "outcome": "failed/metric_contradicts_question",
+  "sha256": "b1ce837a51f01ea9b21cf9cf6f71d16972963c1f1f6267edb4ced723eb3dcb77"
+ },
+ "b0_deny": {
+  "outcome": "denied/None",
+  "sha256": "4f987e9c7e7da2042275cdcabd612f268c19117febf0e4dd246ed5e6badb20b2"
+ },
+ "b0_foreign_tenant": {
+  "outcome": "denied/forbidden",
+  "sha256": "8f5e1563f24ffb48c8614078563c7644bc4e7097ceadf1f843e1ad1e2b44e932"
+ },
+ "b0_inconsistent_usage": {
+  "outcome": "succeeded/None",
+  "sha256": "46d9b02576c966639262b8e1bafd47e71acb09afd02ce82264c17effe171903b"
+ },
+ "b0_known_usage": {
+  "outcome": "succeeded/None",
+  "sha256": "f1afb24d0dcc62e46088ec43b2424b07215a511604b30931cc93ade059cdb027"
+ },
+ "b0_net_plan": {
+  "outcome": "succeeded/None",
+  "sha256": "17d8c79ec295cf4dade16a567b76cef3f629dab8d0832bbfa395108f1b9e15ec"
+ },
+ "b0_no_data": {
+  "outcome": "succeeded/None",
+  "sha256": "a41f98d8bbf9609f68da9b3c940c47ca3308efb6d4fd356591bd8b53c9a1054f"
+ },
+ "b0_plain_ask": {
+  "outcome": "waiting_user/None",
+  "sha256": "0e113da4b44ae8c4e0bc3b62b32953aa6b996fcbc5eba6d2e98b402c9c6c4e57"
+ },
+ "b0_policy_denied": {
+  "outcome": "denied/table_not_allowed",
+  "sha256": "d3877065306284b2a2273aed5c98b69e61aa3ff01dab60eeacee066747869e09"
+ },
+ "b0_provider_timeout": {
+  "outcome": "timeout/upstream_timeout",
+  "sha256": "1a14b6a53a7a7d74960a6df835804604e7b05489be9abbda61302f8e75de72e2"
+ },
+ "b0_rowset": {
+  "outcome": "succeeded/None",
+  "sha256": "812a7f364256357d1f92ad53b5f5139acd90fe8bcf23a120ab7c7794abf7c1af"
+ },
+ "b0_scalar_verified": {
+  "outcome": "succeeded/None",
+  "sha256": "46d9b02576c966639262b8e1bafd47e71acb09afd02ce82264c17effe171903b"
+ },
+ "b0_search_is_not_allowed": {
+  "outcome": "failed/baseline_tool_not_allowed",
+  "sha256": "831fd3311d1a09807272fdc807ae15f56e9c2f64dbb70c11fb82fc26bee4cb19"
+ },
+ "b0_ungrounded_answer": {
+  "outcome": "failed/answer_not_grounded",
+  "sha256": "fe8d56dfae452eb045b90efdba68e41c439dbcd873de8a9aa846ef9b678a653a"
+ },
+ "b0_unparseable_output": {
+  "outcome": "failed/invalid_shape",
+  "sha256": "61e64e260d4ecf7a700a8c7dbdd36d71fcebdf679842aec9c629ff528fd917ff"
+ },
+ "b0_unsupported_scope": {
+  "outcome": "failed/clarification_value_unsupported",
+  "sha256": "1949dcb27cb1d539639b95038352c269b8bd5adbd5320ca2774173a3ccfc775b"
+ },
+ "b1_payload_binds_facts_to_the_context": {
+  "outcome": "succeeded/None",
+  "sha256": "7ff0c57f8f83667bf2f612c1073f1250c871c598b83244875230987c8382fbc5"
+ },
+ "b1_payload_marks_a_pre_model_rejection": {
+  "outcome": "denied/forbidden",
+  "sha256": "3b9692c64a0908eb7129c82e524eb560ae13841fd07a55b144f60595a3e8189a"
+ },
+ "bound_result_not_cited_is_terminal": {
+  "outcome": "failed/evidence_validation_failed",
+  "sha256": "b7cb2a53d151b2e0c1bef02b61e57dfdff402a63944c7f48f0a55492cce6c973"
+ },
+ "catalog_gate_waits_on_order_scope": {
+  "outcome": "waiting_user/None",
+  "sha256": "e3f8f850037f9f9e3469565cea4d08cbfc4931539df0e998f79600ffc4a8e49b"
+ },
+ "checkpoint_after_a_repair": {
+  "outcome": "WAITING_USER/None",
+  "sha256": "b2fd5077de04fed2aa0603ea10d46d33ab44eaa348a24a5fa5eeabb6ce3287ba"
+ },
+ "citation_before_any_query": {
+  "outcome": "failed/answer_without_query_result",
+  "sha256": "c89cd88d50d83ccdf4c60fc385fd7bdbe4cea34b2f05d797e42a08a18d2fbd79"
+ },
+ "citing_an_unknown_result_after_a_query": {
+  "outcome": "failed/evidence_validation_failed",
+  "sha256": "52dbccb012cbb5eda3238d05e03a1640021dff07e79f774ad288d66a5dd1d341"
+ },
+ "context_default_json": {
+  "outcome": "-",
+  "sha256": "5960c861e834e6fe633b2e529d4e1ed958385811e0d97929fb71168a73507705"
+ },
+ "context_native_protocol": {
+  "outcome": "-",
+  "sha256": "83350bd8de4018b962d789954b1c9d07d68168d7e0849e60cd7395680dbd892d"
+ },
+ "context_trimmed_to_the_budget": {
+  "outcome": "-",
+  "sha256": "c9911564e989f9157212e179888ec7dfb47dfc2901a3687aad39e767338bb00a"
+ },
+ "context_with_bindings_window_and_clarifications": {
+  "outcome": "-",
+  "sha256": "fb5ca23423b78654a4372e2e686497dab294d95c84248eef6e10736525258fea"
+ },
+ "context_without_retrieval_or_parallel": {
+  "outcome": "-",
+  "sha256": "b86c2d1667801e105c1d773a410867b4d1bfa79055563775f0524802c179723a"
+ },
+ "continue_waiting_for_clarification": {
+  "outcome": "waiting_user/None",
+  "sha256": "64b4b2724b6df31ca2c8bdcfe56704bd753072fdf6efd98e320de9fd5fbe49e6"
+ },
+ "contradiction_then_corrected_answer": {
+  "outcome": "succeeded/None",
+  "sha256": "b40080420ff86d9c377789fc0d6f9c65760f3b704b5a7ab46862d4edef4e6499"
+ },
+ "contradiction_then_repair_then_answer": {
+  "outcome": "succeeded/None",
+  "sha256": "4d4bf003596c47fa51d7c8621fd710ac01055b3ee01d81205bfaeb5a491ed9dd"
+ },
+ "contradiction_twice": {
+  "outcome": "failed/metric_contradicts_question",
+  "sha256": "2de56dc73c2e496fddb188f012abfaf2df115c62d0df1dd8fb708fe1b7c278f9"
+ },
+ "deny_action": {
+  "outcome": "denied/None",
+  "sha256": "86b8fd9c629410a4baf396572743ec8846625e65ba2604415037a102800de390"
+ },
+ "evidence_of_a_successful_query_cannot_be_loaded": {
+  "outcome": "failed/evidence_validation_failed",
+  "sha256": "0cb5767695e3de6ab98aa43ebe6082b5c44da9b7c5f93a8600ae11bae9781d64"
+ },
+ "explicit_foreign_tenant_is_denied": {
+  "outcome": "denied/forbidden",
+  "sha256": "2726d6d9577b42ec49073f98a4d9aa2dd875eae85656694a7436844a68700681"
+ },
+ "fail_unsupported_clarification": {
+  "outcome": "failed/clarification_value_unsupported",
+  "sha256": "bb50a5d9496668823f08c4ee3462fc71adce3abcc9e2595d8aba0ca9e8c437a7"
+ },
+ "fake_model_json_protocol": {
+  "outcome": "succeeded/None,succeeded/None,succeeded/None,waiting_user/None,waiting_approval/None,succeeded/None,waiting_user/None",
+  "sha256": "9a1986314a82f50bcb99e167423206815b46f6ff3aaf4e3b59af942ac8d81b3c"
+ },
+ "fake_model_native_protocol": {
+  "outcome": "succeeded/None,succeeded/None,succeeded/None,waiting_user/None,waiting_approval/None,succeeded/None,waiting_user/None",
+  "sha256": "6077c684bd274ac8dd658b38d09e615e8f9ba9c94b7c11e8b5d3e629bcdd17b5"
+ },
+ "initial_retrieval_items": {
+  "outcome": "succeeded/None",
+  "sha256": "f5a909c2bf757e5de7dc73f04db79ef46e94171c9855e6922f49fa7d6468e81a"
+ },
+ "knowledge_answer_citing_results_is_a_conflict": {
+  "outcome": "failed/answer_basis_conflict",
+  "sha256": "dbdde77ccd5f33dc6fed1a405c613a23e1a3e4879226ed3946ae456036da8962"
+ },
+ "knowledge_from_a_search": {
+  "outcome": "succeeded/None",
+  "sha256": "ec9ecd8ff9ab451f59c909783bd70550f49cd61fc61ed0e29b59df60bcd961c7"
+ },
+ "knowledge_without_source_triggers_the_server_search": {
+  "outcome": "succeeded/None",
+  "sha256": "18c013dad04e6926531f47432c78210d37a3f6b2c4fa81e90ad2496cd29dae0b"
+ },
+ "model_call_limit": {
+  "outcome": "limit_reached/model_call_limit",
+  "sha256": "43ceb3f3fd2975c6f2328130a33f46bc62b2cce0c6062ac1496c991e34a94abd"
+ },
+ "native_checkpoint_resumes_under_native": {
+  "outcome": "succeeded/None",
+  "sha256": "93f406e9bfd06df101a59682a72eb2cfbda3109cf2982d2458b426e3ea1fbd4b"
+ },
+ "net_plan_verified": {
+  "outcome": "succeeded/None",
+  "sha256": "ceb50bd2ff3cc7e596c15d63e6d6c56a86ba5ec474738b1e24275ebb784af3c7"
+ },
+ "no_data_after_a_query_is_a_conflict": {
+  "outcome": "failed/answer_basis_conflict",
+  "sha256": "a8a2cf426014e5424decfe12d188929a394de277cc18d7d47cd18ce99023f037"
+ },
+ "no_data_reply": {
+  "outcome": "succeeded/None",
+  "sha256": "fdd6bfe0f901650175821f63a0f411af49491c80c197f4816fe2290ac7be4801"
+ },
+ "non_metric_rows_answer": {
+  "outcome": "succeeded/None",
+  "sha256": "1a58138f224017199e58cd13e4a5a3edac1671336f58385692f2dfba20cd7275"
+ },
+ "parallel_contradiction_twice": {
+  "outcome": "failed/metric_contradicts_question",
+  "sha256": "f495450974b4d9c0e4b7b0dd317dde7a5549d7a96e05829704933b67816ea2a5"
+ },
+ "parallel_group_succeeds": {
+  "outcome": "succeeded/None",
+  "sha256": "f8fed9f241844086dba40c63590237892a63f90e57fb52b2cf39e57e5db0574a"
+ },
+ "parallel_over_the_tool_budget": {
+  "outcome": "limit_reached/parallel_budget_insufficient",
+  "sha256": "425910e1fa66db7730ac62f52c88bb8b287b366b0e70aeffdc189ec6f38f2ba9"
+ },
+ "parallel_without_scheduler_is_repaired": {
+  "outcome": "succeeded/None",
+  "sha256": "0c4bdbb715a38887b9b4c1e5259387563c71923dd7db1a74efcd5c6e87edc537"
+ },
+ "parallel_without_scheduler_twice": {
+  "outcome": "failed/parallel_unavailable",
+  "sha256": "1b8d7bc22eb1d1cda5d043e7bcf8c7db47de7e4dc09e1862ddf0c4e35cc43082"
+ },
+ "plain_ask_after_a_repair": {
+  "outcome": "waiting_user/None",
+  "sha256": "e715896225efafb7b6fb8dc5c87c0d19169983c221db60ca2433600773c1744a"
+ },
+ "policy_denied_table": {
+  "outcome": "denied/table_not_allowed",
+  "sha256": "1275de766d42e63348c106159a3c77291883e2d72a10d2d71f198caee53b12ca"
+ },
+ "prebound_metric_makes_ask_unneeded": {
+  "outcome": "failed/clarification_not_needed",
+  "sha256": "685fd6b4a9629848a2a6aef033dc669e6b80c1262ae859379dfd72c1bed9878a"
+ },
+ "prepared_checkpoint_is_v3": {
+  "outcome": "succeeded/None",
+  "sha256": "24702b3d76ec41e61caff210fb9336c1944882e983eb162bfc1996959ffa7ba0"
+ },
+ "provider_failure": {
+  "outcome": "failed/upstream_timeout",
+  "sha256": "ef1e5b35ad1fe823ec2ecd9673911fa1ed15dd3bb46b5f5bd92ad85c9ac052e6"
+ },
+ "question_too_long_for_the_context": {
+  "outcome": "failed/message_too_long",
+  "sha256": "9d8ee5dab174a650a553b0932aab47c8b5737829ce68654af304986ec2c25f80"
+ },
+ "repair_budget_exhausted": {
+  "outcome": "failed/query_repair_limit",
+  "sha256": "3d943cd2271aeeb21430f6aee0cf2ce57537918f4a14c67c77fe48b92cc996fa"
+ },
+ "repair_then_success": {
+  "outcome": "succeeded/None",
+  "sha256": "93d33c1b618cf966d618488587082283228a869f1881efb9a89bb2699eaf36c5"
+ },
+ "resume_after_catalog_question": {
+  "outcome": "succeeded/None",
+  "sha256": "64f72df71ba542c6810441c1a4f39e1bdeb6336f7168dc6ca95cd44c243f1121"
+ },
+ "resume_from_checkpoint_answers": {
+  "outcome": "succeeded/None",
+  "sha256": "745a9e512336ff04c1cc3d223e39497940890d36ca3f8eba0d7b7428d687e930"
+ },
+ "resume_from_checkpoint_waits_again": {
+  "outcome": "waiting_user/None",
+  "sha256": "e77c732ce56e4f576e4140a8118a6c5fc21158b367275541d7d17dae34aa6545"
+ },
+ "resume_in_memory_answers": {
+  "outcome": "succeeded/None",
+  "sha256": "7beaf5a319febdd43e30ce0e1c7d3337e9a8b75078ddd996d5435e4ea7864573"
+ },
+ "resume_keeps_bindings_window_and_parallel_plan": {
+  "outcome": "succeeded/None",
+  "sha256": "deeb3932d780ffa21448a612e88c390fc0526dddfd48c6580d551d24cedfef72"
+ },
+ "rowset_answer_unverified": {
+  "outcome": "succeeded/None",
+  "sha256": "639dc3172c2849d974164e596aae14130d6cc79db9e7ebda115065f44b36cc43"
+ },
+ "run_config_serialization": {
+  "outcome": "-",
+  "sha256": "be1e3329317abe92f82aa37da56a0806246ef9b91d86a63f807d165d3ced0443"
+ },
+ "scalar_verified": {
+  "outcome": "succeeded/None",
+  "sha256": "cdf1848657cdf9e480f74d364fb6fb0d33531986d89f2b61b1aaffb4f93619c5"
+ },
+ "search_without_retriever": {
+  "outcome": "failed/retrieval_unavailable",
+  "sha256": "ad1863daf257d2cc4d757baebe353db7f8cb003fde774340ead6a44860897026"
+ },
+ "server_search_error": {
+  "outcome": "failed/answer_not_grounded",
+  "sha256": "6f49a4f3aa4c046b2e346a5959e0d31503fa6408bfc91d413a277598f927f030"
+ },
+ "server_search_finds_nothing": {
+  "outcome": "failed/answer_not_grounded",
+  "sha256": "795783bf712110b77d66f75451bd8363629a27a6806e6b66e3ba8c0d0e1fa340"
+ },
+ "server_search_mcp_failure": {
+  "outcome": "failed/mcp_unavailable",
+  "sha256": "2f86a26e1850fd0d84a436834eedab5081f664466f99781b37c773fb2965276b"
+ },
+ "server_search_with_no_tool_call_left": {
+  "outcome": "failed/answer_not_grounded",
+  "sha256": "92ce024236ca7e604b73bc97fa537bc1ec8204e5a7c99ecb7ba9f4291235fe23"
+ },
+ "server_search_without_retriever": {
+  "outcome": "failed/answer_not_grounded",
+  "sha256": "67a2c143dc11a8d897a61010cf6dc56b922892c0f193d82bec31930d88056cd5"
+ },
+ "tool_call_limit": {
+  "outcome": "limit_reached/tool_call_limit",
+  "sha256": "c57e71fd19aa9d66a914498f7be2fe90aa42c870b5f4a695e5e68ca0ddf3f220"
+ },
+ "tool_inputs_are_summarized_without_model_text": {
+  "outcome": "succeeded/None",
+  "sha256": "e316e14fee5dd9d02aead62d897e61ca27e7dd9226555695c02cbbed26f8c1d6"
+ },
+ "tool_name_written_as_type_then_repaired": {
+  "outcome": "succeeded/None",
+  "sha256": "3a4d70cdc122fddcbc136666d58788c168be75ae7364ef6646e9c4cf7164db38"
+ },
+ "tool_name_written_as_type_twice": {
+  "outcome": "failed/tool_name_as_action_type",
+  "sha256": "60b156b4bcf13054cc178357e6f22fce63441071a1869fc2d9d7ba7173102ad2"
+ },
+ "two_scalar_metrics": {
+  "outcome": "succeeded/None",
+  "sha256": "da8fd588a53e831c466b3b5267cea521652bc53f508dd6baa131751b788e36ef"
+ },
+ "undeclared_metric_reference_is_repaired": {
+  "outcome": "succeeded/None",
+  "sha256": "61d50404488bec363fe14edc42a2c4f563cf0dd33f5526bbe75692379e2d12e4"
+ },
+ "ungrounded_answer_is_sent_back_then_queries": {
+  "outcome": "succeeded/None",
+  "sha256": "6a7082537a74c05a1ed6a2f87640eef2a4678fbaa4d0fc0d28b7b308cbb93a71"
+ },
+ "ungrounded_answer_twice": {
+  "outcome": "failed/answer_not_grounded",
+  "sha256": "aaea9941ed1194b81d1412411180dcf4de3cca77d812f05e7f90c46fe1b418d2"
+ },
+ "unparseable_model_output": {
+  "outcome": "failed/invalid_shape",
+  "sha256": "69d930d96a11a20253dae37f80ad378d0d0c9a245f79548077068fc5c31a07d5"
+ },
+ "usage_all_known": {
+  "outcome": "succeeded/None",
+  "sha256": "5cdc6a09ec1158821d3ea8bf7c9f168a2368fb248c77d5f5f067b42bb8d6a757"
+ },
+ "usage_inconsistent_total": {
+  "outcome": "succeeded/None",
+  "sha256": "4e8dcd5c0970caed48137de4b5355bf82f2c0548a2589e57d2a5e00f9a380749"
+ },
+ "usage_known_status_without_usage": {
+  "outcome": "succeeded/None",
+  "sha256": "9e73ebdb61669fb3e0d87ea1ab67555be830581bd4ea2752928e95da1847787f"
+ },
+ "usage_negative_tokens": {
+  "outcome": "succeeded/None",
+  "sha256": "3bbcedb8e8df32ad950a67aa5f9cb3e86fc70e2a3d00fbb9af410596fc52451b"
+ },
+ "usage_unknown_status_with_numbers": {
+  "outcome": "succeeded/None",
+  "sha256": "8fc731a91733e6c39adbbf29ee2070e2ebeadfe6e9942d40d9a8f0a791aeec93"
+ },
+ "usage_with_an_unknown_call": {
+  "outcome": "succeeded/None",
+  "sha256": "4982082f5717df547a8e2e706d3bffaa0a89fb3cc71db948fe6252e733e2aac6"
+ },
+ "wall_clock_limit": {
+  "outcome": "limit_reached/wall_clock_limit",
+  "sha256": "ab2ad5f4a95664c8d3e9d1d2bd3e6835e28b73ff8507a6d11af507f10805c4c1"
+ }
+}

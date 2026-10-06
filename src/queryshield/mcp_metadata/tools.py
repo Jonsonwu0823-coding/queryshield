@@ -11,7 +11,7 @@ session and fails the call; nothing falls back to the local tools.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import shutil
 import tempfile
 from typing import Any
@@ -21,6 +21,7 @@ from queryshield.mcp_metadata.launch import McpMetadataConfig, product_launch
 from queryshield.mcp_metadata.schemas import (
     FAILURE_SOURCE_UPSTREAM,
     MCP_ERROR_MESSAGES,
+    MCP_PROTOCOL_ERROR,
     MCP_RESULT_INVALID,
     MCP_TIMEOUT,
     MCP_UNAVAILABLE,
@@ -46,7 +47,7 @@ from queryshield.tools.semantic import (
 _OUTCOMES = {
     MCP_UNAVAILABLE: "unavailable",
     MCP_TIMEOUT: "timeout",
-    "mcp_protocol_error": "protocol_error",
+    MCP_PROTOCOL_ERROR: "protocol_error",
     MCP_RESULT_INVALID: "result_invalid",
 }
 
@@ -63,7 +64,6 @@ class McpMetadataTools(ControlledTools):
     """ControlledTools whose two metadata tools run in this run's MCP server process."""
 
     metadata_config: McpMetadataConfig | None = None
-    metadata_transport: str = field(default=TRANSPORT, init=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -152,7 +152,6 @@ class McpMetadataTools(ControlledTools):
                 raise ToolError("unauthorized", "the metadata session is bound to another execution context")
             return self._session
         config = self.metadata_config
-        assert config is not None
         self._session_dir = tempfile.mkdtemp(prefix="queryshield-mcp-session-")
         launcher = config.launcher or product_launch
         try:

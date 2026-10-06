@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator, Fi
 
 
 class RequestTimeWindow(BaseModel):
-    """Request-level window (a date picker); the same rules as B2a declarations."""
+    """Request-level window (a date picker); the same rules as the model's window declarations."""
 
     model_config = ConfigDict(extra="forbid")
     start: str = Field(max_length=40)
@@ -25,6 +25,15 @@ class RequestTimeWindow(BaseModel):
         return {"start": self.start, "end": self.end, "timezone": self.timezone}
 
 
+def _strip_nonblank(value: object, name: str) -> object:
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError(f"{name} must not be blank")
+        return cleaned
+    return value
+
+
 class QueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     question: str = Field(max_length=500)
@@ -33,12 +42,7 @@ class QueryRequest(BaseModel):
     @field_validator("question", mode="before")
     @classmethod
     def strip_question(cls, value: object) -> object:
-        if isinstance(value, str):
-            cleaned = value.strip()
-            if not cleaned:
-                raise ValueError("question must not be blank")
-            return cleaned
-        return value
+        return _strip_nonblank(value, "question")
 
 
 class QueryProposalRequest(BaseModel):
@@ -48,11 +52,4 @@ class QueryProposalRequest(BaseModel):
     @field_validator("proposal", mode="before")
     @classmethod
     def strip_proposal(cls, value: object) -> object:
-        if isinstance(value, str):
-            cleaned = value.strip()
-            if not cleaned:
-                raise ValueError("proposal must not be blank")
-            return cleaned
-        return value
-
-        
+        return _strip_nonblank(value, "proposal")

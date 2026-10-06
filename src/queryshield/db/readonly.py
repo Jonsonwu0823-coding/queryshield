@@ -34,7 +34,7 @@ def connect_timeout_seconds() -> int:
     return int(value)
 
 
-# B3d: the demo database and the demo knowledge base are one setting, chosen by
+# The demo database and the demo knowledge base are one setting, chosen by
 # the server operator (never by a client).  The demo data lives only in a database
 # whose name ends with _demo; the evaluation and history checks use _test.  Both
 # directions are refused so neither can read the other's data.  Only the database
@@ -123,9 +123,7 @@ def get_database_url() -> str:
 
     return database_url
 
-def connect_readonly(*, tenant_id: str | None = None) -> psycopg.Connection:
-    if tenant_id is not None and (type(tenant_id) is not str or not tenant_id.strip()):
-        raise ValueError("tenant_id must be a non-empty string")
+def connect_readonly() -> psycopg.Connection:
     return psycopg.connect(
         get_database_url(),
         connect_timeout=connect_timeout_seconds(),

@@ -1,4 +1,4 @@
-# QueryShield: PostgreSQL + one-shot database setup + the service (B4b).
+# QueryShield: PostgreSQL + one-shot database setup + the service.
 #
 #   python scripts/new_env.py      # once: writes .env with random credentials (never printed)
 #   docker compose up -d --build   # builds the image, creates the demo database, starts the service
@@ -65,12 +65,13 @@ services:
       setup:
         condition: service_completed_successfully
     environment:
-      # The database name is written out: the demo pairing check (G6) reads it from the URL.
+      # The database name is written out: the demo pairing check reads it from the URL.
       QUERYSHIELD_DATABASE_URL: postgresql://queryshield_ro:${QUERYSHIELD_RO_PASSWORD:?QUERYSHIELD_RO_PASSWORD is not set - run python scripts/new_env.py first}@db:5432/queryshield_demo
       QUERYSHIELD_DEMO_DATASET: commerce-demo-v1
       QUERYSHIELD_STATE_STORE_PATH: /var/lib/queryshield/state.sqlite3
       QUERYSHIELD_CALL_STORE_PATH: /var/lib/queryshield/calls.sqlite3
       QUERYSHIELD_PROVIDER_MODE: ${QUERYSHIELD_PROVIDER_MODE:-fake}
+      QUERYSHIELD_MODEL_PROTOCOL: ${QUERYSHIELD_MODEL_PROTOCOL:-json}
       QUERYSHIELD_TOKEN_A_REQUESTER: ${QUERYSHIELD_TOKEN_A_REQUESTER:?QUERYSHIELD_TOKEN_A_REQUESTER is not set - run python scripts/new_env.py first}
       QUERYSHIELD_TOKEN_A_APPROVER: ${QUERYSHIELD_TOKEN_A_APPROVER:?QUERYSHIELD_TOKEN_A_APPROVER is not set - run python scripts/new_env.py first}
       QUERYSHIELD_TOKEN_B_REQUESTER: ${QUERYSHIELD_TOKEN_B_REQUESTER:?QUERYSHIELD_TOKEN_B_REQUESTER is not set - run python scripts/new_env.py first}

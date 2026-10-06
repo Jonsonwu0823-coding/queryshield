@@ -226,7 +226,7 @@ def test_waiting_user_resume_preserves_run_and_adds_clarification() -> None:
 
     waiting = runtime.run(context, "销售额")
     assert waiting.status == "waiting_user"
-    # B3b: the ask names catalog rule clarify.metric_basis (销售额 is open), so
+    # The ask names catalog rule clarify.metric_basis (销售额 is open), so
     # the server keeps the catalog question, never the model's text.
     assert waiting.action == {
         "type": "ask_user",

@@ -1,4 +1,4 @@
-"""Deterministic W04 context compression and restore checks."""
+"""Deterministic context compression and restore checks."""
 
 from __future__ import annotations
 
@@ -6,9 +6,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import json
 
+from queryshield.agent.context import MAX_CONTEXT_BYTES
+
 
 CONTEXT_RUNTIME_VERSION = "qs-context-runtime-v1"
-MAX_CONTEXT_BYTES = 24_000
 MAX_RESULT_REFERENCES = 32
 
 

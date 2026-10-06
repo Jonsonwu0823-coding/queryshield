@@ -1,4 +1,4 @@
-"""Product adapters for replaying the frozen W05 state-case inputs."""
+"""Product adapters for replaying the frozen state-case inputs."""
 
 from __future__ import annotations
 
@@ -14,12 +14,13 @@ from uuid import uuid4
 
 from queryshield.agent.config import RunConfig
 from queryshield.agent.context import NET_FEN_PLAN_ID, NET_FEN_TIME_WINDOW
-from queryshield.agent.proposals import ExecutionContext, FactRef, MetricBinding
+from queryshield.agent.proposals import ExecutionContext, FactRef, MetricBinding, ProposalParseError, native_action_text
+from queryshield.agent.runtime import with_model_protocol
 from queryshield.approval.service import (
-    W04_CATALOG_VERSION,
-    W04_DEFAULT_SNAPSHOT,
-    W04_POLICY_VERSION,
-    W04RunService,
+    BOUND_CATALOG_VERSION,
+    DEFAULT_KNOWLEDGE_SNAPSHOT,
+    BOUND_POLICY_VERSION,
+    RunService,
     action_hash,
     build_pending_action,
 )
@@ -27,15 +28,15 @@ from queryshield.agent.tool_execution import prepare_pending_call
 from queryshield.auth import identity as identity_module
 from queryshield.catalog import load_default_catalog
 from queryshield.db.guarded import GuardedQueryError, GuardedQueryExecutor, render_scoped_select
-from queryshield.db.w04_state import StateStore
+from queryshield.db.state_store import StateStore
 from queryshield.evaluation.state_cases import (
-    W05StateCase,
+    StateCase,
     canonical_sha256,
-    resolve_w05_actor_fixture,
-    resolve_w05_principal_fixture,
+    resolve_actor_fixture,
+    resolve_principal_fixture,
 )
 from queryshield.evaluation.usage import usage_status_record
-from queryshield.evaluation.w05_provenance import claimed_components_excluding, verify_net_fen_composition
+from queryshield.evaluation.provenance import claimed_components_excluding, verify_net_fen_composition
 from queryshield.facts import FactResolver
 from queryshield.policy.sql import SQLPolicyError, parse_readonly_select
 from queryshield.tools.semantic import ControlledTools
@@ -66,7 +67,7 @@ def _window_from_question(question: str) -> dict[str, str]:
 def _fake_declared_metrics(question: str) -> list[str]:
     """The scripted Fake's own proposal rule.
 
-    This belongs to the W05 test double only: the product never calls it, and
+    This belongs to the test double only: the product never calls it, and
     whatever the Fake declares is still checked against the catalog and the SQL
     projection by the server.
     """
@@ -139,7 +140,7 @@ def _seed_pending_action(
     catalog: Any,
     executor: Any,
 ) -> dict[str, object]:
-    """Materialize a frozen WAITING_APPROVAL state from the W05 Fake's own script.
+    """Materialize a frozen WAITING_APPROVAL state from the Fake's own script.
 
     The scripted call passes the product's pending-call verification (the same
     checks as the live path; nothing executes) and is bound to the run and the
@@ -278,14 +279,14 @@ def _response_shape(content: str) -> dict[str, object]:
     return shape
 
 
-class W05StateFakeModel:
+class StateCaseFakeModel:
     """Deterministic test provider driven only by frozen input/action metadata."""
 
     mode = "fake"
     provider = "w05-state-case-script"
     model = "w05-state-case-script-v2"
 
-    def __init__(self, case: W05StateCase) -> None:
+    def __init__(self, case: StateCase) -> None:
         self.case = case
         self.question = str(
             case.case["action"]["parameters"].get("question")
@@ -408,8 +409,8 @@ class W05StateFakeModel:
         )
 
 
-class _W05InvalidSqlFaultInjector:
-    """Inject one declared recoverable failure after W05 SQL policy rendering."""
+class _InvalidSqlFaultInjector:
+    """Inject one declared recoverable failure after SQL policy rendering."""
 
     def __init__(
         self,
@@ -471,8 +472,33 @@ class _W05InvalidSqlFaultInjector:
         return getattr(self.delegate, name)
 
 
+def evaluation_run_config(config: RunConfig, provider_mode: object) -> RunConfig:
+    """The B1 run config for an evaluation run: a real model follows the model
+    protocol setting, while the Fake model always runs the json protocol."""
+
+    return with_model_protocol(config) if provider_mode == "real" else config
+
+
+def model_output_text(result: ModelCallResult) -> str:
+    """What a record keeps as the model's output: the content, or for a
+    native call the json action it stands for (the content if it converts to none)."""
+
+    if result.tool_calls is None:
+        return result.content
+    try:
+        return native_action_text(result.tool_calls)
+    except ProposalParseError:
+        return result.content
+
+
+def native_record_fields(result: ModelCallResult) -> dict[str, object]:
+    if result.tool_calls is None:
+        return {}
+    return {"finish_reason": result.finish_reason, "tool_call_count": len(result.tool_calls)}
+
+
 class _RecordingEvaluationModel:
-    """Keep exact W05 development completion text linked to its server call ID."""
+    """Keep exact development completion text linked to its server call ID."""
 
     def __init__(self, delegate: Any, records: list[dict[str, object]], call_context: dict[str, object]) -> None:
         self.delegate = delegate
@@ -480,7 +506,7 @@ class _RecordingEvaluationModel:
         self.call_context = call_context
         self.mode = getattr(delegate, "mode", "real")
 
-    def complete(self, messages, *, request_id=None, model_call_id=None):
+    def complete(self, messages, *, request_id=None, model_call_id=None, **options):
         prompt_source_items = _prompt_retrieval_items(messages)
         prompt_query_result_refs = _prompt_query_result_refs(messages)
         prompt_catalog_search_items = _prompt_catalog_search_items(messages)
@@ -489,6 +515,7 @@ class _RecordingEvaluationModel:
                 messages,
                 request_id=request_id,
                 model_call_id=model_call_id,
+                **options,
             )
         except ModelProviderError as exc:
             provider_record = exc.record
@@ -513,7 +540,8 @@ class _RecordingEvaluationModel:
             self.call_context.update({"model_call_id": model_call_id, "request_id": request_id})
             raise
 
-        content_bytes = result.content.encode("utf-8")
+        output = model_output_text(result)
+        content_bytes = output.encode("utf-8")
         record = {
             "model_call_id": result.model_call_id or model_call_id,
             "request_id": result.request_id or request_id,
@@ -525,14 +553,15 @@ class _RecordingEvaluationModel:
             "provider_request_id": result.provider_request_id,
             "usage_status": result.usage_status,
             "usage": result.usage.as_dict() if result.usage is not None else None,
-            "raw_content": result.content,
+            "raw_content": output,
             "content_length": len(content_bytes),
             "content_sha256": hashlib.sha256(content_bytes).hexdigest(),
             "prompt_source_items": prompt_source_items,
             "prompt_source_receipt": "captured_from_actual_model_request_messages",
             "prompt_query_result_refs": prompt_query_result_refs,
             "prompt_catalog_search_items": prompt_catalog_search_items,
-            "response_shape": _response_shape(result.content),
+            "response_shape": _response_shape(output),
+            **native_record_fields(result),
         }
         if isinstance(record["response_shape"], Mapping) and type(record["response_shape"].get("action_type")) is str:
             record["proposal_type"] = record["response_shape"]["action_type"]
@@ -629,7 +658,7 @@ def _parse_time(value: str) -> datetime:
 
 
 def _state_path_observation(
-    case: W05StateCase,
+    case: StateCase,
     profile: str,
     run_id: str,
     *,
@@ -648,10 +677,10 @@ def _state_path_observation(
         get_guarded_executor,
         get_model_provider,
         get_retriever_source,
-        get_w04_service,
+        get_run_service,
     )
     from queryshield.agent import BoundedAgent, DurableModelCallStore
-    from queryshield.evaluation.w05_runner import B1_PROFILE
+    from queryshield.evaluation.profile_runner import B1_PROFILE
     from queryshield.facts import FactResolver
     from queryshield.agent.proposals import ExecutionContext
     from queryshield.agent.context import NET_FEN_GROSS_QUERY, NET_FEN_REFUND_QUERY
@@ -664,13 +693,13 @@ def _state_path_observation(
     entrypoint = str(action["entrypoint"])
     messages = [item for item in initial.get("messages", ()) if isinstance(item, Mapping)]
     user_messages = [item for item in messages if item.get("role") == "user"]
-    actor = resolve_w05_actor_fixture(str(action["actor"]), tenant_id=str(initial["principal_fixture"].split("/")[0].removeprefix("tenant-")))
-    fixture_identity = resolve_w05_principal_fixture(str(initial["principal_fixture"]))
+    actor = resolve_actor_fixture(str(action["actor"]), tenant_id=str(initial["principal_fixture"].split("/")[0].removeprefix("tenant-")))
+    fixture_identity = resolve_principal_fixture(str(initial["principal_fixture"]))
     clock = _parse_time(str(initial["clock_utc"]))
     state = StateStore(clock=lambda: clock)
     sql_records: list[dict[str, object]] = []
     recorded_executor = database_executor(sql_records)
-    service = W04RunService(
+    service = RunService(
         store=state,
         executor_factory=lambda: recorded_executor,
         clock=lambda: clock,
@@ -762,7 +791,7 @@ def _state_path_observation(
             principal_id=fixture_identity["principal_id"],
             role=fixture_identity["role"],
         )
-        route_model = route_model or W05StateFakeModel(case)
+        route_model = route_model or StateCaseFakeModel(case)
         # Capture the exact request messages used by the production resume
         # route. The persisted event log has call IDs, but not the source/result
         # references that were actually sent to the model.
@@ -771,15 +800,16 @@ def _state_path_observation(
         agent_run_config = RunConfig(
             profile=B1_PROFILE,
             catalog_version=catalog.catalog_version,
-            knowledge_snapshot_id=getattr(snapshot, "snapshot_id", W04_DEFAULT_SNAPSHOT),
+            knowledge_snapshot_id=getattr(snapshot, "snapshot_id", DEFAULT_KNOWLEDGE_SNAPSHOT),
         )
+        agent_run_config = evaluation_run_config(agent_run_config, route_model.mode)
         call_store = DurableModelCallStore(":memory:")
         original_question = str((user_messages or messages or [{"content": "W05 state case"}])[-1]["content"])
         declared_window = parameters.get("time_window")
         assistant_messages = [item for item in messages if item.get("role") == "assistant"]
         waiting_question = str(assistant_messages[-1].get("content", "")) if assistant_messages else ""
         # The evaluator no longer derives metric bindings from the question.  A
-        # confirmed clarification slot is re-bound by the W04 service from its
+        # confirmed clarification slot is re-bound by the service from its
         # own server checkpoint on resume; otherwise the model declares metrics.
         prepared_bindings: tuple[MetricBinding, ...] = ()
         snapshot = getattr(retriever, "snapshot", None)
@@ -890,7 +920,7 @@ def _state_path_observation(
         # Old-run evidence attached to a current run models the frozen initial checkpoint.
         # The route response is recorded exactly; it is never scored from fixture values.
         facts = seed_by_alias[str(fixture["alias"])]["actual_facts"]
-        from queryshield.evaluation.w05_runner import _render_fact_records
+        from queryshield.evaluation.profile_runner import _render_fact_records
 
         state.update_run(
             run_id=target_id,
@@ -935,19 +965,19 @@ def _state_path_observation(
             requester_principal_id=fixture_identity["principal_id"],
             action_hash=action_hash(approval_action),
             action=approval_action,
-            policy_version=W04_POLICY_VERSION,
-            catalog_version=W04_CATALOG_VERSION,
-            knowledge_snapshot_id=W04_DEFAULT_SNAPSHOT,
+            policy_version=BOUND_POLICY_VERSION,
+            catalog_version=BOUND_CATALOG_VERSION,
+            knowledge_snapshot_id=DEFAULT_KNOWLEDGE_SNAPSHOT,
             expires_at=_parse_time(str(approval_fixture["approved_at"])) + timedelta(seconds=600),
         )
         state.update_run(run_id=actual_run_id, status="WAITING_APPROVAL", action_json=json.dumps(run_action))
 
     config_backup = identity_module.IDENTITY_CONFIG
-    token_env = f"QUERYSHIELD_W05_LOCAL_{uuid4().hex.upper()}"
+    token_env = f"QUERYSHIELD_EVAL_LOCAL_{uuid4().hex.upper()}"
     token = uuid4().hex
     previous_token = os.environ.get(token_env)
     identity_module.IDENTITY_CONFIG = {
-        "w05-case-actor": {
+        "eval-case-actor": {
             "token_env": token_env,
             "principal_id": actor["principal_id"],
             "tenant_id": actor["tenant_id"],
@@ -955,12 +985,12 @@ def _state_path_observation(
         }
     }
     os.environ[token_env] = token
-    dependencies = (get_w04_service, get_call_store, get_guarded_executor, get_model_provider, get_retriever_source)
+    dependencies = (get_run_service, get_call_store, get_guarded_executor, get_model_provider, get_retriever_source)
     previous_overrides = {dependency: app.dependency_overrides.get(dependency) for dependency in dependencies}
-    app.dependency_overrides[get_w04_service] = lambda: service
+    app.dependency_overrides[get_run_service] = lambda: service
     # Resume assembles the product agent.  State-route replays keep catalog-only
     # search (the product setting QUERYSHIELD_RETRIEVAL=catalog): the state-route
-    # observer cannot yet see hybrid retrieval returns (B2c reads them from the
+    # observer cannot yet see hybrid retrieval returns (the product reads them from the
     # HTTP response).
     from queryshield.knowledge.runtime import CATALOG_SEARCH_ONLY
 
@@ -972,7 +1002,7 @@ def _state_path_observation(
         app.dependency_overrides[get_model_provider] = lambda: route_model
     try:
         # Do not enter TestClient's lifespan: that startup hook recovers the
-        # process-global W04 store. This probe injects its own isolated service.
+        # process-global store. This probe injects its own isolated service.
         client = TestClient(app)
         target_run_id = alias_to_id[requested_run_alias]
         headers = {"Authorization": f"Bearer {token}"}
@@ -1002,7 +1032,7 @@ def _state_path_observation(
             elif entrypoint == "/runs/{run_id}/result":
                 response = client.get(f"/runs/{target_run_id}/result", headers=headers)
             else:
-                raise ValueError("unsupported W05 state-case entrypoint")
+                raise ValueError("unsupported state-case entrypoint")
         finally:
             client.close()
         payload = response.json()
@@ -1276,7 +1306,7 @@ def _state_path_observation(
 
 
 def _derive_state_invariants(
-    case: W05StateCase,
+    case: StateCase,
     *,
     response_status: int,
     payload: Mapping[str, object],
@@ -1534,7 +1564,7 @@ def _external_usage_record(summary: Mapping[str, object] | None, *, model_call_c
 
 
 def _harness_observation(
-    case: W05StateCase,
+    case: StateCase,
     profile: str,
     run_id: str,
     *,
@@ -1553,7 +1583,7 @@ def _harness_observation(
     initial = case.case["initial"]
     action = case.case["action"]
     parameters = action["parameters"]
-    identity = resolve_w05_principal_fixture(str(initial["principal_fixture"]))
+    identity = resolve_principal_fixture(str(initial["principal_fixture"]))
     actual_run_id = run_id
     context = ExecutionContext(
         run_id=actual_run_id,
@@ -1621,9 +1651,9 @@ def _harness_observation(
         }
 
     if action["entrypoint"] != "harness://http-sequence":
-        raise ValueError("unsupported W05 harness entrypoint")
+        raise ValueError("unsupported harness entrypoint")
 
-    token_env = f"QUERYSHIELD_W05_LOCAL_{uuid4().hex.upper()}"
+    token_env = f"QUERYSHIELD_EVAL_LOCAL_{uuid4().hex.upper()}"
     token = uuid4().hex
     previous_token = os.environ.get(token_env)
     identity_config = identity_module.IDENTITY_CONFIG
@@ -1669,7 +1699,7 @@ def _harness_observation(
     call_store.new_call = record_call_id
     policy_executor = _PolicyProbeExecutor()
     identity_module.IDENTITY_CONFIG = {
-        "w05-case-actor": {
+        "eval-case-actor": {
             "token_env": token_env,
             "principal_id": identity["principal_id"],
             "tenant_id": identity["tenant_id"],
@@ -1851,8 +1881,8 @@ def _composite_result_evidence(
     return list(evidence_by_id.values())
 
 
-def run_w05_product_case(
-    case: W05StateCase,
+def run_product_case(
+    case: StateCase,
     profile: str,
     run_id: str,
     *,
@@ -1880,7 +1910,7 @@ def run_w05_product_case(
         )
 
     question = str(action["parameters"].get("question") or action["parameters"].get("query") or "")
-    principal = resolve_w05_principal_fixture(str(case.case["initial"]["principal_fixture"]))
+    principal = resolve_principal_fixture(str(case.case["initial"]["principal_fixture"]))
     context = ExecutionContext(
         run_id=run_id,
         tenant_id=principal["tenant_id"],
@@ -1901,7 +1931,7 @@ def run_w05_product_case(
     )
     fault_required = action["parameters"].get("initial_provider_action") == "invalid_sql"
     fault_injector = (
-        _W05InvalidSqlFaultInjector(executor, sql_records, call_context=provider_call_context)
+        _InvalidSqlFaultInjector(executor, sql_records, call_context=provider_call_context)
         if fault_required else None
     )
     if fault_injector is not None:
@@ -1961,7 +1991,7 @@ def run_w05_product_case(
             "returned_candidate_ids": [item["id"] for item in prefetched_retrieval_items],
         }
     snapshot = getattr(retriever, "snapshot", None)
-    shared_knowledge_snapshot_id = getattr(snapshot, "snapshot_id", W04_DEFAULT_SNAPSHOT)
+    shared_knowledge_snapshot_id = getattr(snapshot, "snapshot_id", DEFAULT_KNOWLEDGE_SNAPSHOT)
     initial_retrieval_source_checks = []
     if profile == "B1" and initial_retrieval_items:
         source_records = {source.source_id: source for source in getattr(retriever, "snapshot").source_records}
@@ -1985,7 +2015,7 @@ def run_w05_product_case(
             if not visible:
                 raise PermissionError("initial state retrieval item is outside the active snapshot or identity ACL")
     if profile == "B0":
-        from queryshield.evaluation.w05_runner import run_b0_single_pass
+        from queryshield.evaluation.profile_runner import run_b0_single_pass
 
         output = run_b0_single_pass(
             recording_model,
@@ -2000,26 +2030,27 @@ def run_w05_product_case(
             ),
         )
     elif profile == "B1":
-        from queryshield.evaluation.w05_runner import B1_PROFILE, run_b1_bounded_agent
+        from queryshield.evaluation.profile_runner import B1_PROFILE, run_b1_bounded_agent
 
+        b1_config = RunConfig(
+            profile=B1_PROFILE,
+            catalog_version=catalog.catalog_version,
+            knowledge_snapshot_id=shared_knowledge_snapshot_id,
+        )
         output = run_b1_bounded_agent(
             recording_model,
             tools,
             context,
             question,
             time_window=request_window,
-            run_config=RunConfig(
-                profile=B1_PROFILE,
-                catalog_version=catalog.catalog_version,
-                knowledge_snapshot_id=shared_knowledge_snapshot_id,
-            ),
+            run_config=evaluation_run_config(b1_config, recording_model.mode),
             # Server orchestration may prefetch from the live run's retriever;
             # the actual items then enter the same BoundedAgent context path.
             initial_retrieval_items=initial_retrieval_items + prefetched_retrieval_items,
         )
     else:
-        raise ValueError("unsupported W05 profile")
-    from queryshield.evaluation.w05_runner import normalize_profile_observation
+        raise ValueError("unsupported profile")
+    from queryshield.evaluation.profile_runner import normalize_profile_observation
 
     normalized = normalize_profile_observation(
         output.get("profile", "B0-single-pass" if profile == "B0" else "B1-bounded-agent"),
@@ -2051,7 +2082,7 @@ def run_w05_product_case(
         for fact in facts
     ]
     unauthorized_facts = sum(1 for basis, _reason in fact_authorization if basis == "unauthorized")
-    # Server-composed results accepted by the shared verifier (B1-2) are part
+    # Server-composed results accepted by the shared verifier are part
     # of this run's result set alongside the recorded SQL executions.
     result_ids |= set(composition_claims)
     model_calls = output.get("model_call_count", 0)
@@ -2293,7 +2324,7 @@ def run_w05_product_case(
 
 
 def _derive_query_invariants(
-    case: W05StateCase,
+    case: StateCase,
     output: Mapping[str, object],
     observation: Mapping[str, object],
     sql_records: Sequence[Mapping[str, object]],
@@ -2416,4 +2447,4 @@ def _derive_query_invariants(
     return output_values
 
 
-__all__ = ["W05StateFakeModel", "run_w05_product_case"]
+__all__ = ["StateCaseFakeModel", "run_product_case"]

@@ -71,7 +71,7 @@ def main() -> int:
         for response in (database_response, timeout_response):
             require("postgresql://" not in response.text, "connection URL leaked")
             require("controlled" not in response.text, "internal error leaked")
-            # B2b: the Agent run is persisted as FAILED with the same code.
+            # The Agent run is persisted as FAILED with the same code.
             require(response.json().get("status") == "FAILED", "failed run was not persisted as FAILED")
             require(isinstance(response.json().get("run_id"), str), "failed run has no run_id")
 

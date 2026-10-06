@@ -1,4 +1,4 @@
-"""Frozen W05 runtime budgets bound to evaluation profiles, never labels."""
+"""Frozen runtime budgets bound to evaluation profiles, never labels."""
 
 from __future__ import annotations
 
@@ -12,38 +12,38 @@ _EXPECTED_PROFILES = {"B0", "B1"}
 
 
 class ProfileBudgetError(ValueError):
-    """The W05 profile budget file is missing or malformed."""
+    """The profile budget file is missing or malformed."""
 
 
-def load_w05_profile_budgets(path: str | Path | None = None) -> dict[str, object]:
+def load_profile_budgets(path: str | Path | None = None) -> dict[str, object]:
     budget_path = (
         Path(path)
         if path is not None
-        else Path(__file__).resolve().parents[3] / "evals" / "w05" / "execution-profiles-v1.json"
+        else Path(__file__).resolve().parents[3] / "evals" / "development" / "execution-profiles-v1.json"
     )
     try:
         document = json.loads(budget_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ProfileBudgetError("cannot load W05 execution profile budgets") from exc
+        raise ProfileBudgetError("cannot load execution profile budgets") from exc
     if not isinstance(document, dict) or set(document) != {
         "schema_version",
         "profiles",
         "pre_model_rejections_require_zero_calls",
         "classification_independent",
     }:
-        raise ProfileBudgetError("W05 profile budget fields mismatch")
+        raise ProfileBudgetError("profile budget fields mismatch")
     if document["schema_version"] != PROFILE_BUDGET_VERSION:
-        raise ProfileBudgetError("unsupported W05 profile budget version")
+        raise ProfileBudgetError("unsupported profile budget version")
     profiles = document["profiles"]
     if not isinstance(profiles, dict) or set(profiles) != _EXPECTED_PROFILES:
-        raise ProfileBudgetError("W05 profile budget set mismatch")
+        raise ProfileBudgetError("profile budget set mismatch")
     for name, expected in {
         "B0": {"max_model_calls": 1, "max_tool_calls": 1, "max_active_seconds": None},
         "B1": {"max_model_calls": 6, "max_tool_calls": 8, "max_active_seconds": 60},
     }.items():
         actual = profiles.get(name)
         if not isinstance(actual, Mapping) or dict(actual) != expected:
-            raise ProfileBudgetError(f"W05 {name} budget does not match the approved contract")
+            raise ProfileBudgetError(f"{name} budget does not match the approved contract")
     if document["pre_model_rejections_require_zero_calls"] is not True:
         raise ProfileBudgetError("pre-model rejections must keep a zero-call assertion")
     if document["classification_independent"] is not True:
@@ -51,4 +51,4 @@ def load_w05_profile_budgets(path: str | Path | None = None) -> dict[str, object
     return document
 
 
-__all__ = ["PROFILE_BUDGET_VERSION", "ProfileBudgetError", "load_w05_profile_budgets"]
+__all__ = ["PROFILE_BUDGET_VERSION", "ProfileBudgetError", "load_profile_budgets"]

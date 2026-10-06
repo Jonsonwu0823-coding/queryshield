@@ -12,10 +12,7 @@ _TENANT_MENTION_PATTERNS = (
 
 
 def _tenant_key(value: str) -> str:
-    key = value.strip().casefold()
-    if key.startswith("tenant-"):
-        key = key.removeprefix("tenant-")
-    return key
+    return value.strip().casefold().removeprefix("tenant-")
 
 
 def explicit_foreign_tenant_mentions(question: object, authenticated_tenant_id: object) -> tuple[str, ...]:

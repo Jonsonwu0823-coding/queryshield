@@ -1,4 +1,4 @@
-"""Versioned W03 development retrieval queries.
+"""Versioned development retrieval queries.
 
 The cases are development material, not a frozen holdout set.  The current
 T02 catalog tool is queried with a fixed top_k of three; later knowledge and

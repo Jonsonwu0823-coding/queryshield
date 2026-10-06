@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Suite = "W01",
+    [string]$Suite = "BASE",
     [string]$Mode = "fake",
     [string]$Database = "postgres",
     [Parameter(Mandatory = $true)]
@@ -28,7 +28,7 @@ $script:allRequiredCheckIds = @()
 $script:requiredCheckIds = @()
 $script:selectedCheckIds = @()
 $script:scope = "full"
-$script:databaseEvidence = "W01-DB01.txt"
+$script:databaseEvidence = "BASE-DB01.txt"
 $script:requiredRuntimeCheckIds = @()
 $script:runtimeProfile = "not_applicable"
 $script:runtimeUpstreamManifest = @()
@@ -314,7 +314,7 @@ function Invoke-ProbeContinue {
     Write-Output "check_pass id=$CheckId evidence=$EvidencePath"
 }
 
-function Invoke-W02Process {
+function Invoke-ProposalProcess {
     param(
         [string]$CheckId,
         [string]$ScriptPath,
@@ -356,7 +356,7 @@ function Invoke-W02Process {
     return
 }
 
-function Invoke-W02PythonArguments {
+function Invoke-ProposalPythonArguments {
     param(
         [string]$CheckId,
         [string]$EvidencePath,
@@ -384,8 +384,8 @@ function Invoke-W02PythonArguments {
     return
 }
 
-function Invoke-W02Suite {
-    $offlineEvidence = Join-Path $EvidenceDir "W02-OFFLINE.txt"
+function Invoke-ProposalSuite {
+    $offlineEvidence = Join-Path $EvidenceDir "PROPOSAL-OFFLINE.txt"
     $offlineBaseTemp = Join-Path $EvidenceDir "pytest-tmp"
     $offlineArguments = @(
         "-m", "pytest",
@@ -395,74 +395,74 @@ function Invoke-W02Suite {
         "tests/test_api_call_identity.py",
         "tests/test_sql_policy.py",
         "tests/test_guarded_query.py",
-        "tests/test_w02_t05_probe.py",
-        "tests/test_w02_t06_probe.py",
-        "tests/test_w02_fs_probe.py",
+        "tests/test_proposal_policy_probe.py",
+        "tests/test_proposal_identity_bypass_probe.py",
+        "tests/test_proposal_fs_probe.py",
         "-q",
         "-p", "no:cacheprovider",
         "--basetemp", $offlineBaseTemp
     )
     $requestedProviderMode = $env:QUERYSHIELD_PROVIDER_MODE
     $env:QUERYSHIELD_PROVIDER_MODE = "fake"
-    Invoke-W02PythonArguments `
-        -CheckId "W02-OFFLINE" `
+    Invoke-ProposalPythonArguments `
+        -CheckId "PROPOSAL-OFFLINE" `
         -EvidencePath $offlineEvidence `
-        -Command "python -m pytest tests/test_model_adapters.py tests/test_query_proposals.py tests/test_durable_call_store.py tests/test_api_call_identity.py tests/test_sql_policy.py tests/test_guarded_query.py tests/test_w02_t05_probe.py tests/test_w02_t06_probe.py tests/test_w02_fs_probe.py -q -p no:cacheprovider --basetemp $offlineBaseTemp" `
+        -Command "python -m pytest tests/test_model_adapters.py tests/test_query_proposals.py tests/test_durable_call_store.py tests/test_api_call_identity.py tests/test_sql_policy.py tests/test_guarded_query.py tests/test_proposal_policy_probe.py tests/test_proposal_identity_bypass_probe.py tests/test_proposal_fs_probe.py -q -p no:cacheprovider --basetemp $offlineBaseTemp" `
         -Arguments $offlineArguments
     $env:QUERYSHIELD_PROVIDER_MODE = $requestedProviderMode
 
-    $providerEvidence = Join-Path $EvidenceDir "W02-PROVIDER.txt"
-    $providerJson = Join-Path $EvidenceDir "W02-PROVIDER.json"
-    Invoke-W02Process `
-        -CheckId "W02-PROVIDER" `
+    $providerEvidence = Join-Path $EvidenceDir "PROPOSAL-PROVIDER.txt"
+    $providerJson = Join-Path $EvidenceDir "PROPOSAL-PROVIDER.json"
+    Invoke-ProposalProcess `
+        -CheckId "PROPOSAL-PROVIDER" `
         -ScriptPath (Join-Path $PSScriptRoot "model_probe.py") `
         -EvidencePath $providerEvidence `
-        -Command "python scripts/model_probe.py -Mode $Mode -Output W02-PROVIDER.json" `
+        -Command "python scripts/model_probe.py -Mode $Mode -Output PROPOSAL-PROVIDER.json" `
         -Arguments @("-Mode", $Mode, "-Output", $providerJson)
 
-    $databaseEvidencePath = Join-Path $EvidenceDir "W02-DB.txt"
+    $databaseEvidencePath = Join-Path $EvidenceDir "PROPOSAL-DB.txt"
     if (-not $env:QUERYSHIELD_DATABASE_URL) {
         "blocked reason=QUERYSHIELD_DATABASE_URL_missing" | Set-Content -LiteralPath $databaseEvidencePath -Encoding UTF8
-        Add-CheckResult -CheckId "W02-DB" -Status "blocked" -Command "python scripts/check_db.py" -ExitCode 2 -EvidencePath "W02-DB.txt"
-        Write-Output "check_blocked id=W02-DB evidence=$databaseEvidencePath"
+        Add-CheckResult -CheckId "PROPOSAL-DB" -Status "blocked" -Command "python scripts/check_db.py" -ExitCode 2 -EvidencePath "PROPOSAL-DB.txt"
+        Write-Output "check_blocked id=PROPOSAL-DB evidence=$databaseEvidencePath"
     }
     else {
-        Invoke-W02Process `
-            -CheckId "W02-DB" `
+        Invoke-ProposalProcess `
+            -CheckId "PROPOSAL-DB" `
             -ScriptPath (Join-Path $PSScriptRoot "check_db.py") `
             -EvidencePath $databaseEvidencePath `
             -Command "python scripts/check_db.py"
     }
 
     if ($Mode -eq "real") {
-        # Retired in B2b: it exercised the deleted W02 single-pass /queries path
+        # Retired: it exercised the deleted single-pass /queries path
         # (fixed-question prompt and row-count answers). The real model -> guarded
-        # SQL -> tenant scope chain over HTTP is covered together by the B2b HTTP Real
-        # smoke (scripts/b2b-local-http-smoke.ps1) and the W05 full Real run
-        # (scripts/w05-local-real.ps1). The full Real run was blocked by W05-X01 after
-        # B2b; B3a made X01 read this repository, so it starts again once the complete
-        # W05 Fake suite passes on the machine.
-        $realChainEvidence = Join-Path $EvidenceDir "W02-REAL-CHAIN.txt"
-        "not_applicable reason=retired_by_B2b replacement=scripts/b2b-local-http-smoke.ps1+scripts/w05-local-real.ps1(W05-full-real)" | Set-Content -LiteralPath $realChainEvidence -Encoding UTF8
-        Add-CheckResult -CheckId "W02-REAL-CHAIN" -Status "not_applicable" -Command "retired: python scripts/w02_real_chain_probe.py" -ExitCode 0 -EvidencePath "W02-REAL-CHAIN.txt"
-        Write-Output "check_not_applicable id=W02-REAL-CHAIN evidence=$realChainEvidence"
+        # SQL -> tenant scope chain over HTTP is covered together by the HTTP Real
+        # smoke (scripts/http-local-smoke.ps1) and the full Real evaluation run
+        # (scripts/eval-local-real.ps1). The full Real run was blocked by EVAL-X01 after
+        # the HTTP entry moved to the Agent; X01 now reads this repository, so it starts again once the complete
+        # Fake suite passes on the machine.
+        $realChainEvidence = Join-Path $EvidenceDir "PROPOSAL-REAL-CHAIN.txt"
+        "not_applicable reason=retired_by_http_smoke replacement=scripts/http-local-smoke.ps1+scripts/eval-local-real.ps1(EVAL-full-real)" | Set-Content -LiteralPath $realChainEvidence -Encoding UTF8
+        Add-CheckResult -CheckId "PROPOSAL-REAL-CHAIN" -Status "not_applicable" -Command "retired: python scripts/proposal_real_chain_probe.py" -ExitCode 0 -EvidencePath "PROPOSAL-REAL-CHAIN.txt"
+        Write-Output "check_not_applicable id=PROPOSAL-REAL-CHAIN evidence=$realChainEvidence"
     }
 
-    $factsEvidence = Join-Path $EvidenceDir "W02-FS01.txt"
-    Invoke-W02Process `
-        -CheckId "W02-FS01" `
-        -ScriptPath (Join-Path $PSScriptRoot "w02_fs_probe.py") `
+    $factsEvidence = Join-Path $EvidenceDir "PROPOSAL-FS01.txt"
+    Invoke-ProposalProcess `
+        -CheckId "PROPOSAL-FS01" `
+        -ScriptPath (Join-Path $PSScriptRoot "proposal_fs_probe.py") `
         -EvidencePath $factsEvidence `
-        -Command "python scripts/w02_fs_probe.py -CheckId W02-FS01 -EvidenceDir $EvidenceDir" `
-        -Arguments @("-CheckId", "W02-FS01", "-EvidenceDir", $EvidenceDir)
+        -Command "python scripts/proposal_fs_probe.py -CheckId PROPOSAL-FS01 -EvidenceDir $EvidenceDir" `
+        -Arguments @("-CheckId", "PROPOSAL-FS01", "-EvidenceDir", $EvidenceDir)
 
-    $factsCheckEvidence = Join-Path $EvidenceDir "W02-FS02.txt"
-    Invoke-W02Process `
-        -CheckId "W02-FS02" `
-        -ScriptPath (Join-Path $PSScriptRoot "w02_fs_probe.py") `
+    $factsCheckEvidence = Join-Path $EvidenceDir "PROPOSAL-FS02.txt"
+    Invoke-ProposalProcess `
+        -CheckId "PROPOSAL-FS02" `
+        -ScriptPath (Join-Path $PSScriptRoot "proposal_fs_probe.py") `
         -EvidencePath $factsCheckEvidence `
-        -Command "python scripts/w02_fs_probe.py -CheckId W02-FS02 -EvidenceDir $EvidenceDir" `
-        -Arguments @("-CheckId", "W02-FS02", "-EvidenceDir", $EvidenceDir)
+        -Command "python scripts/proposal_fs_probe.py -CheckId PROPOSAL-FS02 -EvidenceDir $EvidenceDir" `
+        -Arguments @("-CheckId", "PROPOSAL-FS02", "-EvidenceDir", $EvidenceDir)
 
     $statuses = @($script:checkResults | ForEach-Object { $_.status })
     if ($statuses -contains "fail") {
@@ -477,21 +477,21 @@ function Invoke-W02Suite {
     exit 0
 }
 
-function Invoke-W03Suite {
-    $script:requiredRuntimeCheckIds = @("W03-RT01", "W03-RT02", "W03-RT03")
-    $script:requiredEngineeringCheckIds = @("W03-EN01", "W03-EN02", "W03-EN03", "W03-EN04")
+function Invoke-AgentSuite {
+    $script:requiredRuntimeCheckIds = @("AGENT-RT01", "AGENT-RT02", "AGENT-RT03")
+    $script:requiredEngineeringCheckIds = @("AGENT-EN01", "AGENT-EN02", "AGENT-EN03", "AGENT-EN04")
     $script:capabilityManifest = @("embedding-v1", "vector-index-v1", "hybrid-v1", "retrieval-evidence-v1", "run-config-v1", "qs-action-schema-v1", "bounded-langgraph-v1", "qs-parallel-v1", "shared-parallel-budget-v1", "verified-facts-v1", "agent-trace-v1", "t06-behavior-matrix-v1")
     $script:operationUsage = @(
-        "W03-EN02 raw evidence records one OperationUsage per embedding call",
-        "W03-EN03 raw evidence records query embedding call/return and selected sources",
-        "W03-EN04 run records fixed prompt/schema/catalog/snapshot versions",
-        "W03-RT02 fake parallel branches preserve branch identity and peak_active<=2",
-        "W03-RT03 fake parallel branches share the run tool budget and expose PENDING branches",
-        "W03-T05 model/tool trace is redacted and usage is aggregated once per run",
-        "W03-T06 fake matrix records five bounded-agent behaviors and real mode is separate",
-        "W03-DB01 runs the real PostgreSQL read-only engine check and preserves blocked/fail distinction",
-        "W03-FS01 runs the formal server-facts positive/empty/change cases with known usage",
-        "W03-FS02 runs formal evidence forgery rejection cases without repair or public facts"
+        "AGENT-EN02 raw evidence records one OperationUsage per embedding call",
+        "AGENT-EN03 raw evidence records query embedding call/return and selected sources",
+        "AGENT-EN04 run records fixed prompt/schema/catalog/snapshot versions",
+        "AGENT-RT02 fake parallel branches preserve branch identity and peak_active<=2",
+        "AGENT-RT03 fake parallel branches share the run tool budget and expose PENDING branches",
+        "AGENT-T05 model/tool trace is redacted and usage is aggregated once per run",
+        "AGENT-T06 fake matrix records five bounded-agent behaviors and real mode is separate",
+        "AGENT-DB01 runs the real PostgreSQL read-only engine check and preserves blocked/fail distinction",
+        "AGENT-FS01 runs the formal server-facts positive/empty/change cases with known usage",
+        "AGENT-FS02 runs formal evidence forgery rejection cases without repair or public facts"
     )
     $script:runtimeProfile = if ($Mode -eq "fake") { "fake-context-budget-v1" } else { "not_applicable" }
     $script:runtimeUpstreamManifest = @(
@@ -504,25 +504,25 @@ function Invoke-W03Suite {
         "deterministic in-process; no model/provider/database call"
     }
     else {
-        "not_applicable: W03-RT01 is fake-only"
+        "not_applicable: AGENT-RT01 is fake-only"
     }
 
-    if ($script:selectedCheckIds -contains "W03-EN01") {
+    if ($script:selectedCheckIds -contains "AGENT-EN01") {
         if ($Mode -ne "fake") {
-            $notApplicableEvidence = Join-Path $EvidenceDir "W03-EN01.txt"
-            "not_applicable reason=W03-EN01_requires_fake_mode" | Set-Content -LiteralPath $notApplicableEvidence -Encoding UTF8
-            Add-CheckResult -CheckId "W03-EN01" -Status "not_applicable" -Command "python scripts/check_w03_en01.py" -ExitCode 0 -EvidencePath "W03-EN01.txt"
+            $notApplicableEvidence = Join-Path $EvidenceDir "AGENT-EN01.txt"
+            "not_applicable reason=AGENT-EN01_requires_fake_mode" | Set-Content -LiteralPath $notApplicableEvidence -Encoding UTF8
+            Add-CheckResult -CheckId "AGENT-EN01" -Status "not_applicable" -Command "python scripts/check_agent_en01.py" -ExitCode 0 -EvidencePath "AGENT-EN01.txt"
         }
         else {
-            $knowledgeEvidence = Join-Path $EvidenceDir "W03-EN01.txt"
+            $knowledgeEvidence = Join-Path $EvidenceDir "AGENT-EN01.txt"
             $sourceRoot = Join-Path (Join-Path $projectRoot "fixtures") "knowledge"
             $registryPath = Join-Path $sourceRoot "source_registry.json"
-            $scriptPath = Join-Path $PSScriptRoot "check_w03_en01.py"
+            $scriptPath = Join-Path $PSScriptRoot "check_agent_en01.py"
             Invoke-ProbeContinue `
-                -CheckId "W03-EN01" `
+                -CheckId "AGENT-EN01" `
                 -ScriptPath $scriptPath `
                 -EvidencePath $knowledgeEvidence `
-                -Command "python scripts/check_w03_en01.py --source-root fixtures/knowledge --registry fixtures/knowledge/source_registry.json --catalog-version catalog-v2" `
+                -Command "python scripts/check_agent_en01.py --source-root fixtures/knowledge --registry fixtures/knowledge/source_registry.json --catalog-version catalog-v2" `
                 -Arguments @(
                     "--source-root", $sourceRoot,
                     "--registry", $registryPath,
@@ -531,54 +531,54 @@ function Invoke-W03Suite {
         }
     }
 
-    if ($script:selectedCheckIds -contains "W03-RT01") {
+    if ($script:selectedCheckIds -contains "AGENT-RT01") {
         if ($Mode -ne "fake") {
-            $runtimeEvidence = Join-Path $EvidenceDir "W03-RT01.txt"
-            "not_applicable reason=W03-RT01_requires_fake_mode" | Set-Content -LiteralPath $runtimeEvidence -Encoding UTF8
-            Add-CheckResult -CheckId "W03-RT01" -Status "not_applicable" -Command "python scripts/check_w03_rt01.py" -ExitCode 0 -EvidencePath "W03-RT01.txt"
+            $runtimeEvidence = Join-Path $EvidenceDir "AGENT-RT01.txt"
+            "not_applicable reason=AGENT-RT01_requires_fake_mode" | Set-Content -LiteralPath $runtimeEvidence -Encoding UTF8
+            Add-CheckResult -CheckId "AGENT-RT01" -Status "not_applicable" -Command "python scripts/check_agent_rt01.py" -ExitCode 0 -EvidencePath "AGENT-RT01.txt"
         }
         else {
-            $runtimeEvidence = Join-Path $EvidenceDir "W03-RT01.txt"
+            $runtimeEvidence = Join-Path $EvidenceDir "AGENT-RT01.txt"
             Invoke-ProbeContinue `
-                -CheckId "W03-RT01" `
-                -ScriptPath (Join-Path $PSScriptRoot "check_w03_rt01.py") `
+                -CheckId "AGENT-RT01" `
+                -ScriptPath (Join-Path $PSScriptRoot "check_agent_rt01.py") `
                 -EvidencePath $runtimeEvidence `
-                -Command "python scripts/check_w03_rt01.py"
+                -Command "python scripts/check_agent_rt01.py"
         }
     }
 
-    if ($script:selectedCheckIds -contains "W03-RT02") {
+    if ($script:selectedCheckIds -contains "AGENT-RT02") {
         if ($Mode -ne "fake") {
-            $parallelEvidence = Join-Path $EvidenceDir "W03-RT02.txt"
-            "not_applicable reason=W03-RT02_requires_fake_mode" | Set-Content -LiteralPath $parallelEvidence -Encoding UTF8
-            Add-CheckResult -CheckId "W03-RT02" -Status "not_applicable" -Command "python scripts/check_w03_rt02.py" -ExitCode 0 -EvidencePath "W03-RT02.txt"
+            $parallelEvidence = Join-Path $EvidenceDir "AGENT-RT02.txt"
+            "not_applicable reason=AGENT-RT02_requires_fake_mode" | Set-Content -LiteralPath $parallelEvidence -Encoding UTF8
+            Add-CheckResult -CheckId "AGENT-RT02" -Status "not_applicable" -Command "python scripts/check_agent_rt02.py" -ExitCode 0 -EvidencePath "AGENT-RT02.txt"
         }
         else {
-            $parallelEvidence = Join-Path $EvidenceDir "W03-RT02.txt"
+            $parallelEvidence = Join-Path $EvidenceDir "AGENT-RT02.txt"
             Invoke-ProbeContinue `
-                -CheckId "W03-RT02" `
-                -ScriptPath (Join-Path $PSScriptRoot "check_w03_rt02.py") `
+                -CheckId "AGENT-RT02" `
+                -ScriptPath (Join-Path $PSScriptRoot "check_agent_rt02.py") `
                 -EvidencePath $parallelEvidence `
-                -Command "python scripts/check_w03_rt02.py --output-dir $EvidenceDir" `
+                -Command "python scripts/check_agent_rt02.py --output-dir $EvidenceDir" `
                 -Arguments @(
                     "--output-dir", $EvidenceDir
                 )
         }
     }
 
-    if ($script:selectedCheckIds -contains "W03-RT03") {
+    if ($script:selectedCheckIds -contains "AGENT-RT03") {
         if ($Mode -ne "fake") {
-            $budgetEvidence = Join-Path $EvidenceDir "W03-RT03.txt"
-            "not_applicable reason=W03-RT03_requires_fake_mode" | Set-Content -LiteralPath $budgetEvidence -Encoding UTF8
-            Add-CheckResult -CheckId "W03-RT03" -Status "not_applicable" -Command "python scripts/check_w03_rt03.py" -ExitCode 0 -EvidencePath "W03-RT03.txt"
+            $budgetEvidence = Join-Path $EvidenceDir "AGENT-RT03.txt"
+            "not_applicable reason=AGENT-RT03_requires_fake_mode" | Set-Content -LiteralPath $budgetEvidence -Encoding UTF8
+            Add-CheckResult -CheckId "AGENT-RT03" -Status "not_applicable" -Command "python scripts/check_agent_rt03.py" -ExitCode 0 -EvidencePath "AGENT-RT03.txt"
         }
         else {
-            $budgetEvidence = Join-Path $EvidenceDir "W03-RT03.txt"
+            $budgetEvidence = Join-Path $EvidenceDir "AGENT-RT03.txt"
             Invoke-ProbeContinue `
-                -CheckId "W03-RT03" `
-                -ScriptPath (Join-Path $PSScriptRoot "check_w03_rt03.py") `
+                -CheckId "AGENT-RT03" `
+                -ScriptPath (Join-Path $PSScriptRoot "check_agent_rt03.py") `
                 -EvidencePath $budgetEvidence `
-                -Command "python scripts/check_w03_rt03.py --output-dir $EvidenceDir" `
+                -Command "python scripts/check_agent_rt03.py --output-dir $EvidenceDir" `
                 -Arguments @(
                     "--output-dir", $EvidenceDir
                 )
@@ -587,19 +587,19 @@ function Invoke-W03Suite {
 
     $snapshotPath = Join-Path (Join-Path (Join-Path (Join-Path $projectRoot "fixtures") "knowledge") "snapshots") "knowledge-v1-9f580dd7f887ed0a.json"
 
-    if ($script:selectedCheckIds -contains "W03-EN02") {
+    if ($script:selectedCheckIds -contains "AGENT-EN02") {
         if ($Mode -eq "fake") {
             $script:runtimeProfile = "fake-embedding-index-v1"
         }
         else {
             $script:runtimeProfile = "real-openai-compatible-embedding-v1"
         }
-        $embeddingEvidence = Join-Path $EvidenceDir "W03-EN02.txt"
+        $embeddingEvidence = Join-Path $EvidenceDir "AGENT-EN02.txt"
         Invoke-ProbeContinue `
-            -CheckId "W03-EN02" `
-            -ScriptPath (Join-Path $PSScriptRoot "check_w03_en02.py") `
+            -CheckId "AGENT-EN02" `
+            -ScriptPath (Join-Path $PSScriptRoot "check_agent_en02.py") `
             -EvidencePath $embeddingEvidence `
-            -Command "python scripts/check_w03_en02.py --mode $Mode --snapshot fixtures/knowledge/snapshots/knowledge-v1-9f580dd7f887ed0a.json --output-dir $EvidenceDir" `
+            -Command "python scripts/check_agent_en02.py --mode $Mode --snapshot fixtures/knowledge/snapshots/knowledge-v1-9f580dd7f887ed0a.json --output-dir $EvidenceDir" `
             -Arguments @(
                 "--mode", $Mode,
                 "--snapshot", $snapshotPath,
@@ -607,19 +607,19 @@ function Invoke-W03Suite {
             )
     }
 
-    if ($script:selectedCheckIds -contains "W03-EN03") {
+    if ($script:selectedCheckIds -contains "AGENT-EN03") {
         if ($Mode -eq "fake") {
             $script:runtimeProfile = "fake-hybrid-v1"
         }
         else {
             $script:runtimeProfile = "real-hybrid-v1"
         }
-        $hybridEvidence = Join-Path $EvidenceDir "W03-EN03.txt"
+        $hybridEvidence = Join-Path $EvidenceDir "AGENT-EN03.txt"
         Invoke-ProbeContinue `
-            -CheckId "W03-EN03" `
-            -ScriptPath (Join-Path $PSScriptRoot "check_w03_en03.py") `
+            -CheckId "AGENT-EN03" `
+            -ScriptPath (Join-Path $PSScriptRoot "check_agent_en03.py") `
             -EvidencePath $hybridEvidence `
-            -Command "python scripts/check_w03_en03.py --mode $Mode --snapshot fixtures/knowledge/snapshots/knowledge-v1-9f580dd7f887ed0a.json --output-dir $EvidenceDir" `
+            -Command "python scripts/check_agent_en03.py --mode $Mode --snapshot fixtures/knowledge/snapshots/knowledge-v1-9f580dd7f887ed0a.json --output-dir $EvidenceDir" `
             -Arguments @(
                 "--mode", $Mode,
                 "--snapshot", $snapshotPath,
@@ -627,19 +627,19 @@ function Invoke-W03Suite {
             )
     }
 
-    if ($script:selectedCheckIds -contains "W03-EN04") {
+    if ($script:selectedCheckIds -contains "AGENT-EN04") {
         if ($Mode -ne "fake") {
-            $versionEvidence = Join-Path $EvidenceDir "W03-EN04.txt"
-            "not_applicable reason=W03-EN04_requires_fake_mode" | Set-Content -LiteralPath $versionEvidence -Encoding UTF8
-            Add-CheckResult -CheckId "W03-EN04" -Status "not_applicable" -Command "python scripts/check_w03_en04.py --mode fake" -ExitCode 0 -EvidencePath "W03-EN04.txt"
+            $versionEvidence = Join-Path $EvidenceDir "AGENT-EN04.txt"
+            "not_applicable reason=AGENT-EN04_requires_fake_mode" | Set-Content -LiteralPath $versionEvidence -Encoding UTF8
+            Add-CheckResult -CheckId "AGENT-EN04" -Status "not_applicable" -Command "python scripts/check_agent_en04.py --mode fake" -ExitCode 0 -EvidencePath "AGENT-EN04.txt"
         }
         else {
-            $versionEvidence = Join-Path $EvidenceDir "W03-EN04.txt"
+            $versionEvidence = Join-Path $EvidenceDir "AGENT-EN04.txt"
             Invoke-ProbeContinue `
-                -CheckId "W03-EN04" `
-                -ScriptPath (Join-Path $PSScriptRoot "check_w03_en04.py") `
+                -CheckId "AGENT-EN04" `
+                -ScriptPath (Join-Path $PSScriptRoot "check_agent_en04.py") `
                 -EvidencePath $versionEvidence `
-                -Command "python scripts/check_w03_en04.py --mode fake --snapshot fixtures/knowledge/snapshots/knowledge-v1-9f580dd7f887ed0a.json --output-dir $EvidenceDir" `
+                -Command "python scripts/check_agent_en04.py --mode fake --snapshot fixtures/knowledge/snapshots/knowledge-v1-9f580dd7f887ed0a.json --output-dir $EvidenceDir" `
                 -Arguments @(
                     "--mode", "fake",
                     "--snapshot", $snapshotPath,
@@ -648,26 +648,26 @@ function Invoke-W03Suite {
         }
     }
 
-    foreach ($ticketCheck in @("W03-T03", "W03-T04", "W03-T05", "W03-T06")) {
+    foreach ($ticketCheck in @("AGENT-T03", "AGENT-T04", "AGENT-T05", "AGENT-T06")) {
         if ($script:selectedCheckIds -notcontains $ticketCheck) {
             continue
         }
 
         $ticketEvidence = Join-Path $EvidenceDir "$ticketCheck.txt"
         $ticketFile = switch ($ticketCheck) {
-            "W03-T03" { "check_w03_t03.py" }
-            "W03-T04" { "check_w03_t04.py" }
-            "W03-T05" { "check_w03_t05.py" }
-            "W03-T06" { "check_w03_t06.py" }
+            "AGENT-T03" { "check_agent_t03.py" }
+            "AGENT-T04" { "check_agent_t04.py" }
+            "AGENT-T05" { "check_agent_t05.py" }
+            "AGENT-T06" { "check_agent_t06.py" }
         }
-        if ($Mode -eq "real" -and $ticketCheck -ne "W03-T06") {
+        if ($Mode -eq "real" -and $ticketCheck -ne "AGENT-T06") {
             "not_applicable reason=${ticketCheck}_fake_behavior_matrix_is_recorded_in_fake_mode" | Set-Content -LiteralPath $ticketEvidence -Encoding UTF8
             Add-CheckResult -CheckId $ticketCheck -Status "not_applicable" -Command "python scripts/$ticketFile --output-dir $EvidenceDir" -ExitCode 0 -EvidencePath (Split-Path -Leaf $ticketEvidence)
             continue
         }
 
         $ticketScript = Join-Path $PSScriptRoot $ticketFile
-        $ticketArguments = if ($ticketCheck -eq "W03-T06") {
+        $ticketArguments = if ($ticketCheck -eq "AGENT-T06") {
             @("--mode", $Mode, "--output-dir", $EvidenceDir)
         }
         else {
@@ -681,26 +681,26 @@ function Invoke-W03Suite {
             -Arguments $ticketArguments
     }
 
-    $databaseEvidence = Join-Path $EvidenceDir "W03-DB01.txt"
+    $databaseEvidence = Join-Path $EvidenceDir "AGENT-DB01.txt"
     Invoke-ProbeContinue `
-        -CheckId "W03-DB01" `
+        -CheckId "AGENT-DB01" `
         -ScriptPath (Join-Path $PSScriptRoot "check_db.py") `
         -EvidencePath $databaseEvidence `
         -Command "python scripts/check_db.py" 
 
-    foreach ($factsCheck in @("W03-FS01", "W03-FS02")) {
+    foreach ($factsCheck in @("AGENT-FS01", "AGENT-FS02")) {
         $factsEvidence = Join-Path $EvidenceDir "$factsCheck.txt"
         if ($Mode -eq "real") {
-            "not_applicable reason=${factsCheck}_uses_fake_server_facts_boundary; real_database_and_model_path_is_W03-DB01_and_W03-T06" | Set-Content -LiteralPath $factsEvidence -Encoding UTF8
-            Add-CheckResult -CheckId $factsCheck -Status "not_applicable" -Command "python scripts/check_w03_fs.py --check-id $factsCheck --mode fake --output-dir $EvidenceDir" -ExitCode 0 -EvidencePath (Split-Path -Leaf $factsEvidence)
+            "not_applicable reason=${factsCheck}_uses_fake_server_facts_boundary; real_database_and_model_path_is_AGENT-DB01_and_AGENT-T06" | Set-Content -LiteralPath $factsEvidence -Encoding UTF8
+            Add-CheckResult -CheckId $factsCheck -Status "not_applicable" -Command "python scripts/check_agent_fs.py --check-id $factsCheck --mode fake --output-dir $EvidenceDir" -ExitCode 0 -EvidencePath (Split-Path -Leaf $factsEvidence)
             continue
         }
 
         Invoke-ProbeContinue `
             -CheckId $factsCheck `
-            -ScriptPath (Join-Path $PSScriptRoot "check_w03_fs.py") `
+            -ScriptPath (Join-Path $PSScriptRoot "check_agent_fs.py") `
             -EvidencePath $factsEvidence `
-            -Command "python scripts/check_w03_fs.py --check-id $factsCheck --mode fake --output-dir $EvidenceDir" `
+            -Command "python scripts/check_agent_fs.py --check-id $factsCheck --mode fake --output-dir $EvidenceDir" `
             -Arguments @(
                 "--check-id", $factsCheck,
                 "--mode", "fake",
@@ -721,9 +721,9 @@ function Invoke-W03Suite {
     exit 0
 }
 
-function Invoke-W04Suite {
-    $script:requiredRuntimeCheckIds = @("W04-RT01", "W04-RT02")
-    $script:requiredEngineeringCheckIds = @("W04-EN01", "W04-EN02", "W04-EN03", "W04-EN04", "W04-EN05")
+function Invoke-StateSuite {
+    $script:requiredRuntimeCheckIds = @("STATE-RT01", "STATE-RT02")
+    $script:requiredEngineeringCheckIds = @("STATE-EN01", "STATE-EN02", "STATE-EN03", "STATE-EN04", "STATE-EN05")
     $script:capabilityManifest = @(
         "w04-identity-rbac-v1",
         "w04-postgres-rls-v1",
@@ -735,18 +735,18 @@ function Invoke-W04Suite {
         "w04-events-sse-v1"
     )
     $script:operationUsage = @(
-        "W04-R01/R02/W04-DB01 use the real queryshield_ro PostgreSQL role; missing database is blocked",
-        "W04-R03/R04/R05/R06/R07/R08 use deterministic Fake/model and local durable state",
-        "W04-FS01/FS02 preserve approval clock, action digest, restart and replay boundaries",
-        "W04-RT01/RT02 verify bounded parallel branches, cancellation and active-run capacity",
-        "W04-EN04 starts a separate local uvicorn HTTP/SSE process and checks persistent replay",
-        "W04-X03 records implementation, learner, Fake and real-database attribution separately"
+        "STATE-R01/R02/STATE-DB01 use the real queryshield_ro PostgreSQL role; missing database is blocked",
+        "STATE-R03/R04/R05/R06/R07/R08 use deterministic Fake/model and local durable state",
+        "STATE-FS01/FS02 preserve approval clock, action digest, restart and replay boundaries",
+        "STATE-RT01/RT02 verify bounded parallel branches, cancellation and active-run capacity",
+        "STATE-EN04 starts a separate local uvicorn HTTP/SSE process and checks persistent replay",
+        "STATE-X03 records implementation, learner, Fake and real-database attribution separately"
     )
     $script:runtimeProfile = if ($Mode -eq "fake") { "fake-model-real-postgres-w04-v1" } else { "real-mode-db-only-w04-v1" }
     $script:runtimeUpstreamManifest = @(
         "src/queryshield/auth/identity.py",
         "src/queryshield/db/guarded.py",
-        "src/queryshield/db/w04_state.py",
+        "src/queryshield/db/state_store.py",
         "src/queryshield/approval/service.py",
         "src/queryshield/agent/parallel_durable.py",
         "src/queryshield/knowledge/snapshots.py",
@@ -756,22 +756,22 @@ function Invoke-W04Suite {
     $script:runtimeTimingScope = "deterministic Fake checks plus real local HTTP; PostgreSQL checks are separately reported"
 
     $fakeOnlyIds = @(
-        "W04-R03", "W04-R04", "W04-R05", "W04-R06", "W04-R07", "W04-R08",
-        "W04-FS01", "W04-FS02", "W04-RT01", "W04-RT02",
-        "W04-EN01", "W04-EN02", "W04-EN03", "W04-EN04", "W04-EN05"
+        "STATE-R03", "STATE-R04", "STATE-R05", "STATE-R06", "STATE-R07", "STATE-R08",
+        "STATE-FS01", "STATE-FS02", "STATE-RT01", "STATE-RT02",
+        "STATE-EN01", "STATE-EN02", "STATE-EN03", "STATE-EN04", "STATE-EN05"
     )
     foreach ($checkId in $script:selectedCheckIds) {
         $evidencePath = Join-Path $EvidenceDir "$checkId.txt"
         if ($Mode -eq "real" -and $fakeOnlyIds -contains $checkId) {
-            "not_applicable reason=$checkId_requires_W04_fake_model_boundary" | Set-Content -LiteralPath $evidencePath -Encoding UTF8
-            Add-CheckResult -CheckId $checkId -Status "not_applicable" -Command "python scripts/check_w04.py --check-id $checkId --mode real --output-dir $EvidenceDir" -ExitCode 0 -EvidencePath (Split-Path -Leaf $evidencePath)
+            "not_applicable reason=${checkId}_requires_STATE_fake_model_boundary" | Set-Content -LiteralPath $evidencePath -Encoding UTF8
+            Add-CheckResult -CheckId $checkId -Status "not_applicable" -Command "python scripts/check_state.py --check-id $checkId --mode real --output-dir $EvidenceDir" -ExitCode 0 -EvidencePath (Split-Path -Leaf $evidencePath)
             continue
         }
         Invoke-ProbeContinue `
             -CheckId $checkId `
-            -ScriptPath (Join-Path $PSScriptRoot "check_w04.py") `
+            -ScriptPath (Join-Path $PSScriptRoot "check_state.py") `
             -EvidencePath $evidencePath `
-            -Command "python scripts/check_w04.py --check-id $checkId --mode $Mode --output-dir $EvidenceDir" `
+            -Command "python scripts/check_state.py --check-id $checkId --mode $Mode --output-dir $EvidenceDir" `
             -Arguments @(
                 "--check-id", $checkId,
                 "--mode", $Mode,
@@ -792,9 +792,9 @@ function Invoke-W04Suite {
     exit 0
 }
 
-function Invoke-W05Suite {
-    $script:requiredRuntimeCheckIds = @("W05-RT01", "W05-RT02", "W05-RT03")
-    $script:requiredEngineeringCheckIds = @("W05-EN01", "W05-EN02", "W05-EN03")
+function Invoke-EvalSuite {
+    $script:requiredRuntimeCheckIds = @("EVAL-RT01", "EVAL-RT02", "EVAL-RT03")
+    $script:requiredEngineeringCheckIds = @("EVAL-EN01", "EVAL-EN02", "EVAL-EN03")
     $script:capabilityManifest = @(
         "w05-state-case-loader-oracle-controls-v1",
         "w05-versioned-retrieval-development-eval-v1",
@@ -803,14 +803,14 @@ function Invoke-W05Suite {
         "w05-empty-run-report-contract-controls-v1"
     )
     $script:operationUsage = @(
-        "W05-R01/R06 verify frozen dataset and sealed-family commitments without opening holdout before T05",
-        "W05-R02 compares B0/B1 security and shared-configuration fingerprints; real fingerprinting is blocked when model configuration is missing",
-        "W05-R03/R04 exercise denominator, unknown-usage, semantic-fact and security negative controls; they do not represent full-dataset product outcomes",
-        "W05-R05 fake mode records a two-scenario regression; real mode requires one successful and one failed real replay",
-        "W05-FS01 checks state-case quotas, C10 pairs and oracle-order controls; product stateful replay is not_run",
-        "W05-RT01/02/03 run parallel harness controls, a serial/parallel Fake pilot and development retrieval/context; PostgreSQL remains required where stated",
-        "W05-EN01 evaluates development retrieval; W05-EN02 has Fake protocol controls and a real configured path; W05-EN03 full end-to-end replay/report remains blocked",
-        "W05-DB01 always requires the real queryshield_ro PostgreSQL fixture in both provider modes",
+        "EVAL-R01/R06 verify frozen dataset and sealed-family commitments without opening holdout before T05",
+        "EVAL-R02 compares B0/B1 security and shared-configuration fingerprints; real fingerprinting is blocked when model configuration is missing",
+        "EVAL-R03/R04 exercise denominator, unknown-usage, semantic-fact and security negative controls; they do not represent full-dataset product outcomes",
+        "EVAL-R05 fake mode records a two-scenario regression; real mode requires one successful and one failed real replay",
+        "EVAL-FS01 checks state-case quotas, C10 pairs and oracle-order controls; product stateful replay is not_run",
+        "EVAL-RT01/02/03 run parallel harness controls, a serial/parallel Fake pilot and development retrieval/context; PostgreSQL remains required where stated",
+        "EVAL-EN01 evaluates development retrieval; EVAL-EN02 has Fake protocol controls and a real configured path; EVAL-EN03 full end-to-end replay/report remains blocked",
+        "EVAL-DB01 always requires the real queryshield_ro PostgreSQL fixture in both provider modes",
         "Unknown and failed provider calls remain in per-case denominators and unknown usage remains null"
     )
     $script:runtimeProfile = if ($Mode -eq "fake") { "fake-model-real-postgres-w05-v1" } else { "real-model-real-postgres-w05-v1" }
@@ -818,7 +818,7 @@ function Invoke-W05Suite {
         "src/queryshield/evaluation/",
         "src/queryshield/knowledge/retrieval.py",
         "src/queryshield/providers/rerank.py",
-        "evals/w05/",
+        "evals/development/",
         "fixtures/knowledge/source_registry.json",
         "fixtures/semantic/catalog-v2.json",
         "fixtures/commerce-v1.md",
@@ -826,19 +826,19 @@ function Invoke-W05Suite {
     )
     $script:runtimeTimingScope = "per-case retrieval/model calls and SQL execution; embedding index-build calls reported separately"
 
-    $fakeOnlyIds = @("W05-FS01", "W05-RT01", "W05-RT02", "W05-RT03", "W05-EN01")
+    $fakeOnlyIds = @("EVAL-FS01", "EVAL-RT01", "EVAL-RT02", "EVAL-RT03", "EVAL-EN01")
     foreach ($checkId in $script:selectedCheckIds) {
         $evidencePath = Join-Path $EvidenceDir "$checkId.txt"
         if ($Mode -eq "real" -and $fakeOnlyIds -contains $checkId) {
-            "not_applicable reason=$checkId_requires_W05_fake_harness" | Set-Content -LiteralPath $evidencePath -Encoding UTF8
-            Add-CheckResult -CheckId $checkId -Status "not_applicable" -Command "python scripts/check_w05.py --check-id $checkId --mode real --evidence-dir $EvidenceDir" -ExitCode 0 -EvidencePath (Split-Path -Leaf $evidencePath)
+            "not_applicable reason=${checkId}_requires_EVAL_fake_harness" | Set-Content -LiteralPath $evidencePath -Encoding UTF8
+            Add-CheckResult -CheckId $checkId -Status "not_applicable" -Command "python scripts/check_eval.py --check-id $checkId --mode real --evidence-dir $EvidenceDir" -ExitCode 0 -EvidencePath (Split-Path -Leaf $evidencePath)
             continue
         }
         Invoke-ProbeContinue `
             -CheckId $checkId `
-            -ScriptPath (Join-Path $PSScriptRoot "check_w05.py") `
+            -ScriptPath (Join-Path $PSScriptRoot "check_eval.py") `
             -EvidencePath $evidencePath `
-            -Command "python scripts/check_w05.py --check-id $checkId --mode $Mode --evidence-dir $EvidenceDir" `
+            -Command "python scripts/check_eval.py --check-id $checkId --mode $Mode --evidence-dir $EvidenceDir" `
             -Arguments @(
                 "--check-id", $checkId,
                 "--mode", $Mode,
@@ -895,18 +895,18 @@ function Invoke-RuntimePreflight {
 
 $script:allRequiredCheckIds = switch ($Suite) {
     "DB-SMOKE" { @("DB-SMOKE") }
-    "W03" { @("W03-EN01", "W03-RT01", "W03-RT02", "W03-RT03", "W03-EN02", "W03-EN03", "W03-EN04", "W03-T03", "W03-T04", "W03-T05", "W03-T06", "W03-DB01", "W03-FS01", "W03-FS02") }
-    "W04" { @("W04-R01", "W04-R02", "W04-R03", "W04-R04", "W04-R05", "W04-R06", "W04-R07", "W04-R08", "W04-X01", "W04-X02", "W04-X03", "W04-DB01", "W04-FS01", "W04-FS02", "W04-RT01", "W04-RT02", "W04-EN01", "W04-EN02", "W04-EN03", "W04-EN04", "W04-EN05") }
-    "W05" { @("W05-R01", "W05-R02", "W05-R03", "W05-R04", "W05-R05", "W05-R06", "W05-R07", "W05-X01", "W05-X02", "W05-X03", "W05-DB01", "W05-FS01", "W05-FS02", "W05-RT01", "W05-RT02", "W05-RT03", "W05-EN01", "W05-EN02", "W05-EN03") }
-    "W02" {
+    "AGENT" { @("AGENT-EN01", "AGENT-RT01", "AGENT-RT02", "AGENT-RT03", "AGENT-EN02", "AGENT-EN03", "AGENT-EN04", "AGENT-T03", "AGENT-T04", "AGENT-T05", "AGENT-T06", "AGENT-DB01", "AGENT-FS01", "AGENT-FS02") }
+    "STATE" { @("STATE-R01", "STATE-R02", "STATE-R03", "STATE-R04", "STATE-R05", "STATE-R06", "STATE-R07", "STATE-R08", "STATE-X01", "STATE-X02", "STATE-X03", "STATE-DB01", "STATE-FS01", "STATE-FS02", "STATE-RT01", "STATE-RT02", "STATE-EN01", "STATE-EN02", "STATE-EN03", "STATE-EN04", "STATE-EN05") }
+    "EVAL" { @("EVAL-R01", "EVAL-R02", "EVAL-R03", "EVAL-R04", "EVAL-R05", "EVAL-R06", "EVAL-R07", "EVAL-X01", "EVAL-X02", "EVAL-X03", "EVAL-DB01", "EVAL-FS01", "EVAL-FS02", "EVAL-RT01", "EVAL-RT02", "EVAL-RT03", "EVAL-EN01", "EVAL-EN02", "EVAL-EN03") }
+    "PROPOSAL" {
         if ($Mode -eq "real") {
-            @("W02-OFFLINE", "W02-PROVIDER", "W02-DB", "W02-REAL-CHAIN", "W02-FS01", "W02-FS02")
+            @("PROPOSAL-OFFLINE", "PROPOSAL-PROVIDER", "PROPOSAL-DB", "PROPOSAL-REAL-CHAIN", "PROPOSAL-FS01", "PROPOSAL-FS02")
         }
         else {
-            @("W02-OFFLINE", "W02-PROVIDER", "W02-DB", "W02-FS01", "W02-FS02")
+            @("PROPOSAL-OFFLINE", "PROPOSAL-PROVIDER", "PROPOSAL-DB", "PROPOSAL-FS01", "PROPOSAL-FS02")
         }
     }
-    default { @("W01-DB01", "W01-API", "W01-FS01", "W01-T05-FAULTS", "W01-FS02", "W01-B06-IDENTITY") }
+    default { @("BASE-DB01", "BASE-API", "BASE-FS01", "BASE-T05-FAULTS", "BASE-FS02", "BASE-B06-IDENTITY") }
 }
 $script:requiredCheckIds = @($script:allRequiredCheckIds)
 $script:selectedCheckIds = @($script:allRequiredCheckIds)
@@ -919,8 +919,8 @@ if (-not [string]::IsNullOrWhiteSpace($CheckIds)) {
             ForEach-Object { $_.Trim() } |
             Where-Object { $_ }
     )
-    if ($Suite -notin @("W03", "W04", "W05")) {
-        $validationErrors = @("CheckIds_is_registered_for_W03_W04_and_W05_only")
+    if ($Suite -notin @("AGENT", "STATE", "EVAL")) {
+        $validationErrors = @("CheckIds_is_registered_for_AGENT_STATE_and_EVAL_only")
     }
     elseif ($requestedCheckIds.Count -eq 0) {
         $validationErrors = @("CheckIds_empty")
@@ -950,11 +950,11 @@ if (-not [string]::IsNullOrWhiteSpace($CheckIds)) {
 }
 $script:databaseEvidence = switch ($Suite) {
     "DB-SMOKE" { "DB-SMOKE.txt" }
-    "W02" { "W02-DB.txt" }
-    "W03" { "W03-DB01.txt" }
-    "W04" { "W04-DB01.txt" }
-    "W05" { "W05-DB01.txt" }
-    default { "W01-DB01.txt" }
+    "PROPOSAL" { "PROPOSAL-DB.txt" }
+    "AGENT" { "AGENT-DB01.txt" }
+    "STATE" { "STATE-DB01.txt" }
+    "EVAL" { "EVAL-DB01.txt" }
+    default { "BASE-DB01.txt" }
 }
 
 $evidenceDirIsAbsolute = if ($script:isWindowsHost) {
@@ -970,11 +970,11 @@ if (-not $evidenceDirIsAbsolute) {
 
 New-Item -ItemType Directory -Force -Path $EvidenceDir | Out-Null
 
-if ($Suite -notin @("W01", "W02", "W03", "W04", "W05", "DB-SMOKE")) {
+if ($Suite -notin @("BASE", "PROPOSAL", "AGENT", "STATE", "EVAL", "DB-SMOKE")) {
     $validationErrors += "unsupported_suite"
 }
-if ($Suite -eq "W05" -and -not $PSBoundParameters.ContainsKey("Mode")) {
-    $validationErrors += "W05_Mode_must_be_explicit"
+if ($Suite -eq "EVAL" -and -not $PSBoundParameters.ContainsKey("Mode")) {
+    $validationErrors += "EVAL_Mode_must_be_explicit"
 }
 if ($Mode -notin @("fake", "real")) {
     $validationErrors += "unsupported_mode"
@@ -985,7 +985,7 @@ if ($Database -ne "postgres") {
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     $validationErrors += "python_missing"
 }
-if ($Suite -notin @("W02", "W03", "W04", "W05") -and -not $env:QUERYSHIELD_DATABASE_URL) {
+if ($Suite -notin @("PROPOSAL", "AGENT", "STATE", "EVAL") -and -not $env:QUERYSHIELD_DATABASE_URL) {
     $validationErrors += "QUERYSHIELD_DATABASE_URL_missing"
 }
 
@@ -996,7 +996,7 @@ if ($validationErrors.Count -gt 0) {
     Stop-Run -OverallStatus "blocked" -Message "check_blocked reason=$($validationErrors -join ',') evidence=$blockedEvidence" -ExitCode 2
 }
 
-# M11: with QUERYSHIELD_METADATA_TOOLS set, W04-EN04 fails (the SSE stream gains a
+# With QUERYSHIELD_METADATA_TOOLS set, STATE-EN04 fails (the SSE stream gains a
 # metadata_session event) and the checks are meant to exercise the default local
 # metadata tools.  Clear it for the run; Write-Summary restores the caller's value.
 $script:metadataToolsWasSet = Test-Path -LiteralPath Env:QUERYSHIELD_METADATA_TOOLS
@@ -1004,20 +1004,20 @@ $script:metadataToolsPrevious = $env:QUERYSHIELD_METADATA_TOOLS
 Remove-Item -LiteralPath Env:QUERYSHIELD_METADATA_TOOLS -ErrorAction SilentlyContinue
 $env:QUERYSHIELD_PROVIDER_MODE = $Mode
 
-if ($Suite -eq "W04") {
-    Invoke-W04Suite
+if ($Suite -eq "STATE") {
+    Invoke-StateSuite
 }
 
-if ($Suite -eq "W05") {
-    Invoke-W05Suite
+if ($Suite -eq "EVAL") {
+    Invoke-EvalSuite
 }
 
-if ($Suite -eq "W03") {
-    Invoke-W03Suite
+if ($Suite -eq "AGENT") {
+    Invoke-AgentSuite
 }
 
-if ($Suite -eq "W02") {
-    Invoke-W02Suite
+if ($Suite -eq "PROPOSAL") {
+    Invoke-ProposalSuite
 }
 
 if ($Suite -eq "DB-SMOKE") {
@@ -1028,45 +1028,45 @@ if ($Suite -eq "DB-SMOKE") {
     exit 0
 }
 
-$identityEvidence = Join-Path $EvidenceDir "W01-B06-IDENTITY.txt"
-Invoke-Probe -CheckId "W01-B06-IDENTITY" -ScriptPath (Join-Path $PSScriptRoot "check_identity.py") -EvidencePath $identityEvidence -Command "python scripts/check_identity.py"
+$identityEvidence = Join-Path $EvidenceDir "BASE-B06-IDENTITY.txt"
+Invoke-Probe -CheckId "BASE-B06-IDENTITY" -ScriptPath (Join-Path $PSScriptRoot "check_identity.py") -EvidencePath $identityEvidence -Command "python scripts/check_identity.py"
 Invoke-RuntimePreflight
 
 if ($Mode -eq "real") {
     $notRunChecks = @(
-        @{ id = "W01-DB01"; command = "python scripts/check_db.py" },
-        @{ id = "W01-FS01"; command = "python scripts/check_commerce.py" },
-        @{ id = "W01-T05-FAULTS"; command = "python scripts/check_faults.py" },
-        @{ id = "W01-FS02"; command = "python scripts/check_fs02.py" }
+        @{ id = "BASE-DB01"; command = "python scripts/check_db.py" },
+        @{ id = "BASE-FS01"; command = "python scripts/check_commerce.py" },
+        @{ id = "BASE-T05-FAULTS"; command = "python scripts/check_faults.py" },
+        @{ id = "BASE-FS02"; command = "python scripts/check_api_facts.py" }
     )
     foreach ($item in $notRunChecks) {
         $evidencePath = Join-Path $EvidenceDir ($item.id + ".txt")
         "not_run reason=real_provider_not_implemented" | Set-Content -LiteralPath $evidencePath -Encoding UTF8
         Add-CheckResult -CheckId $item.id -Status "not_run" -Command $item.command -ExitCode 2 -EvidencePath (Split-Path -Leaf $evidencePath)
     }
-    $apiEvidencePath = Join-Path $EvidenceDir "W01-API.txt"
+    $apiEvidencePath = Join-Path $EvidenceDir "BASE-API.txt"
     "blocked reason=real_provider_not_implemented" | Set-Content -LiteralPath $apiEvidencePath -Encoding UTF8
-    Add-CheckResult -CheckId "W01-API" -Status "blocked" -Command "python scripts/check_api.py --mode real" -ExitCode 2 -EvidencePath "W01-API.txt"
+    Add-CheckResult -CheckId "BASE-API" -Status "blocked" -Command "python scripts/check_api.py --mode real" -ExitCode 2 -EvidencePath "BASE-API.txt"
     Stop-Run -OverallStatus "blocked" -Message "check_blocked reason=real_provider_not_implemented" -ExitCode 2
 }
 
-$dbEvidence = Join-Path $EvidenceDir "W01-DB01.txt"
-$apiEvidence = Join-Path $EvidenceDir "W01-API.txt"
-$fs01Evidence = Join-Path $EvidenceDir "W01-FS01.txt"
-$faultEvidence = Join-Path $EvidenceDir "W01-T05-FAULTS.txt"
-$fs02Evidence = Join-Path $EvidenceDir "W01-FS02.txt"
+$dbEvidence = Join-Path $EvidenceDir "BASE-DB01.txt"
+$apiEvidence = Join-Path $EvidenceDir "BASE-API.txt"
+$fs01Evidence = Join-Path $EvidenceDir "BASE-FS01.txt"
+$faultEvidence = Join-Path $EvidenceDir "BASE-T05-FAULTS.txt"
+$fs02Evidence = Join-Path $EvidenceDir "BASE-FS02.txt"
 
-Invoke-Probe -CheckId "W01-DB01" -ScriptPath (Join-Path $PSScriptRoot "check_db.py") -EvidencePath $dbEvidence -Command "python scripts/check_db.py"
-Invoke-Probe -CheckId "W01-API" -ScriptPath (Join-Path $PSScriptRoot "check_api.py") -EvidencePath $apiEvidence -Command "python scripts/check_api.py --mode fake" -Arguments @("--mode", "fake")
-Invoke-Probe -CheckId "W01-FS01" -ScriptPath (Join-Path $PSScriptRoot "check_commerce.py") -EvidencePath $fs01Evidence -Command "python scripts/check_commerce.py"
-Invoke-Probe -CheckId "W01-T05-FAULTS" -ScriptPath (Join-Path $PSScriptRoot "check_faults.py") -EvidencePath $faultEvidence -Command "python scripts/check_faults.py"
+Invoke-Probe -CheckId "BASE-DB01" -ScriptPath (Join-Path $PSScriptRoot "check_db.py") -EvidencePath $dbEvidence -Command "python scripts/check_db.py"
+Invoke-Probe -CheckId "BASE-API" -ScriptPath (Join-Path $PSScriptRoot "check_api.py") -EvidencePath $apiEvidence -Command "python scripts/check_api.py --mode fake" -Arguments @("--mode", "fake")
+Invoke-Probe -CheckId "BASE-FS01" -ScriptPath (Join-Path $PSScriptRoot "check_commerce.py") -EvidencePath $fs01Evidence -Command "python scripts/check_commerce.py"
+Invoke-Probe -CheckId "BASE-T05-FAULTS" -ScriptPath (Join-Path $PSScriptRoot "check_faults.py") -EvidencePath $faultEvidence -Command "python scripts/check_faults.py"
 
 if (-not $env:QUERYSHIELD_BOOTSTRAP_DATABASE_URL) {
     "blocked reason=QUERYSHIELD_BOOTSTRAP_DATABASE_URL_missing" | Set-Content -LiteralPath $fs02Evidence -Encoding UTF8
-    Add-CheckResult -CheckId "W01-FS02" -Status "blocked" -Command "python scripts/check_fs02.py" -ExitCode 2 -EvidencePath "W01-FS02.txt"
-    Stop-Run -OverallStatus "blocked" -Message "check_blocked id=W01-FS02 evidence=$fs02Evidence" -ExitCode 2
+    Add-CheckResult -CheckId "BASE-FS02" -Status "blocked" -Command "python scripts/check_api_facts.py" -ExitCode 2 -EvidencePath "BASE-FS02.txt"
+    Stop-Run -OverallStatus "blocked" -Message "check_blocked id=BASE-FS02 evidence=$fs02Evidence" -ExitCode 2
 }
-Invoke-Probe -CheckId "W01-FS02" -ScriptPath (Join-Path $PSScriptRoot "check_fs02.py") -EvidencePath $fs02Evidence -Command "python scripts/check_fs02.py"
+Invoke-Probe -CheckId "BASE-FS02" -ScriptPath (Join-Path $PSScriptRoot "check_api_facts.py") -EvidencePath $fs02Evidence -Command "python scripts/check_api_facts.py"
 
 Write-Summary -OverallStatus "pass"
 exit 0

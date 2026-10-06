@@ -1,4 +1,4 @@
-"""Bounded LangGraph runtime for the W03 single-agent path.
+"""Bounded LangGraph runtime for the single-agent path.
 
 The graph is deliberately small.  The model may propose one of the validated
 actions from :mod:`queryshield.agent.proposals`; it never selects a Python
@@ -14,17 +14,20 @@ from dataclasses import dataclass
 from hashlib import sha256
 import json
 from time import monotonic
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NamedTuple, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
 from queryshield.agent.config import DEFAULT_RUN_CONFIG, RunConfig
 from queryshield.agent.context import (
     CONTEXT_VERSION,
+    MAX_RETRIEVAL_ITEMS,
     REPAIRABLE_QUERY_ERROR_CODES,
     ContextBuildError,
+    ContextBuildResult,
     available_action_types,
     build_context,
+    native_tools,
 )
 from queryshield.agent.metric_intent import (
     MetricDeclarationError,
@@ -33,6 +36,7 @@ from queryshield.agent.metric_intent import (
     answer_without_query_hint,
     declarable_metric_ids,
     knowledge_from_server_search_hint,
+    no_data_metric_names,
     normalize_time_window,
     undeclared_metric_hint,
 )
@@ -55,17 +59,21 @@ from queryshield.agent.proposals import (
     ExecutionContext,
     FinalAnswerAction,
     MetricBinding,
+    ModelCallIdentity,
     ModelCallStore,
     ParallelReadonlyAction,
     ProposalParseError,
     QueryProposal,
+    ResultEvidence,
     ToolCallAction,
     ToolNameAsActionTypeError,
+    native_action_text,
+    native_call_summary,
     parse_error_detail,
     parse_query_proposal,
     proposal_shape_summary,
 )
-from queryshield.providers.contracts import ModelAdapter, ModelProviderError
+from queryshield.providers.contracts import ModelAdapter, ModelCallResult, ModelProviderError, usage_is_consistent
 from queryshield.tools.semantic import ControlledTools, ToolError
 from queryshield.agent.tool_execution import (
     CLARIFICATION_VALUE_UNSUPPORTED_CODE,
@@ -82,7 +90,7 @@ from queryshield.agent.parallel import ParallelPlan, ParallelScheduler, Parallel
 
 MAX_MODEL_CALLS = 6
 MAX_TOOL_CALLS = 8
-# The server's own catalog search for a knowledge answer (B3c-2 R2): the
+# The server's own catalog search for a knowledge answer: the
 # contract's top_k default and search_catalog's query length limit.
 SERVER_SEARCH_TOP_K = 3
 SERVER_SEARCH_MAX_QUERY_CHARS = 200
@@ -90,26 +98,22 @@ MAX_WALL_CLOCK_SECONDS = 60.0
 MAX_QUERY_REPAIRS = 1
 # An ask_user the question's wording does not need is sent back at most once
 # per run.  This budget is separate from MAX_QUERY_REPAIRS on purpose (an
-# exception to the B2a rule that every repairable error shares one repair): a
+# exception to the rule that every repairable error shares one repair): a
 # bounced ask must not use up the repair a later failed query needs.  A
-# declaration the question contradicts (B3c-1) shares this one bounce: two
+# declaration the question contradicts shares this one bounce: two
 # phrase-table corrections in one run fail the run.
 MAX_CLARIFICATION_BOUNCES = 1
 # A final answer nothing in this run grounds (no query for business values, a
 # basis the run contradicts, or results cited before any query) is sent back
-# at most once per run (B3c-2).  A third budget on purpose: it must not use
+# at most once per run.  A third budget on purpose: it must not use
 # the SQL repair (single-repair-budget expects exactly one) nor the ask
 # bounce that a clarification may already have used.
 MAX_ANSWER_BOUNCES = 1
 CLARIFICATION_NOT_NEEDED_CODE = "clarification_not_needed"
 AGENT_CHECKPOINT_VERSION = "qs-bounded-agent-checkpoint-v4"
-# v3 checkpoints predate the answer bounce count and restore with 0.  W05
+# v3 checkpoints predate the answer bounce count and restore with 0.  The evaluation
 # prepared WAITING_USER fixtures are still written as v3.
 _V3_AGENT_CHECKPOINT_VERSION = "qs-bounded-agent-checkpoint-v3"
-# v2 checkpoints predate the clarification bounce count and rule id; v1 also
-# predates the request-level time window.  Both restore with the defaults.
-_V2_AGENT_CHECKPOINT_VERSION = "qs-bounded-agent-checkpoint-v2"
-_LEGACY_AGENT_CHECKPOINT_VERSION = "qs-bounded-agent-checkpoint-v1"
 _REPAIRABLE_QUERY_ERRORS = frozenset(REPAIRABLE_QUERY_ERROR_CODES)
 _SECURITY_REFUSAL_ERRORS = frozenset({
     "approval_required",
@@ -244,7 +248,7 @@ class AgentRunResult:
 
 
 class BoundedAgent:
-    """The unique formal W03 runtime graph.
+    """The unique formal runtime graph.
 
     The graph has three meaningful nodes: ``model_decision`` validates one
     constrained JSON proposal, ``execute_tool`` dispatches only through the
@@ -347,35 +351,16 @@ class BoundedAgent:
         )
         if len(initial_retrieval_items) != len(_evaluation_initial_retrieval_items):
             raise TypeError("initial evaluation retrieval items must contain mappings")
-        state: _GraphState = {
-            "context": context,
-            "question": question,
-            "run_config": self.run_config,
-            "metric_bindings": tuple(metric_bindings),
-            "request_time_window": normalized_request_window,
-            "parallel_plan": parallel_plan,
-            "started_at": self._clock(),
-            "active_elapsed_before": 0.0,
-            "clarifications": (),
-            "clarification_bounce_count": 0,
-            "answer_bounce_count": 0,
-            "status": "running",
-            "reason": None,
-            "error_code": None,
-            "proposal": None,
-            "final_action": None,
-            "model_call_count": 0,
-            "tool_call_count": 0,
-            "repair_count": 0,
-            "model_call_ids": (),
-            "events": (),
-            "retrieval_items": initial_retrieval_items,
-            "tool_results": (),
-            "public_answer": None,
-            "facts": None,
-            "context_version": CONTEXT_VERSION,
-            "elapsed_ms": 0,
-        }
+        state = _new_state(
+            context,
+            question,
+            self.run_config,
+            started_at=self._clock(),
+            metric_bindings=tuple(metric_bindings),
+            request_time_window=normalized_request_window,
+            parallel_plan=parallel_plan,
+            retrieval_items=initial_retrieval_items,
+        )
         final_state = self._compiled_graph.invoke(state)
         result = self._result_from_state(final_state, run_id=context.run_id)
         if result.status == "waiting_user":
@@ -393,12 +378,8 @@ class BoundedAgent:
                 "invalid_run_state",
                 "only a WAITING_USER run can be resumed",
             )
-        original_context = checkpoint.get("context")
-        if original_context != context:
-            raise RunResumeError(
-                "resume_context_mismatch",
-                "the resume context does not match the original run identity",
-            )
+        _require_same_identity(checkpoint.get("context"), context)
+        _require_resume_answer(answer)
         return self._continue_waiting(context, answer, checkpoint)
 
     def export_waiting_checkpoint(self, run_id: str) -> dict[str, object]:
@@ -419,10 +400,7 @@ class BoundedAgent:
 
         if not isinstance(context, ExecutionContext):
             raise TypeError("context must be an ExecutionContext")
-        if type(answer) is not str or not answer.strip():
-            raise RunResumeError("invalid_resume_input", "answer must be a non-empty string")
-        if len(answer) > 8_000:
-            raise RunResumeError("invalid_resume_input", "answer exceeds 8000 characters")
+        _require_resume_answer(answer)
         state = _deserialize_agent_checkpoint(checkpoint, expected_context=context)
         if state["run_config"] != self.run_config:
             raise RunResumeError("resume_profile_mismatch", "checkpoint profile differs from the configured agent")
@@ -437,10 +415,7 @@ class BoundedAgent:
     ) -> AgentRunResult:
         """Persist an incomplete clarification without calling the model again."""
 
-        if type(answer) is not str or not answer.strip():
-            raise RunResumeError("invalid_resume_input", "answer must be a non-empty string")
-        if len(answer) > 8_000:
-            raise RunResumeError("invalid_resume_input", "answer exceeds 8000 characters")
+        _require_resume_answer(answer)
         state = _deserialize_agent_checkpoint(checkpoint, expected_context=context)
         waiting_action = dict(state.get("final_action") or {})
         if not str(waiting_action.get("question", "")):
@@ -477,10 +452,7 @@ class BoundedAgent:
         No model call and no SQL; the answer is the catalog's fixed note.
         """
 
-        if type(answer) is not str or not answer.strip():
-            raise RunResumeError("invalid_resume_input", "answer must be a non-empty string")
-        if len(answer) > 8_000:
-            raise RunResumeError("invalid_resume_input", "answer exceeds 8000 characters")
+        _require_resume_answer(answer)
         state = _deserialize_agent_checkpoint(checkpoint, expected_context=context)
         state["clarifications"] = tuple(state.get("clarifications", ())) + (answer.strip(),)
         elapsed = self._elapsed_seconds(state)
@@ -513,9 +485,9 @@ class BoundedAgent:
         request_time_window: Mapping[str, object] | None = None,
         clock: Callable[[], float] = monotonic,
     ) -> dict[str, object]:
-        """Build an initial C10 prepared state without claiming prior model calls.
+        """Build an initial prepared state without claiming prior model calls.
 
-        This is used by the W05 harness when loading a declared WAITING_USER
+        This is used by the harness when loading a declared WAITING_USER
         fixture.  It is not reachable from an HTTP request.
         """
 
@@ -536,36 +508,19 @@ class BoundedAgent:
         pending_question = question if waiting_question is None else waiting_question
         if type(pending_question) is not str or not pending_question.strip():
             raise TypeError("waiting_question must be a non-empty string")
-        state: _GraphState = {
-            "context": context,
-            "question": question.strip(),
-            "run_config": run_config,
-            "metric_bindings": tuple(metric_bindings),
-            "request_time_window": _request_window(request_time_window),
-            "parallel_plan": None,
-            "started_at": clock(),
-            "active_elapsed_before": 0.0,
-            "clarifications": answers,
-            "clarification_bounce_count": 0,
-            "answer_bounce_count": 0,
-            "status": "waiting_user",
-            "reason": None,
-            "error_code": None,
-            "proposal": None,
-            "final_action": {"type": "ask_user", "question": pending_question.strip()},
-            "model_call_count": 0,
-            "tool_call_count": 0,
-            "repair_count": 0,
-            "model_call_ids": (),
-            "events": (),
-            "retrieval_items": items,
-            "tool_results": (),
-            "public_answer": None,
-            "facts": None,
-            "context_version": CONTEXT_VERSION,
-            "elapsed_ms": 0,
-        }
-        # W05 frozen-case fixtures stay on the v3 restore path (controller, B3c-2).
+        state = _new_state(
+            context,
+            question.strip(),
+            run_config,
+            started_at=clock(),
+            metric_bindings=tuple(metric_bindings),
+            request_time_window=_request_window(request_time_window),
+            clarifications=answers,
+            status="waiting_user",
+            final_action={"type": "ask_user", "question": pending_question.strip()},
+            retrieval_items=items,
+        )
+        # Frozen-case fixtures stay on the v3 restore path.
         return _serialize_agent_checkpoint(state, checkpoint_version=_V3_AGENT_CHECKPOINT_VERSION)
 
     def _continue_waiting(
@@ -574,19 +529,6 @@ class BoundedAgent:
         answer: str,
         checkpoint: _GraphState,
     ) -> AgentRunResult:
-        if not isinstance(context, ExecutionContext):
-            raise TypeError("context must be an ExecutionContext")
-        if type(answer) is not str or not answer.strip():
-            raise RunResumeError("invalid_resume_input", "answer must be a non-empty string")
-        if len(answer) > 8_000:
-            raise RunResumeError("invalid_resume_input", "answer exceeds 8000 characters")
-        original_context = checkpoint.get("context")
-        if original_context != context:
-            raise RunResumeError(
-                "resume_context_mismatch",
-                "the resume context does not match the original run identity",
-            )
-
         resumed_state: _GraphState = dict(checkpoint)
         resumed_state.update(
             {
@@ -659,6 +601,31 @@ class BoundedAgent:
             update = {**update, "retry_model": False}
         return update
 
+    def _step_context(self, state: _GraphState) -> ContextBuildResult:
+        """The provider context for the next model call; raises ContextBuildError."""
+
+        metric_bindings = tuple(state.get("metric_bindings", ()))
+        confirmed_metric = None
+        confirmed_time_window = None
+        if len(metric_bindings) == 1 and isinstance(metric_bindings[0], MetricBinding):
+            confirmed_metric = metric_bindings[0].metric_id.removeprefix("metric.")
+            confirmed_time_window = dict(metric_bindings[0].time_window)
+        return build_context(
+            state["context"],
+            state["question"],
+            clarifications=state.get("clarifications", ()),
+            confirmed_metric=confirmed_metric,
+            time_window=confirmed_time_window,
+            metric_bindings=tuple(binding.as_dict() for binding in metric_bindings if isinstance(binding, MetricBinding)),
+            retrieval_items=state.get("retrieval_items", ()),
+            tool_results=state.get("tool_results", ()),
+            run_config=state["run_config"],
+            metric_catalog=getattr(self.tools, "catalog", None),
+            request_time_window=state.get("request_time_window"),
+            parallel_available=self._parallel_available(state),
+            retrieval_available=self.retrieval_available,
+        )
+
     def _model_decision_step(self, state: _GraphState) -> dict[str, object]:
         if state.get("status") != "running":
             return {}
@@ -667,130 +634,58 @@ class BoundedAgent:
             return budget_update
 
         try:
-            metric_bindings = tuple(state.get("metric_bindings", ()))
-            confirmed_metric = None
-            confirmed_time_window = None
-            if len(metric_bindings) == 1 and isinstance(metric_bindings[0], MetricBinding):
-                confirmed_metric = metric_bindings[0].metric_id.removeprefix("metric.")
-                confirmed_time_window = dict(metric_bindings[0].time_window)
-            context_result = build_context(
-                state["context"],
-                state["question"],
-                clarifications=state.get("clarifications", ()),
-                confirmed_metric=confirmed_metric,
-                time_window=confirmed_time_window,
-                metric_bindings=tuple(binding.as_dict() for binding in metric_bindings if isinstance(binding, MetricBinding)),
-                retrieval_items=state.get("retrieval_items", ()),
-                tool_results=state.get("tool_results", ()),
-                run_config=state["run_config"],
-                metric_catalog=getattr(self.tools, "catalog", None),
-                request_time_window=state.get("request_time_window"),
-                parallel_available=self._parallel_available(state),
-                retrieval_available=self.retrieval_available,
-            )
+            context_result = self._step_context(state)
         except ContextBuildError as exc:
             return self._failure_update(state, code=exc.code, reason=str(exc))
 
         identity = self.call_store.new_call(state["context"].run_id)
-        next_count = state.get("model_call_count", 0) + 1
-        next_ids = state.get("model_call_ids", ()) + (identity.model_call_id,)
-
+        # What every outcome of this step records about the call.
+        step = {
+            "model_call_count": state.get("model_call_count", 0) + 1,
+            "model_call_ids": state.get("model_call_ids", ()) + (identity.model_call_id,),
+            "context_version": context_result.context_version,
+        }
+        native = state["run_config"].model_protocol == "native"
+        # A json call keeps its exact arguments (the evaluation's own fakes take no tools).
+        options = {"tools": native_tools(retrieval_available=self.retrieval_available)} if native else {}
         try:
             result = self.model.complete(
                 context_result.messages,
                 request_id=identity.request_id,
                 model_call_id=identity.model_call_id,
+                **options,
             )
         except ModelProviderError as exc:
-            event = self._event(
-                state,
-                {
-                    "kind": "model_call",
-                    "status": "failed",
-                    "model_call_id": identity.model_call_id,
-                    "request_id": identity.request_id,
-                    "error_code": exc.code,
-                    **_provider_failure_fields(exc.record),
-                },
-            )
             return {
                 "status": "failed",
                 "reason": "model provider call failed",
                 "error_code": exc.code,
-                "model_call_count": next_count,
-                "model_call_ids": next_ids,
-                "events": event,
-                "context_version": context_result.context_version,
-                "run_config": state["run_config"],
+                "events": self._event(state, _model_failure_event(exc, identity)),
+                **step,
             }
 
-        event = self._event(
-            state,
-            {
-                "kind": "model_call",
-                "status": "succeeded",
-                "model_call_id": identity.model_call_id,
-                "request_id": identity.request_id,
-                "provider": result.provider,
-                "model": result.model,
-                "provider_call_id": result.provider_call_id,
-                "provider_request_id": result.provider_request_id,
-                "usage_status": result.usage_status,
-                "usage": result.usage.as_dict() if result.usage is not None else None,
-                "content_length": len(result.content.encode("utf-8")),
-                "content_sha256": sha256(result.content.encode("utf-8")).hexdigest(),
-            },
-        )
+        event = self._event(state, _model_call_event(result, identity, native=native))
+        # Native: the one function call becomes the json action it stands for,
+        # so both protocols go through the same parser; any content is ignored.
+        action_text = result.content
         try:
+            if native:
+                action_text = native_action_text(result.tool_calls or ())
             proposal = parse_query_proposal(
-                result.content,
+                action_text,
                 context=state["context"],
                 model_call_id=identity.model_call_id,
             )
         except ProposalParseError as exc:
-            # Diagnosable without storing model text: the server's fixed
-            # explanation plus a value-free structure summary.
             validation_event = self._event(
                 {**state, "events": event},
-                {
-                    "kind": "proposal_validation",
-                    "status": "failed",
-                    "error_code": exc.code,
-                    "error_detail": parse_error_detail(exc),
-                    "action_shape": proposal_shape_summary(result.content),
-                    "model_call_id": identity.model_call_id,
-                },
+                _proposal_validation_event(exc, action_text, identity.model_call_id),
             )
-            if isinstance(exc, ToolNameAsActionTypeError):
-                if state.get("repair_count", 0) < MAX_QUERY_REPAIRS:
-                    return self._action_type_repair(
-                        state,
-                        exc,
-                        events=validation_event,
-                        model_call_count=next_count,
-                        model_call_ids=next_ids,
-                        context_version=context_result.context_version,
-                    )
-            return {
-                "status": "failed",
-                "reason": str(exc),
-                "error_code": exc.code,
-                "model_call_count": next_count,
-                "model_call_ids": next_ids,
-                "events": validation_event,
-                "context_version": context_result.context_version,
-                "run_config": state["run_config"],
-            }
+            if isinstance(exc, ToolNameAsActionTypeError) and state.get("repair_count", 0) < MAX_QUERY_REPAIRS:
+                return self._action_type_repair(state, exc, events=validation_event, step=step)
+            return {"status": "failed", "reason": str(exc), "error_code": exc.code, "events": validation_event, **step}
 
-        return {
-            "status": "running",
-            "proposal": proposal,
-            "model_call_count": next_count,
-            "model_call_ids": next_ids,
-            "events": event,
-            "context_version": context_result.context_version,
-            "run_config": state["run_config"],
-        }
+        return {"status": "running", "proposal": proposal, "events": event, **step}
 
     def _action_type_repair(
         self,
@@ -798,9 +693,7 @@ class BoundedAgent:
         exc: ToolNameAsActionTypeError,
         *,
         events: tuple[Mapping[str, object], ...],
-        model_call_count: int,
-        model_call_ids: tuple[str, ...],
-        context_version: str,
+        step: Mapping[str, object],
     ) -> dict[str, object]:
         """Spend the single repair on a tool name written as the action type.
 
@@ -808,42 +701,18 @@ class BoundedAgent:
         as an action-validation note, not as an executed tool.
         """
 
-        repair_index = state.get("repair_count", 0) + 1
-        repair_events = self._event(
-            {**state, "events": events},
-            {
-                "kind": "query_repair",
-                "status": "scheduled",
-                "repair_index": repair_index,
-                "error_code": exc.code,
-            },
+        hint = {
+            "action": (
+                'Resend as {"type":"tool_call","name":<tool_name>,"arguments":{...}}; type is only one of: '
+                + ", ".join(available_action_types(parallel_available=self._parallel_available(state)))
+                + "."
+            ),
+            "tool_name": exc.tool_name,
+        }
+        update = self._send_back(
+            state, events, counter="repair_count", tool_name="action_validation", error_code=exc.code, hint=hint
         )
-        hint_record = {
-            "tool_name": "action_validation",
-            "status": "failed",
-            "error_code": exc.code,
-            "repairable": True,
-            "repair_hint": {
-                "action": (
-                    'Resend as {"type":"tool_call","name":<tool_name>,"arguments":{...}}; type is only one of: '
-                    + ", ".join(available_action_types(parallel_available=self._parallel_available(state)))
-                    + "."
-                ),
-                "tool_name": exc.tool_name,
-            },
-        }
-        return {
-            "status": "running",
-            "proposal": None,
-            "retry_model": True,
-            "repair_count": repair_index,
-            "model_call_count": model_call_count,
-            "model_call_ids": model_call_ids,
-            "tool_results": state.get("tool_results", ()) + (hint_record,),
-            "events": repair_events,
-            "context_version": context_version,
-            "run_config": state["run_config"],
-        }
+        return {**update, "retry_model": True, **step}
 
     def _execute_tool(self, state: _GraphState) -> dict[str, object]:
         budget_update = self._budget_update(state, kind="tool")
@@ -859,13 +728,23 @@ class BoundedAgent:
             )
 
         action = proposal.action
-        next_count = state.get("tool_call_count", 0) + 1
         tool_started = self._clock()
         catalog = getattr(self.tools, "catalog", None)
         input_summary = _tool_input_summary(
             action,
             declarable_metrics=declarable_metric_ids(catalog) if catalog is not None else (),
         )
+
+        def outcome() -> dict[str, object]:
+            """What every handler below is told; the clock is read once the outcome is known."""
+
+            return {
+                "tool_call_count": state.get("tool_call_count", 0) + 1,
+                "tool_name": action.name,
+                "input_summary": input_summary,
+                "elapsed_ms": self._ms_since(tool_started),
+            }
+
         try:
             if action.name == "search_catalog" and not self.retrieval_available:
                 raise ToolError("retrieval_unavailable", "this server runs without a catalog retriever")
@@ -879,145 +758,161 @@ class BoundedAgent:
                 clarifications=self._clarification_reading(state),
             )
         except MetricContradictsQuestionError as exc:
-            return self._contradiction_update(
-                state,
-                exc,
-                tool_call_count=next_count,
-                tool_name=action.name,
-                input_summary=input_summary,
-                elapsed_ms=int(max(0.0, self._clock() - tool_started) * 1000),
-            )
+            return self._contradiction_update(state, exc, **outcome())
         except (ClarificationRequiredError, ClarificationValueUnsupportedError) as exc:
-            return self._clarification_gate_update(
-                state,
-                exc,
-                tool_call_count=next_count,
-                tool_name=action.name,
-                input_summary=input_summary,
-                elapsed_ms=int(max(0.0, self._clock() - tool_started) * 1000),
-            )
+            return self._clarification_gate_update(state, exc, **outcome())
         except ApprovalRequiredError as exc:
-            # A verified read of approval-protected values pauses the run; the
-            # server binds the pending call to an approval.  Nothing executed.
-            return {
-                "status": "waiting_approval",
-                "reason": "the verified query reads values that require approval",
-                "error_code": None,
-                "final_action": {"type": "approval_required", "tool_call": dict(exc.pending_call)},
-                "tool_call_count": next_count,
-                "events": self._event(
-                    state,
-                    {
-                        "kind": "tool_call",
-                        "status": "approval_required",
-                        "tool_call_index": next_count,
-                        "tool_name": action.name,
-                        "error_code": exc.code,
-                        "elapsed_ms": int(max(0.0, self._clock() - tool_started) * 1000),
-                        "input_summary": input_summary,
-                        "policy_conclusion": "approval_required",
-                    },
-                ),
-            }
+            return self._approval_pause_update(state, exc, **outcome())
         except ToolError as exc:
-            repairable = action.name == "query_readonly" and exc.code in _REPAIRABLE_QUERY_ERRORS
-            next_repairs = state.get("repair_count", 0) + (1 if repairable else 0)
-            failed_event = self._event(
+            return self._tool_error_update(state, exc, **outcome())
+        return self._tool_success_update(state, output, **outcome())
+
+    def _approval_pause_update(
+        self,
+        state: _GraphState,
+        exc: ApprovalRequiredError,
+        *,
+        tool_call_count: int,
+        tool_name: str,
+        input_summary: Mapping[str, object],
+        elapsed_ms: int,
+    ) -> dict[str, object]:
+        """A verified read of approval-protected values pauses the run; the server binds the pending call to an approval.
+
+        Nothing executed.
+        """
+
+        return {
+            "status": "waiting_approval",
+            "reason": "the verified query reads values that require approval",
+            "error_code": None,
+            "final_action": {"type": "approval_required", "tool_call": dict(exc.pending_call)},
+            "tool_call_count": tool_call_count,
+            "events": self._event(
                 state,
                 {
                     "kind": "tool_call",
-                    "status": "failed",
-                    "tool_call_index": next_count,
-                    "tool_name": action.name,
+                    "status": "approval_required",
+                    "tool_call_index": tool_call_count,
+                    "tool_name": tool_name,
                     "error_code": exc.code,
-                    "error_reason": exc.message,
-                    "elapsed_ms": int(max(0.0, self._clock() - tool_started) * 1000),
+                    "elapsed_ms": elapsed_ms,
                     "input_summary": input_summary,
-                    "policy_conclusion": "rejected",
-                    **self._metadata_transport_fields(action.name),
+                    "policy_conclusion": "approval_required",
                 },
-            )
-            failed_record = {
-                "tool_name": action.name,
+            ),
+        }
+
+    def _tool_error_update(
+        self,
+        state: _GraphState,
+        exc: ToolError,
+        *,
+        tool_call_count: int,
+        tool_name: str,
+        input_summary: Mapping[str, object],
+        elapsed_ms: int,
+    ) -> dict[str, object]:
+        """A refused or failed tool call: one repair for a repairable query error, else the run ends."""
+
+        repairable = tool_name == "query_readonly" and exc.code in _REPAIRABLE_QUERY_ERRORS
+        next_repairs = state.get("repair_count", 0) + (1 if repairable else 0)
+        failed_event = self._event(
+            state,
+            {
+                "kind": "tool_call",
                 "status": "failed",
+                "tool_call_index": tool_call_count,
+                "tool_name": tool_name,
                 "error_code": exc.code,
                 "error_reason": exc.message,
-                "repairable": repairable,
+                "elapsed_ms": elapsed_ms,
                 "input_summary": input_summary,
-            }
-            next_results = state.get("tool_results", ()) + (failed_record,)
-            if repairable and state.get("repair_count", 0) < MAX_QUERY_REPAIRS:
-                repair_event = self._event(
-                    {**state, "events": failed_event},
-                    {
-                        "kind": "query_repair",
-                        "status": "scheduled",
-                        "repair_index": next_repairs,
-                        "error_code": exc.code,
-                    },
-                )
-                return {
-                    "status": "running",
-                    "tool_call_count": next_count,
-                    "repair_count": next_repairs,
-                    "tool_results": next_results,
-                    "events": repair_event,
-                }
-            if repairable:
-                return {
-                    "status": "failed",
-                    "reason": "the query repair budget is exhausted",
-                    "error_code": "query_repair_limit",
-                    "tool_call_count": next_count,
-                    "repair_count": state.get("repair_count", 0),
-                    "tool_results": next_results,
-                    "events": failed_event,
-                }
-            terminal_status: _InternalStatus = (
-                "denied" if exc.code in _SECURITY_REFUSAL_ERRORS else "failed"
+                "policy_conclusion": "rejected",
+                **self._metadata_transport_fields(tool_name),
+            },
+        )
+        failed_record = {
+            "tool_name": tool_name,
+            "status": "failed",
+            "error_code": exc.code,
+            "error_reason": exc.message,
+            "repairable": repairable,
+            "input_summary": input_summary,
+        }
+        next_results = state.get("tool_results", ()) + (failed_record,)
+        if repairable and state.get("repair_count", 0) < MAX_QUERY_REPAIRS:
+            repair_event = self._event(
+                {**state, "events": failed_event},
+                _scheduled_event("repair_count", next_repairs, exc.code),
             )
             return {
-                "status": terminal_status,
-                "reason": str(exc),
-                "error_code": exc.code,
-                "tool_call_count": next_count,
+                "status": "running",
+                "tool_call_count": tool_call_count,
+                "repair_count": next_repairs,
+                "tool_results": next_results,
+                "events": repair_event,
+            }
+        if repairable:
+            return {
+                "status": "failed",
+                "reason": "the query repair budget is exhausted",
+                "error_code": "query_repair_limit",
+                "tool_call_count": tool_call_count,
+                "repair_count": state.get("repair_count", 0),
                 "tool_results": next_results,
                 "events": failed_event,
             }
+        terminal_status: _InternalStatus = "denied" if exc.code in _SECURITY_REFUSAL_ERRORS else "failed"
+        return {
+            "status": terminal_status,
+            "reason": str(exc),
+            "error_code": exc.code,
+            "tool_call_count": tool_call_count,
+            "tool_results": next_results,
+            "events": failed_event,
+        }
 
+    def _tool_success_update(
+        self,
+        state: _GraphState,
+        output: Mapping[str, object],
+        *,
+        tool_call_count: int,
+        tool_name: str,
+        input_summary: Mapping[str, object],
+        elapsed_ms: int,
+    ) -> dict[str, object]:
         tool_record = {
-            "tool_name": action.name,
+            "tool_name": tool_name,
             "status": "succeeded",
             "output": output,
         }
-        next_results = state.get("tool_results", ()) + (tool_record,)
         update: dict[str, object] = {
             "status": "running",
-            "tool_call_count": next_count,
-            "tool_results": next_results,
+            "tool_call_count": tool_call_count,
+            "tool_results": state.get("tool_results", ()) + (tool_record,),
             "events": self._event(
                 state,
                 {
                     "kind": "tool_call",
                     "status": "succeeded",
-                    "tool_call_index": next_count,
-                    "tool_name": action.name,
-                    "elapsed_ms": int(max(0.0, self._clock() - tool_started) * 1000),
+                    "tool_call_index": tool_call_count,
+                    "tool_name": tool_name,
+                    "elapsed_ms": elapsed_ms,
                     "input_summary": input_summary,
                     "policy_conclusion": "allowed",
                     "result_id": output.get("result_id"),
                     "row_count": output.get("row_count"),
                     "source_ids": _source_ids_from_tool_output(output),
-                    **self._metadata_transport_fields(action.name),
+                    **self._metadata_transport_fields(tool_name),
                 },
             ),
         }
-        if action.name == "search_catalog":
-            items = output.get("items")
-            if isinstance(items, Sequence) and not isinstance(items, (str, bytes)):
-                update["retrieval_items"] = tuple(
-                    dict(item) for item in items[:3] if isinstance(item, Mapping)
-                )
+        if tool_name == "search_catalog":
+            items = _retrieval_items_from(output)
+            if items is not None:
+                update["retrieval_items"] = items
         return update
 
     def _metadata_transport_fields(self, tool_name: str) -> dict[str, object]:
@@ -1119,8 +1014,7 @@ class BoundedAgent:
         ``events`` already records the rejected action.
         """
 
-        bounces = state.get("clarification_bounce_count", 0)
-        if bounces >= MAX_CLARIFICATION_BOUNCES:
+        if state.get("clarification_bounce_count", 0) >= MAX_CLARIFICATION_BOUNCES:
             return {
                 **(extra or {}),
                 "status": "failed",
@@ -1129,27 +1023,15 @@ class BoundedAgent:
                 "final_action": None,
                 "events": events,
             }
-        return {
-            **(extra or {}),
-            "status": "running",
-            "proposal": None,
-            "final_action": None,
-            "clarification_bounce_count": bounces + 1,
-            "tool_results": state.get("tool_results", ())
-            + (
-                {
-                    "tool_name": tool_name,
-                    "status": "failed",
-                    "error_code": error_code,
-                    "repairable": True,
-                    "repair_hint": dict(hint),
-                },
-            ),
-            "events": self._event(
-                {**state, "events": events},
-                {"kind": "clarification_bounce", "status": "scheduled", "bounce_index": bounces + 1, "error_code": error_code},
-            ),
-        }
+        update = self._send_back(
+            state,
+            events,
+            counter="clarification_bounce_count",
+            tool_name=tool_name,
+            error_code=error_code,
+            hint=dict(hint),
+        )
+        return {**(extra or {}), **update, "final_action": None}
 
     def _contradiction_update(
         self,
@@ -1213,41 +1095,26 @@ class BoundedAgent:
             state,
             {"kind": "action_validation", "status": "failed", "error_code": "parallel_unavailable"},
         )
-        repair_index = state.get("repair_count", 0) + 1
-        repair_events = self._event(
-            {**state, "events": validation_events},
-            {
-                "kind": "query_repair",
-                "status": "scheduled",
-                "repair_index": repair_index,
-                "error_code": "parallel_unavailable",
-            },
-        )
         declarable = declarable_metric_ids(self.tools.catalog)
         window = state.get("request_time_window")
-        hint_record = {
-            "tool_name": "action_validation",
-            "status": "failed",
-            "error_code": "parallel_unavailable",
-            "repairable": True,
-            "repair_hint": {
-                "action": (
-                    "This run cannot run parallel reads. Send one tool_call named query_readonly and declare "
-                    "these metrics together in arguments.metrics with time_window (net_fen is declared alone)."
-                ),
-                "declare_metrics": [metric_id for metric_id in action.metric_ids if metric_id in declarable],
-                "request_time_window": (
-                    {"start": window["start"], "end": window["end"]} if window is not None else None
-                ),
-            },
+        hint = {
+            "action": (
+                "This run cannot run parallel reads. Send one tool_call named query_readonly and declare "
+                "these metrics together in arguments.metrics with time_window (net_fen is declared alone)."
+            ),
+            "declare_metrics": [metric_id for metric_id in action.metric_ids if metric_id in declarable],
+            "request_time_window": (
+                {"start": window["start"], "end": window["end"]} if window is not None else None
+            ),
         }
-        return {
-            "status": "running",
-            "proposal": None,
-            "repair_count": repair_index,
-            "tool_results": state.get("tool_results", ()) + (hint_record,),
-            "events": repair_events,
-        }
+        return self._send_back(
+            state,
+            validation_events,
+            counter="repair_count",
+            tool_name="action_validation",
+            error_code="parallel_unavailable",
+            hint=hint,
+        )
 
     def _execute_parallel(self, state: _GraphState) -> dict[str, object]:
         proposal = state.get("proposal")
@@ -1296,20 +1163,7 @@ class BoundedAgent:
         except ParallelValidationError as exc:
             return self._failure_update(state, code=exc.code, reason=str(exc))
         next_tool_count = state.get("tool_call_count", 0) + result.new_branch_count
-        event = self._event(
-            state,
-            {
-                "kind": "parallel_group",
-                "status": result.status,
-                "group_id": result.group_id,
-                "plan_hash": result.plan_hash,
-                "branch_ids": [branch.branch_id for branch in result.branches],
-                "branch_statuses": [branch.status for branch in result.branches],
-                "peak_active": result.peak_active,
-                "reused": result.reused,
-                "error_code": result.error_code,
-            },
-        )
+        event = self._event(state, _parallel_group_event(result))
         update: dict[str, object] = {
             "tool_call_count": next_tool_count,
             "events": event,
@@ -1352,35 +1206,7 @@ class BoundedAgent:
             try:
                 public_action, public_answer, facts, answer_status = self._verified_answer(state, action)
             except (FactResolutionError, ToolError) as exc:
-                failure_event = self._event(
-                    state,
-                    {
-                        "kind": "answer_validation",
-                        "status": "failed",
-                        "error_code": getattr(exc, "code", "evidence_validation_failed"),
-                        "field": "fact_refs",
-                        **_basis_diagnostics(action),
-                    },
-                )
-                if isinstance(exc, _UndeclaredMetricReference) and state.get("repair_count", 0) < MAX_QUERY_REPAIRS:
-                    return self._answer_repair(state, exc, failure_event)
-                can_bounce = (
-                    state.get("answer_bounce_count", 0) < MAX_ANSWER_BOUNCES
-                    # No model call left for a corrected answer: fail with the
-                    # answer's own code instead of a model_call_limit stop.
-                    and state.get("model_call_count", 0) < self.limits.max_model_calls
-                )
-                if isinstance(exc, _KnowledgeWithoutSource) and can_bounce and self.retrieval_available:
-                    return self._server_search_bounce(state, action, exc, failure_event, update)
-                if isinstance(exc, _ANSWER_BOUNCE_ERRORS) and can_bounce:
-                    return self._answer_bounce(state, action, exc, failure_event)
-                return {
-                    **update,
-                    "status": "failed",
-                    "reason": str(exc),
-                    "error_code": getattr(exc, "code", "evidence_validation_failed"),
-                    "events": failure_event,
-                }
+                return self._answer_failure_update(state, action, exc, update)
             answer_event = self._event(
                 state,
                 {
@@ -1412,6 +1238,45 @@ class BoundedAgent:
             "status": "failed",
             "reason": "a tool proposal bypassed the tool node",
             "error_code": "invalid_terminal_action",
+        }
+
+    def _answer_failure_update(
+        self,
+        state: _GraphState,
+        action: FinalAnswerAction,
+        exc: FactResolutionError | ToolError,
+        update: Mapping[str, object],
+    ) -> dict[str, object]:
+        """An answer the run's evidence does not support: send it back once, search once, or fail."""
+
+        failure_event = self._event(
+            state,
+            {
+                "kind": "answer_validation",
+                "status": "failed",
+                "error_code": exc.code,
+                "field": "fact_refs",
+                **_basis_diagnostics(action),
+            },
+        )
+        if isinstance(exc, _UndeclaredMetricReference) and state.get("repair_count", 0) < MAX_QUERY_REPAIRS:
+            return self._answer_repair(state, exc, failure_event)
+        can_bounce = (
+            state.get("answer_bounce_count", 0) < MAX_ANSWER_BOUNCES
+            # No model call left for a corrected answer: fail with the
+            # answer's own code instead of a model_call_limit stop.
+            and state.get("model_call_count", 0) < self.limits.max_model_calls
+        )
+        if isinstance(exc, _KnowledgeWithoutSource) and can_bounce and self.retrieval_available:
+            return self._server_search_bounce(state, action, exc, failure_event, update)
+        if isinstance(exc, _ANSWER_BOUNCE_ERRORS) and can_bounce:
+            return self._answer_bounce(state, action, exc, failure_event)
+        return {
+            **update,
+            "status": "failed",
+            "reason": str(exc),
+            "error_code": exc.code,
+            "events": failure_event,
         }
 
     def _reviewed_ask(self, state: _GraphState, action: AskUserAction, elapsed_seconds: float) -> dict[str, object]:
@@ -1468,35 +1333,11 @@ class BoundedAgent:
     ) -> dict[str, object]:
         """Spend the single repair: send the model back to query/declare, never create facts."""
 
-        repair_index = state.get("repair_count", 0) + 1
-        repair_event = self._event(
-            {**state, "events": failure_event},
-            {
-                "kind": "query_repair",
-                "status": "scheduled",
-                "repair_index": repair_index,
-                "error_code": exc.code,
-            },
+        hint = undeclared_metric_hint(self.tools.catalog, exc.metric_ids, state.get("request_time_window"))
+        update = self._send_back(
+            state, failure_event, counter="repair_count", tool_name="final_answer", error_code=exc.code, hint=hint
         )
-        hint_record = {
-            "tool_name": "final_answer",
-            "status": "failed",
-            "error_code": exc.code,
-            "repairable": True,
-            "repair_hint": undeclared_metric_hint(
-                self.tools.catalog,
-                exc.metric_ids,
-                state.get("request_time_window"),
-            ),
-        }
-        return {
-            "status": "running",
-            "proposal": None,
-            "final_action": None,
-            "repair_count": repair_index,
-            "tool_results": state.get("tool_results", ()) + (hint_record,),
-            "events": repair_event,
-        }
+        return {**update, "final_action": None}
 
     def _answer_bounce(
         self,
@@ -1507,23 +1348,12 @@ class BoundedAgent:
         *,
         hint: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
-        """Send an ungrounded answer back once (B3c-2); never the SQL repair.
+        """Send an ungrounded answer back once; never the SQL repair.
 
         The hint is fixed text plus the server request window; the model's
         answer text is not kept, echoed or returned.
         """
 
-        bounce_index = state.get("answer_bounce_count", 0) + 1
-        events = self._event(
-            {**state, "events": failure_event},
-            {
-                "kind": "answer_bounce",
-                "status": "scheduled",
-                "bounce_index": bounce_index,
-                "error_code": exc.code,
-                **_basis_diagnostics(action),
-            },
-        )
         window = state.get("request_time_window")
         if hint is None and isinstance(exc, _AnswerWithoutQueryResult):
             hint = answer_without_query_hint(window)
@@ -1531,21 +1361,29 @@ class BoundedAgent:
             hint = answer_basis_conflict_hint(window)
         elif hint is None:
             hint = answer_not_grounded_hint(window, retrieval_available=self.retrieval_available)
-        hint_record = {
-            "tool_name": "final_answer",
-            "status": "failed",
-            "error_code": exc.code,
-            "repairable": True,
-            "repair_hint": hint,
-        }
-        return {
-            "status": "running",
-            "proposal": None,
-            "final_action": None,
-            "answer_bounce_count": bounce_index,
-            "tool_results": state.get("tool_results", ()) + (hint_record,),
-            "events": events,
-        }
+        update = self._send_back(
+            state,
+            failure_event,
+            counter="answer_bounce_count",
+            tool_name="final_answer",
+            error_code=exc.code,
+            hint=hint,
+            event_extra=_basis_diagnostics(action),
+        )
+        return {**update, "final_action": None}
+
+    def _server_search(self, state: _GraphState) -> Mapping[str, object]:
+        """The server's own search_catalog call: this run's question, identity and the model's top_k."""
+
+        return call_tool(
+            self.tools,
+            "search_catalog",
+            {"query": str(state.get("question", ""))[:SERVER_SEARCH_MAX_QUERY_CHARS], "top_k": SERVER_SEARCH_TOP_K},
+            context=state["context"],
+            metric_bindings=state.get("metric_bindings", ()),
+            request_time_window=state.get("request_time_window"),
+            clarifications=self._clarification_reading(state),
+        )
 
     def _server_search_bounce(
         self,
@@ -1555,15 +1393,10 @@ class BoundedAgent:
         failure_event: tuple[Mapping[str, object], ...],
         update: Mapping[str, object],
     ) -> dict[str, object]:
-        """A knowledge answer with no retrieval source: the server searches once (B3c-2 R2).
+        """A knowledge answer with no retrieval source: the server searches once, as a counted tool call.
 
-        The search uses this run's question, the same retriever, identity and
-        top_k as the model's search_catalog, and counts as a tool call.  Its
-        result goes to the model as an untrusted tool result, then the answer
-        is sent back once for a knowledge answer from those items.  Retrieval,
-        not routing: the server picks no metric or action from it.  No
-        usable source (or no tool call left, or a retrieval error): fail.
-        Events keep fixed identifiers only, never the question or item text.
+        The result goes to the model as an untrusted tool result and the answer is sent back once.
+        No usable source, no tool call left or a retrieval error: fail.  Events keep fixed identifiers only.
         """
 
         next_count = state.get("tool_call_count", 0) + 1
@@ -1578,29 +1411,13 @@ class BoundedAgent:
                 "query_source": "run_question",
             },
         }
-        failed = {
-            **update,
-            "status": "failed",
-            "reason": str(exc),
-            "error_code": exc.code,
-        }
+        failed = {**update, "status": "failed", "reason": str(exc), "error_code": exc.code}
         if state.get("tool_call_count", 0) >= self.limits.max_tool_calls:
-            events = self._event(
-                {**state, "events": failure_event},
-                {**event, "status": "skipped", "error_code": "tool_call_limit"},
-            )
-            return {**failed, "events": events}
+            skipped = {**event, "status": "skipped", "error_code": "tool_call_limit"}
+            return {**failed, "events": self._event({**state, "events": failure_event}, skipped)}
         started = self._clock()
         try:
-            output = call_tool(
-                self.tools,
-                "search_catalog",
-                {"query": str(state.get("question", ""))[:SERVER_SEARCH_MAX_QUERY_CHARS], "top_k": SERVER_SEARCH_TOP_K},
-                context=state["context"],
-                metric_bindings=state.get("metric_bindings", ()),
-                request_time_window=state.get("request_time_window"),
-                clarifications=self._clarification_reading(state),
-            )
+            output = self._server_search(state)
         except ToolError as tool_error:
             events = self._event(
                 {**state, "events": failure_event},
@@ -1608,7 +1425,7 @@ class BoundedAgent:
                     **event,
                     "status": "failed",
                     "error_code": tool_error.code,
-                    "elapsed_ms": int(max(0.0, self._clock() - started) * 1000),
+                    "elapsed_ms": self._ms_since(started),
                     **self._metadata_transport_fields("search_catalog"),
                 },
             )
@@ -1623,7 +1440,7 @@ class BoundedAgent:
             {
                 **event,
                 "status": "succeeded",
-                "elapsed_ms": int(max(0.0, self._clock() - started) * 1000),
+                "elapsed_ms": self._ms_since(started),
                 "source_ids": _source_ids_from_tool_output(output),
                 "grounding_source_count": len(grounding),
                 **self._metadata_transport_fields("search_catalog"),
@@ -1636,9 +1453,9 @@ class BoundedAgent:
             "tool_call_count": next_count,
             "tool_results": state.get("tool_results", ()) + (record,),
         }
-        items = output.get("items")
-        if isinstance(items, Sequence) and not isinstance(items, (str, bytes)):
-            searched["retrieval_items"] = tuple(dict(item) for item in items[:3] if isinstance(item, Mapping))
+        items = _retrieval_items_from(output)
+        if items is not None:
+            searched["retrieval_items"] = items
         # Knowledge only after the server's own search: no query / no_data menu.
         bounced = self._answer_bounce(
             searched, action, exc, events, hint=knowledge_from_server_search_hint()  # type: ignore[arg-type]
@@ -1648,12 +1465,58 @@ class BoundedAgent:
             bounced["retrieval_items"] = searched["retrieval_items"]
         return bounced
 
-    def _no_data_metric_names(self) -> list[str]:
-        catalog = getattr(self.tools, "catalog", None) or load_default_catalog()
-        return [catalog.metric_name(metric_id) for metric_id in declarable_metric_ids(catalog)]
-
     def _after_finish(self, state: _GraphState) -> str:
         return "model" if state.get("status") == "running" else "end"
+
+    def _load_evidence(self, state: _GraphState, result_id: str, *, failure: str) -> ResultEvidence:
+        try:
+            return self.tools.get_result_evidence(result_id, context=state["context"])
+        except ToolError as exc:
+            raise FactResolutionError("evidence_validation_failed", f"{failure}: {exc.code}") from exc
+
+    def _collect_run_evidence(self, state: _GraphState) -> _RunEvidence:
+        """The evidence of every successful result of this run, and the results the answer has to cite."""
+
+        run = _RunEvidence({}, set(), set(), set())
+        trusted_bindings = {
+            binding.metric_id.removeprefix("metric."): binding
+            for binding in state.get("metric_bindings", ())
+            if isinstance(binding, MetricBinding)
+        }
+        for record in state.get("tool_results", ()):
+            if record.get("status") != "succeeded":
+                continue
+            output = record.get("output")
+            if not isinstance(output, Mapping) or type(output.get("result_id")) is not str:
+                continue
+            failure = "successful query result evidence could not be loaded"
+            evidence = self._load_evidence(state, str(output["result_id"]), failure=failure)
+            run.by_id[evidence.result_id] = evidence
+            # Every binding on the evidence was built by the server (from a
+            # pre-bound slot or a catalog-checked declaration) and verified
+            # before execution, so each one must be cited by the answer.
+            for observed_binding in evidence.metric_bindings:
+                metric_id = observed_binding.metric_id.removeprefix("metric.")
+                requested_binding = trusted_bindings.get(metric_id)
+                if requested_binding is not None and (
+                    observed_binding.catalog_source_id != requested_binding.catalog_source_id
+                    or observed_binding.catalog_version != requested_binding.catalog_version
+                    or observed_binding.unit != requested_binding.unit
+                    or dict(observed_binding.time_window) != dict(requested_binding.time_window)
+                    or observed_binding.plan_id != requested_binding.plan_id
+                ):
+                    raise FactResolutionError("evidence_validation_failed", "result metric binding changed unexpectedly")
+                run.source_ids.add(observed_binding.catalog_source_id)
+                if is_scalar_metric_result(evidence):
+                    run.required_scalar.add((evidence.result_id, metric_id))
+                # Several rows, or one row of a grouped query: a rowset.
+                elif evidence.row_count >= 1 and any(
+                    observed_binding.result_position not in row for row in evidence.rows
+                ):
+                    raise FactResolutionError("evidence_validation_failed", "grouped result is missing a trusted metric column")
+                elif evidence.row_count >= 1:
+                    run.required_rowset.add((evidence.result_id, metric_id))
+        return run
 
     def _verified_answer(
         self,
@@ -1670,136 +1533,86 @@ class BoundedAgent:
         answer with at least one fact is ``verified``.
         """
 
-        required_fact_refs: set[tuple[str, str]] = set()
-        required_rowset_refs: set[tuple[str, str]] = set()
-        verified_source_ids: set[str] = set()
-        run_evidence: dict[str, object] = {}
-        trusted_bindings = {
-            binding.metric_id.removeprefix("metric."): binding
-            for binding in state.get("metric_bindings", ())
-            if isinstance(binding, MetricBinding)
-        }
-        for record in state.get("tool_results", ()):
-            if not isinstance(record, Mapping) or record.get("status") != "succeeded":
-                continue
-            output = record.get("output")
-            if not isinstance(output, Mapping) or type(output.get("result_id")) is not str:
-                continue
-            try:
-                evidence = self.tools.get_result_evidence(
-                    str(output["result_id"]),
-                    context=state["context"],
-                )
-            except ToolError as exc:
-                raise FactResolutionError(
-                    "evidence_validation_failed",
-                    f"successful query result evidence could not be loaded: {exc.code}",
-                ) from exc
-            run_evidence[evidence.result_id] = evidence
-            # Every binding on the evidence was built by the server (from a
-            # pre-bound slot or a catalog-checked declaration) and verified
-            # before execution, so each one must be cited by the answer.
-            for observed_binding in evidence.metric_bindings:
-                metric_id = observed_binding.metric_id.removeprefix("metric.")
-                requested_binding = trusted_bindings.get(metric_id)
-                if requested_binding is not None and (
-                    observed_binding.catalog_source_id != requested_binding.catalog_source_id
-                    or observed_binding.catalog_version != requested_binding.catalog_version
-                    or observed_binding.unit != requested_binding.unit
-                    or dict(observed_binding.time_window) != dict(requested_binding.time_window)
-                    or observed_binding.plan_id != requested_binding.plan_id
-                ):
-                    raise FactResolutionError("evidence_validation_failed", "result metric binding changed unexpectedly")
-                verified_source_ids.add(observed_binding.catalog_source_id)
-                if is_scalar_metric_result(evidence):
-                    required_fact_refs.add((evidence.result_id, metric_id))
-                # Several rows, or one row of a grouped query (B3e): a rowset.
-                elif evidence.row_count >= 1 and any(
-                    observed_binding.result_position not in row for row in evidence.rows
-                ):
-                    raise FactResolutionError("evidence_validation_failed", "grouped result is missing a trusted metric column")
-                elif evidence.row_count >= 1:
-                    required_rowset_refs.add((evidence.result_id, metric_id))
-
-        empty_facts = {"schema_version": FACTS_SCHEMA_VERSION, "facts": []}
-        # knowledge and no_data answers never cite results (B3c-2).
+        run = self._collect_run_evidence(state)
+        # knowledge and no_data answers never cite results.
         if action.fact_refs and action.basis != "query":
             raise _AnswerBasisConflict()
         if action.basis == "no_data":
             if _run_has_query_attempt(state):
                 raise _AnswerBasisConflict()
-            reply = render_no_data_answer(self._no_data_metric_names())
+            reply = render_no_data_answer(no_data_metric_names(getattr(self.tools, "catalog", None) or load_default_catalog()))
             # The model's own text never leaves the server, not even in the action.
-            return {**action.as_dict(), "answer": reply, "source_ids": []}, reply, empty_facts, "no_data"
+            return {**action.as_dict(), "answer": reply, "source_ids": []}, reply, _empty_facts(), "no_data"
 
         # A reference to this run's own result for a metric the server never
         # bound: the model skipped the declaration.  Repairable once; no facts.
         undeclared = [
             reference.metric_id.removeprefix("metric.")
             for reference in action.fact_refs
-            if reference.result_id in run_evidence
+            if reference.result_id in run.by_id
             and reference.metric_id.removeprefix("metric.")
-            not in {item.metric_id.removeprefix("metric.") for item in run_evidence[reference.result_id].metric_bindings}
+            not in {item.metric_id.removeprefix("metric.") for item in run.by_id[reference.result_id].metric_bindings}
         ]
         if undeclared:
             raise _UndeclaredMetricReference(undeclared)
         # Citing results before any successful query in this run (e.g. copying
         # the contract placeholders).  With a successful query present, a
         # missing result_id stays a terminal evidence failure.
-        if action.fact_refs and not run_evidence:
+        if action.fact_refs and not run.by_id:
             raise _AnswerWithoutQueryResult()
-
         if not action.fact_refs:
-            if action.basis == "knowledge":
-                # Only this run's retrieval sources ground a definition; table
-                # structure (describe_tables, catalog table entries) grounds nothing.
-                public_source_ids = _run_retrieval_source_ids(state, excluded_ids=self._table_entry_ids())
-                if not public_source_ids:
-                    raise _KnowledgeWithoutSource()
-            elif _run_has_successful_query(state):
-                public_source_ids = verified_source_ids
-            else:
-                # Business values need a successful query in this run; retrieval
-                # or table sources alone do not ground the model's numbers.
-                raise _UngroundedAnswer()
-            if required_fact_refs or required_rowset_refs:
-                raise FactResolutionError(
-                    "evidence_validation_failed",
-                    "a server-bound result requires an exact fact or rowset reference",
-                )
-            # Model text: unverified, with the server's own source ids only.
-            public_action = {**action.as_dict(), "source_ids": sorted(public_source_ids)}
-            return public_action, action.answer, empty_facts, "unverified"
+            return self._answer_without_fact_refs(state, action, run)
+        return self._answer_with_fact_refs(state, action, run)
+
+    def _answer_without_fact_refs(
+        self, state: _GraphState, action: FinalAnswerAction, run: _RunEvidence
+    ) -> tuple[dict[str, object], str, dict[str, object], str]:
+        """A knowledge answer or one about a non-metric query: the model's text, unverified, with the server's source ids."""
+
+        if action.basis == "knowledge":
+            # Only this run's retrieval sources ground a definition; table
+            # structure (describe_tables, catalog table entries) grounds nothing.
+            public_source_ids = _run_retrieval_source_ids(state, excluded_ids=self._table_entry_ids())
+            if not public_source_ids:
+                raise _KnowledgeWithoutSource()
+        elif _run_has_successful_query(state):
+            public_source_ids = run.source_ids
+        else:
+            # Business values need a successful query in this run; retrieval
+            # or table sources alone do not ground the model's numbers.
+            raise _UngroundedAnswer()
+        if run.required_scalar or run.required_rowset:
+            raise FactResolutionError(
+                "evidence_validation_failed",
+                "a server-bound result requires an exact fact or rowset reference",
+            )
+        public_action = {**action.as_dict(), "source_ids": sorted(public_source_ids)}
+        return public_action, action.answer, _empty_facts(), "unverified"
+
+    def _answer_with_fact_refs(
+        self, state: _GraphState, action: FinalAnswerAction, run: _RunEvidence
+    ) -> tuple[dict[str, object], str, dict[str, object], str]:
+        """An answer that cites results: every server-bound result must be cited, and the facts come from FactResolver."""
 
         supplied_fact_refs = {
-            (reference.result_id, reference.metric_id.removeprefix("metric."))
-            for reference in action.fact_refs
+            (reference.result_id, reference.metric_id.removeprefix("metric.")) for reference in action.fact_refs
         }
-        if not required_fact_refs.issubset(supplied_fact_refs) or not required_rowset_refs.issubset(supplied_fact_refs):
+        if not run.required_scalar.issubset(supplied_fact_refs) or not run.required_rowset.issubset(supplied_fact_refs):
             raise FactResolutionError(
                 "evidence_validation_failed",
                 "final answer omitted one or more server-bound result references",
             )
-
-        evidences = {}
         scalar_references = tuple(
             reference
             for reference in action.fact_refs
-            if (reference.result_id, reference.metric_id.removeprefix("metric.")) not in required_rowset_refs
+            if (reference.result_id, reference.metric_id.removeprefix("metric.")) not in run.required_rowset
         )
+        evidences = {}
         for reference in scalar_references:
-            try:
-                evidence = self.tools.get_result_evidence(
-                    reference.result_id,
-                    context=state["context"],
-                )
-            except ToolError as exc:
-                raise FactResolutionError(
-                    "evidence_validation_failed",
-                    f"result evidence could not be loaded: {exc.code}",
-                ) from exc
-            evidences[reference.result_id] = evidence
-
+            evidences[reference.result_id] = run.by_id.get(reference.result_id) or self._load_evidence(
+                state, reference.result_id, failure="result evidence could not be loaded"
+            )
+        verified_source_ids = set(run.source_ids)
         if scalar_references:
             envelope = FactResolver(catalog=self.tools.catalog).resolve(
                 scalar_references,
@@ -1810,13 +1623,13 @@ class BoundedAgent:
             rendered = render_verified_answer(envelope.facts, clarifications=self._clarification_reading(state))
             verified_source_ids.update(fact.catalog_source_id for fact in envelope.facts)
         else:
-            facts = {"schema_version": FACTS_SCHEMA_VERSION, "facts": []}
+            facts = _empty_facts()
             rendered = action.answer
         public_action = action.as_dict()
         if scalar_references:
             public_action["answer"] = rendered
         public_action["source_ids"] = sorted(verified_source_ids)
-        # A rowset-only answer keeps the model's summary: unverified (B3c-2 (a)).
+        # A rowset-only answer keeps the model's summary: unverified.
         answer_status = "verified" if scalar_references and facts.get("facts") else "unverified"
         return public_action, rendered, facts, answer_status
 
@@ -1893,18 +1706,75 @@ class BoundedAgent:
         }
         return state.get("events", ()) + (record,)
 
+    def _send_back(
+        self,
+        state: _GraphState,
+        events: tuple[Mapping[str, object], ...],
+        *,
+        counter: str,
+        tool_name: str,
+        error_code: str,
+        hint: Mapping[str, object],
+        event_extra: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Send the model back once: count it, record the server's hint as a failed tool result.
+
+        ``events`` already holds the rejected action; ``counter`` names the budget the send-back spends.
+        """
+
+        index = state.get(counter, 0) + 1
+        hint_record = {
+            "tool_name": tool_name,
+            "status": "failed",
+            "error_code": error_code,
+            "repairable": True,
+            "repair_hint": hint,
+        }
+        return {
+            "status": "running",
+            "proposal": None,
+            counter: index,
+            "tool_results": state.get("tool_results", ()) + (hint_record,),
+            "events": self._event(
+                {**state, "events": events},
+                _scheduled_event(counter, index, error_code, **(event_extra or {})),
+            ),
+        }
+
+    def _ms_since(self, started: float) -> int:
+        return int(max(0.0, self._clock() - started) * 1000)
+
     def _elapsed_seconds(self, state: _GraphState) -> float:
         return float(state.get("active_elapsed_before", 0.0)) + max(
             0.0,
             self._clock() - state["started_at"],
         )
 
-    def _elapsed_ms(self, state: _GraphState) -> int:
-        return int(self._elapsed_seconds(state) * 1000)
+
+class _RunEvidence(NamedTuple):
+    """What this run's successful results say, and which of them an answer has to cite."""
+
+    by_id: dict[str, ResultEvidence]
+    required_scalar: set[tuple[str, str]]
+    required_rowset: set[tuple[str, str]]
+    source_ids: set[str]
+
+
+def _empty_facts() -> dict[str, object]:
+    return {"schema_version": FACTS_SCHEMA_VERSION, "facts": []}
+
+
+def _retrieval_items_from(output: Mapping[str, object]) -> tuple[Mapping[str, object], ...] | None:
+    """The items of a search_catalog output the context may carry; None when the output has no list."""
+
+    items = output.get("items")
+    if isinstance(items, Sequence) and not isinstance(items, (str, bytes)):
+        return tuple(dict(item) for item in items[:MAX_RETRIEVAL_ITEMS] if isinstance(item, Mapping))
+    return None
 
 
 def _basis_diagnostics(action: FinalAnswerAction) -> dict[str, str]:
-    """The answer's server-normalized basis and how the model wrote it (B3c-2 R1).
+    """The answer's server-normalized basis and how the model wrote it.
 
     Both are fixed identifiers (ANSWER_BASES, BASIS_FIELD_STATES); never model text.
     """
@@ -1934,7 +1804,7 @@ class _UndeclaredMetricReference(FactResolutionError):
 
 
 class _UngroundedAnswer(FactResolutionError):
-    """Nothing in this run grounds the answer's declared basis (B3c-2).
+    """Nothing in this run grounds the answer's declared basis.
 
     query: no fact_refs and no successful query; knowledge: no retrieval source.
     """
@@ -1947,7 +1817,7 @@ class _UngroundedAnswer(FactResolutionError):
 
 
 class _KnowledgeWithoutSource(_UngroundedAnswer):
-    """A knowledge answer with no retrieval source in this run (R2: the server searches once)."""
+    """A knowledge answer with no retrieval source in this run (the server searches once)."""
 
 
 class _AnswerBasisConflict(FactResolutionError):
@@ -2037,8 +1907,6 @@ def _serialize_agent_checkpoint(
     final_action = state.get("final_action")
     if not isinstance(final_action, Mapping) or final_action.get("type") != "ask_user":
         raise RunResumeError("invalid_checkpoint", "WAITING_USER action is missing")
-    if checkpoint_version not in {AGENT_CHECKPOINT_VERSION, _V3_AGENT_CHECKPOINT_VERSION}:
-        raise RunResumeError("invalid_checkpoint", "unsupported checkpoint version")
     checkpoint: dict[str, object] = {
         "checkpoint_version": checkpoint_version,
         "status": "WAITING_USER",
@@ -2072,7 +1940,7 @@ def _serialize_agent_checkpoint(
         "clarification_bounce_count": state.get("clarification_bounce_count", 0),
     }
     if checkpoint_version == AGENT_CHECKPOINT_VERSION:
-        # Survives resume: a run gets one answer send-back in total (B3c-2).
+        # Survives resume: a run gets one answer send-back in total.
         checkpoint["answer_bounce_count"] = state.get("answer_bounce_count", 0)
     try:
         json.dumps(checkpoint, ensure_ascii=False, allow_nan=False)
@@ -2081,104 +1949,178 @@ def _serialize_agent_checkpoint(
     return checkpoint
 
 
+def _require_resume_answer(answer: object) -> None:
+    if type(answer) is not str or not answer.strip():
+        raise RunResumeError("invalid_resume_input", "answer must be a non-empty string")
+    if len(answer) > 8_000:
+        raise RunResumeError("invalid_resume_input", "answer exceeds 8000 characters")
+
+
+def _require_same_identity(stored: object, supplied: ExecutionContext) -> None:
+    if stored != supplied:
+        raise RunResumeError("resume_context_mismatch", "the resume context does not match the original run identity")
+
+
+def _new_state(
+    context: ExecutionContext,
+    question: str,
+    run_config: RunConfig,
+    *,
+    started_at: float,
+    **overrides: object,
+) -> _GraphState:
+    """The state of a run that has done nothing yet; ``overrides`` set what differs."""
+
+    state: _GraphState = {
+        "context": context,
+        "question": question,
+        "run_config": run_config,
+        "metric_bindings": (),
+        "request_time_window": None,
+        "parallel_plan": None,
+        "started_at": started_at,
+        "active_elapsed_before": 0.0,
+        "clarifications": (),
+        "clarification_bounce_count": 0,
+        "answer_bounce_count": 0,
+        "status": "running",
+        "reason": None,
+        "error_code": None,
+        "proposal": None,
+        "final_action": None,
+        "model_call_count": 0,
+        "tool_call_count": 0,
+        "repair_count": 0,
+        "model_call_ids": (),
+        "events": (),
+        "retrieval_items": (),
+        "tool_results": (),
+        "public_answer": None,
+        "facts": None,
+        "context_version": CONTEXT_VERSION,
+        "elapsed_ms": 0,
+    }
+    state.update(overrides)
+    return state
+
+
+def _restore_request_window(raw: object) -> dict[str, str] | None:
+    try:
+        return _request_window(raw)
+    except ValueError as exc:
+        raise RunResumeError("invalid_checkpoint", "checkpoint request time window is invalid") from exc
+
+
+def _restore_identity(raw: object, expected: ExecutionContext) -> ExecutionContext:
+    if not isinstance(raw, Mapping) or set(raw) != {"run_id", "tenant_id", "principal_id", "role"}:
+        raise RunResumeError("invalid_checkpoint", "checkpoint identity is invalid")
+    try:
+        context = ExecutionContext(
+            run_id=str(raw["run_id"]),
+            tenant_id=str(raw["tenant_id"]),
+            principal_id=str(raw["principal_id"]),
+            role=str(raw["role"]),
+        )
+    except (TypeError, ValueError) as exc:
+        raise RunResumeError("invalid_checkpoint", "checkpoint identity is invalid") from exc
+    _require_same_identity(context, expected)
+    return context
+
+
+def _restore_run_config(raw: object) -> RunConfig:
+    try:
+        return RunConfig.from_dict(raw)
+    except ValueError as exc:
+        raise RunResumeError("invalid_checkpoint", "checkpoint run configuration is invalid") from exc
+
+
+def _restore_bindings(raw: object) -> tuple[MetricBinding, ...]:
+    if type(raw) is not list or not all(isinstance(item, Mapping) for item in raw):
+        raise RunResumeError("invalid_checkpoint", "checkpoint metric bindings are invalid")
+    try:
+        return tuple(MetricBinding(**dict(item)) for item in raw)
+    except (TypeError, ValueError) as exc:
+        raise RunResumeError("invalid_checkpoint", "checkpoint metric bindings are invalid") from exc
+
+
+def _restore_parallel_plan(raw: object, context: ExecutionContext) -> ParallelPlan | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise RunResumeError("invalid_checkpoint", "checkpoint parallel plan is invalid")
+    try:
+        plan = ParallelPlan.from_context(
+            context,
+            raw["metric_ids"],
+            time_window=raw["time_window"],
+            policy_version=str(raw["policy_version"]),
+            catalog_version=str(raw["catalog_version"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RunResumeError("invalid_checkpoint", "checkpoint parallel plan is invalid") from exc
+    if plan.plan_hash != raw.get("plan_hash"):
+        raise RunResumeError("invalid_checkpoint", "checkpoint parallel plan hash is invalid")
+    return plan
+
+
+def _restore_sequences(raw: Mapping[str, object]) -> dict[str, tuple[Mapping[str, object], ...]]:
+    sequences: dict[str, tuple[Mapping[str, object], ...]] = {}
+    for name in ("events", "retrieval_items", "tool_results"):
+        value = raw.get(name)
+        if type(value) is not list or any(not isinstance(item, Mapping) for item in value):
+            raise RunResumeError("invalid_checkpoint", f"checkpoint {name} are invalid")
+        sequences[name] = tuple(dict(item) for item in value)
+    return sequences
+
+
+_V3_CHECKPOINT_FIELDS = frozenset({
+    "checkpoint_version", "status", "context", "question", "run_config", "metric_bindings",
+    "parallel_plan", "active_elapsed_before", "clarifications", "model_call_count", "tool_call_count",
+    "repair_count", "model_call_ids", "events", "retrieval_items", "tool_results", "context_version",
+    "waiting_question", "request_time_window", "waiting_clarification_id", "clarification_bounce_count",
+})
+# The fields each checkpoint version must carry, exactly.  Earlier versions are refused.
+_CHECKPOINT_FIELDS = {
+    AGENT_CHECKPOINT_VERSION: _V3_CHECKPOINT_FIELDS | {"answer_bounce_count"},
+    _V3_AGENT_CHECKPOINT_VERSION: _V3_CHECKPOINT_FIELDS,
+}
+
+
 def _deserialize_agent_checkpoint(
     raw: Mapping[str, object],
     *,
     expected_context: ExecutionContext,
 ) -> _GraphState:
-    required = {
-        "checkpoint_version", "status", "context", "question", "run_config", "metric_bindings",
-        "parallel_plan", "active_elapsed_before", "clarifications", "model_call_count", "tool_call_count",
-        "repair_count", "model_call_ids", "events", "retrieval_items", "tool_results", "context_version",
-        "waiting_question",
-    }
+    """Rebuild a run's state from stored JSON; every field is checked again, in this order."""
+
     version = raw.get("checkpoint_version") if isinstance(raw, Mapping) else None
-    if version == AGENT_CHECKPOINT_VERSION:
-        required = required | {
-            "request_time_window", "waiting_clarification_id", "clarification_bounce_count", "answer_bounce_count",
-        }
-    elif version == _V3_AGENT_CHECKPOINT_VERSION:
-        required = required | {"request_time_window", "waiting_clarification_id", "clarification_bounce_count"}
-    elif version == _V2_AGENT_CHECKPOINT_VERSION:
-        required = required | {"request_time_window"}
-    elif version != _LEGACY_AGENT_CHECKPOINT_VERSION:
+    required = _CHECKPOINT_FIELDS.get(version) if type(version) is str else None
+    if required is None:
         raise RunResumeError("invalid_checkpoint", "checkpoint version or state is invalid")
-    if not isinstance(raw, Mapping) or set(raw) != required:
+    if set(raw) != required:
         raise RunResumeError("invalid_checkpoint", "checkpoint fields do not match the server schema")
     if raw.get("status") != "WAITING_USER":
         raise RunResumeError("invalid_checkpoint", "checkpoint version or state is invalid")
-    try:
-        request_time_window = _request_window(raw.get("request_time_window"))
-    except ValueError as exc:
-        raise RunResumeError("invalid_checkpoint", "checkpoint request time window is invalid") from exc
-    context_raw = raw.get("context")
-    if not isinstance(context_raw, Mapping) or set(context_raw) != {"run_id", "tenant_id", "principal_id", "role"}:
-        raise RunResumeError("invalid_checkpoint", "checkpoint identity is invalid")
-    try:
-        context = ExecutionContext(
-            run_id=str(context_raw["run_id"]),
-            tenant_id=str(context_raw["tenant_id"]),
-            principal_id=str(context_raw["principal_id"]),
-            role=str(context_raw["role"]),
-        )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise RunResumeError("invalid_checkpoint", "checkpoint identity is invalid") from exc
-    if context != expected_context:
-        raise RunResumeError("resume_context_mismatch", "the resume context does not match the original run identity")
+    request_time_window = _restore_request_window(raw["request_time_window"])
+    context = _restore_identity(raw.get("context"), expected_context)
     if type(raw.get("question")) is not str or not str(raw["question"]).strip():
         raise RunResumeError("invalid_checkpoint", "checkpoint question is invalid")
     if type(raw.get("waiting_question")) is not str:
         raise RunResumeError("invalid_checkpoint", "checkpoint waiting prompt is invalid")
-    waiting_clarification_id = raw.get("waiting_clarification_id")
+    waiting_clarification_id = raw["waiting_clarification_id"]
     if waiting_clarification_id is not None and (
         type(waiting_clarification_id) is not str or not waiting_clarification_id.strip()
     ):
         raise RunResumeError("invalid_checkpoint", "checkpoint clarification rule is invalid")
-    bounce_count = raw.get("clarification_bounce_count", 0)
+    bounce_count = raw["clarification_bounce_count"]
     if type(bounce_count) is not int or bounce_count < 0:
         raise RunResumeError("invalid_checkpoint", "checkpoint clarification bounce count is invalid")
     answer_bounce_count = raw.get("answer_bounce_count", 0)
     if type(answer_bounce_count) is not int or answer_bounce_count < 0:
         raise RunResumeError("invalid_checkpoint", "checkpoint answer bounce count is invalid")
-    config_raw = raw.get("run_config")
-    if not isinstance(config_raw, Mapping):
-        raise RunResumeError("invalid_checkpoint", "checkpoint run configuration is invalid")
-    config_values = dict(config_raw)
-    if config_values.pop("run_config_version", None) != "run-config-v1":
-        raise RunResumeError("invalid_checkpoint", "checkpoint run configuration version is invalid")
-    skill_versions = config_values.get("skill_versions", ())
-    if type(skill_versions) is list:
-        config_values["skill_versions"] = tuple(skill_versions)
-    try:
-        run_config = RunConfig(**config_values)
-    except (TypeError, ValueError) as exc:
-        raise RunResumeError("invalid_checkpoint", "checkpoint run configuration is invalid") from exc
-    raw_bindings = raw.get("metric_bindings")
-    if type(raw_bindings) is not list:
-        raise RunResumeError("invalid_checkpoint", "checkpoint metric bindings are invalid")
-    try:
-        bindings = tuple(MetricBinding(**dict(item)) for item in raw_bindings if isinstance(item, Mapping))
-    except (TypeError, ValueError) as exc:
-        raise RunResumeError("invalid_checkpoint", "checkpoint metric bindings are invalid") from exc
-    if len(bindings) != len(raw_bindings):
-        raise RunResumeError("invalid_checkpoint", "checkpoint metric bindings are invalid")
-    parallel_raw = raw.get("parallel_plan")
-    parallel_plan = None
-    if parallel_raw is not None:
-        if not isinstance(parallel_raw, Mapping):
-            raise RunResumeError("invalid_checkpoint", "checkpoint parallel plan is invalid")
-        try:
-            parallel_plan = ParallelPlan.from_context(
-                context,
-                parallel_raw["metric_ids"],
-                time_window=parallel_raw["time_window"],
-                policy_version=str(parallel_raw["policy_version"]),
-                catalog_version=str(parallel_raw["catalog_version"]),
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise RunResumeError("invalid_checkpoint", "checkpoint parallel plan is invalid") from exc
-        if parallel_plan.plan_hash != parallel_raw.get("plan_hash"):
-            raise RunResumeError("invalid_checkpoint", "checkpoint parallel plan hash is invalid")
+    run_config = _restore_run_config(raw.get("run_config"))
+    bindings = _restore_bindings(raw.get("metric_bindings"))
+    parallel_plan = _restore_parallel_plan(raw.get("parallel_plan"), context)
     active_elapsed = raw.get("active_elapsed_before")
     if type(active_elapsed) not in {int, float} or active_elapsed < 0:
         raise RunResumeError("invalid_checkpoint", "checkpoint active time is invalid")
@@ -2191,53 +2133,117 @@ def _deserialize_agent_checkpoint(
     model_call_ids = raw.get("model_call_ids")
     if type(model_call_ids) is not list or any(type(item) is not str or not item for item in model_call_ids):
         raise RunResumeError("invalid_checkpoint", "checkpoint model call identities are invalid")
-    sequences: dict[str, tuple[Mapping[str, object], ...]] = {}
-    for name in ("events", "retrieval_items", "tool_results"):
-        value = raw.get(name)
-        if type(value) is not list or any(not isinstance(item, Mapping) for item in value):
-            raise RunResumeError("invalid_checkpoint", f"checkpoint {name} are invalid")
-        sequences[name] = tuple(dict(item) for item in value)
+    sequences = _restore_sequences(raw)
     clarifications = raw.get("clarifications")
     if type(clarifications) is not list or any(type(item) is not str or not item.strip() for item in clarifications):
         raise RunResumeError("invalid_checkpoint", "checkpoint clarifications are invalid")
     context_version = raw.get("context_version")
     if type(context_version) is not str or not context_version:
         raise RunResumeError("invalid_checkpoint", "checkpoint context version is invalid")
-    return {
-        "context": context,
-        "question": str(raw["question"]),
-        "run_config": run_config,
-        "metric_bindings": bindings,
-        "request_time_window": request_time_window,
-        "parallel_plan": parallel_plan,
-        "started_at": monotonic(),
-        "active_elapsed_before": float(active_elapsed),
-        "clarifications": tuple(clarifications),
-        "clarification_bounce_count": bounce_count,
-        "answer_bounce_count": answer_bounce_count,
-        "status": "waiting_user",
-        "reason": None,
-        "error_code": None,
-        "proposal": None,
-        "final_action": {
+    return _new_state(
+        context,
+        str(raw["question"]),
+        run_config,
+        started_at=monotonic(),
+        metric_bindings=bindings,
+        request_time_window=request_time_window,
+        parallel_plan=parallel_plan,
+        active_elapsed_before=float(active_elapsed),
+        clarifications=tuple(clarifications),
+        clarification_bounce_count=bounce_count,
+        answer_bounce_count=answer_bounce_count,
+        status="waiting_user",
+        final_action={
             "type": "ask_user",
             "question": str(raw["waiting_question"]),
             **({"clarification_id": waiting_clarification_id} if waiting_clarification_id is not None else {}),
         },
+        model_call_ids=tuple(model_call_ids),
+        context_version=context_version,
+        elapsed_ms=int(float(active_elapsed) * 1000),
         **counts,
-        "model_call_ids": tuple(model_call_ids),
         **sequences,
-        "public_answer": None,
-        "facts": None,
-        "context_version": context_version,
-        "elapsed_ms": int(float(active_elapsed) * 1000),
+    )
+
+
+# The event of each send-back budget: its kind and the key of its running index.
+_SCHEDULED_EVENTS = {
+    "repair_count": ("query_repair", "repair_index"),
+    "clarification_bounce_count": ("clarification_bounce", "bounce_index"),
+    "answer_bounce_count": ("answer_bounce", "bounce_index"),
+}
+
+
+def _scheduled_event(counter: str, index: int, error_code: str, **extra: object) -> dict[str, object]:
+    kind, index_key = _SCHEDULED_EVENTS[counter]
+    return {"kind": kind, "status": "scheduled", index_key: index, "error_code": error_code, **extra}
+
+
+def _model_call_event(result: ModelCallResult, identity: ModelCallIdentity, *, native: bool) -> dict[str, object]:
+    content = result.content.encode("utf-8")
+    return {
+        "kind": "model_call",
+        "status": "succeeded",
+        "model_call_id": identity.model_call_id,
+        "request_id": identity.request_id,
+        "provider": result.provider,
+        "model": result.model,
+        "provider_call_id": result.provider_call_id,
+        "provider_request_id": result.provider_request_id,
+        "usage_status": result.usage_status,
+        "usage": result.usage.as_dict() if result.usage is not None else None,
+        "content_length": len(content),
+        "content_sha256": sha256(content).hexdigest(),
+        **(
+            {"finish_reason": result.finish_reason, "tool_calls": native_call_summary(result.tool_calls or ())}
+            if native
+            else {}
+        ),
+    }
+
+
+def _model_failure_event(exc: ModelProviderError, identity: ModelCallIdentity) -> dict[str, object]:
+    return {
+        "kind": "model_call",
+        "status": "failed",
+        "model_call_id": identity.model_call_id,
+        "request_id": identity.request_id,
+        "error_code": exc.code,
+        **_provider_failure_fields(exc.record),
+    }
+
+
+def _proposal_validation_event(exc: ProposalParseError, action_text: str, model_call_id: str) -> dict[str, object]:
+    """Diagnosable without storing model text: the server's fixed explanation plus a value-free structure summary."""
+
+    return {
+        "kind": "proposal_validation",
+        "status": "failed",
+        "error_code": exc.code,
+        "error_detail": parse_error_detail(exc),
+        "action_shape": proposal_shape_summary(action_text),
+        "model_call_id": model_call_id,
+    }
+
+
+def _parallel_group_event(result: Any) -> dict[str, object]:
+    return {
+        "kind": "parallel_group",
+        "status": result.status,
+        "group_id": result.group_id,
+        "plan_hash": result.plan_hash,
+        "branch_ids": [branch.branch_id for branch in result.branches],
+        "branch_statuses": [branch.status for branch in result.branches],
+        "peak_active": result.peak_active,
+        "reused": result.reused,
+        "error_code": result.error_code,
     }
 
 
 def _provider_failure_fields(record: Mapping[str, object]) -> dict[str, object]:
     """Keep only provider identifiers/status from an already-redacted record."""
 
-    allowed = {
+    allowed = (
         "provider",
         "model",
         "provider_call_id",
@@ -2246,7 +2252,7 @@ def _provider_failure_fields(record: Mapping[str, object]) -> dict[str, object]:
         "usage",
         "http_status",
         "provider_error_code",
-    }
+    )
     return {key: record[key] for key in allowed if key in record}
 
 
@@ -2286,7 +2292,7 @@ def _tool_input_summary(action: ToolCallAction, *, declarable_metrics: Sequence[
                     "query_sha256": sha256(query.encode("utf-8")).hexdigest(),
                 }
             )
-        summary["top_k"] = arguments.get("top_k", 3)
+        summary["top_k"] = arguments.get("top_k", SERVER_SEARCH_TOP_K)
     elif action.name == "describe_tables":
         tables = arguments.get("tables")
         if isinstance(tables, list):
@@ -2330,52 +2336,35 @@ def _source_ids_from_tool_output(output: Mapping[str, object]) -> list[str]:
 
 
 
+_USAGE_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
+
+
 def _usage_summary(events: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    """Token usage of the model calls in ``events``; one unknown call leaves the totals empty, never zero."""
+
     model_events = [event for event in events if event.get("kind") == "model_call"]
-    known: list[Mapping[str, object]] = []
+    known: list[dict[str, int]] = []
     model_call_ids: list[str] = []
-    unknown_count = 0
     for event in model_events:
         call_id = event.get("model_call_id")
         if type(call_id) is str and call_id:
             model_call_ids.append(call_id)
         usage = event.get("usage")
-        prompt = usage.get("prompt_tokens") if isinstance(usage, Mapping) else None
-        completion = usage.get("completion_tokens") if isinstance(usage, Mapping) else None
-        total = usage.get("total_tokens") if isinstance(usage, Mapping) else None
-        if (
-            event.get("usage_status") == "known"
-            and type(prompt) is int and prompt >= 0
-            and type(completion) is int and completion >= 0
-            and type(total) is int and total >= 0
-            and prompt + completion == total
-        ):
-            known.append({
-                "prompt_tokens": prompt,
-                "completion_tokens": completion,
-                "total_tokens": total,
-            })
-            continue
-        unknown_count += 1
-
-    summary: dict[str, object] = {
+        tokens = [usage.get(name) if isinstance(usage, Mapping) else None for name in _USAGE_FIELDS]
+        if event.get("usage_status") == "known" and usage_is_consistent(*tokens):
+            known.append(dict(zip(_USAGE_FIELDS, tokens)))
+    unknown_count = len(model_events) - len(known)
+    known_totals = {name: sum(usage[name] for usage in known) if known else None for name in _USAGE_FIELDS}
+    all_known = bool(model_events) and unknown_count == 0
+    return {
         "status": "not_run" if not model_events else ("known" if unknown_count == 0 else "unknown"),
         "model_call_count": len(model_events),
         "known_call_count": len(known),
         "unknown_call_count": unknown_count,
         "model_call_ids": model_call_ids,
+        **{f"known_{name}": known_totals[name] for name in _USAGE_FIELDS},
+        **{name: known_totals[name] if all_known else None for name in _USAGE_FIELDS},
     }
-    for field_name in ("prompt_tokens", "completion_tokens", "total_tokens"):
-        summary[f"known_{field_name}"] = (
-            sum(int(usage[field_name]) for usage in known) if known else None
-        )
-    for field_name in ("prompt_tokens", "completion_tokens", "total_tokens"):
-        summary[field_name] = (
-            None
-            if not model_events or unknown_count != 0
-            else sum(int(usage[field_name]) for usage in known)
-        )
-    return summary
 
 
 def _result_status(value: object) -> RunStatus:

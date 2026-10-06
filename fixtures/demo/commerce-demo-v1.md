@@ -2,7 +2,7 @@
 
 - data_version: commerce-demo-v1
 - generator: scripts/generate_demo_data.py（generate-demo-data-v1），seed 20261001；固定种子，重跑输出逐字节相同
-- schema: 与 commerce-v1 相同（migrations/001_commerce_v1.sql、002_w04_rls.sql）。证据和事实里的 `commerce-v1` 指表结构与口径，不是数据行
+- schema: 与 commerce-v1 相同（migrations/001_commerce_v1.sql、002_rls.sql）。证据和事实里的 `commerce-v1` 指表结构与口径，不是数据行
 - currency: CNY；amount_unit: RMB fen（100 fen = 1 yuan）；timezone: UTC
 - 客户姓名全部是虚构的；订单和退款只用于演示，不代表真实业务量
 - 本文件由生成器写出，不要手改；它不在 `fixtures/demo/knowledge/` 内，不会被当作知识文档导入

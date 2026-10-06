@@ -12,7 +12,7 @@ param(
 # Protocol part: the real server process as tenant A's requester (no model, no
 # database).  Product part: a real uvicorn process with
 # QUERYSHIELD_METADATA_TOOLS=mcp answers one data and one definition question.
-# Credentials are entered the same way as b2b-local-http-smoke.ps1, live only in
+# Credentials are entered the same way as http-local-smoke.ps1, live only in
 # this process environment, are never written or printed, and are restored when
 # the script ends.  -FakeDryRun checks the wiring with the Fake model at no cost.
 # -CallTimeoutSeconds sets the per-call limit (default 2, the C4 value).
@@ -88,7 +88,7 @@ try {
             throw [ArgumentException]::new('Invalid Bailian workspace endpoint.')
         }
 
-        # Same public service profile as w05-local-real.ps1 (the product B1
+        # Same public service profile as eval-local-real.ps1 (the product B1
         # retriever uses no reranker, so rerank values are not required here).
         $bailianOrigin = $serviceUri.GetLeftPart([UriPartial]::Authority)
         $profileValues = @{

@@ -11,8 +11,8 @@ flowchart TB
         AUTH["auth/identity.py<br/>令牌 → 租户、用户、角色"]
     end
     subgraph RUN["运行服务"]
-        SVC["approval/service.py<br/>W04RunService：run、审批、取消、恢复"]
-        STATE[("db/w04_state.py<br/>SQLite 状态库")]
+        SVC["approval/service.py<br/>RunService：run、审批、取消、恢复"]
+        STATE[("db/state_store.py<br/>SQLite 状态库")]
     end
     subgraph AGENT["有界 Agent"]
         GRAPH["agent/graph.py<br/>LangGraph 状态图、预算、退回"]
@@ -68,7 +68,7 @@ HTTP 接口都在 `src/queryshield/api/main.py`：
 
 ### 运行服务与状态库
 
-`src/queryshield/approval/service.py` 的 `W04RunService` 管理 run 的生命周期：同步执行（`run_sync`）、异步执行（`start_async`，后台线程）、追问后继续（`resume_waiting_user`）、审批（`approve`）、取消（`cancel`）、按身份读取（`visible_run`）。状态存在 `src/queryshield/db/w04_state.py` 的 `StateStore`（SQLite），表有 runs、approvals、events、preferences、knowledge_snapshots、knowledge_acl、parallel_groups、parallel_branches 等。
+`src/queryshield/approval/service.py` 的 `RunService` 管理 run 的生命周期：同步执行（`run_sync`）、异步执行（`start_async`，后台线程）、追问后继续（`resume_waiting_user`）、审批（`approve`）、取消（`cancel`）、按身份读取（`visible_run`）。状态存在 `src/queryshield/db/state_store.py` 的 `StateStore`（SQLite），表有 runs、approvals、events、preferences、knowledge_snapshots、knowledge_acl、parallel_groups、parallel_branches 等。
 
 - **可见性。** run 只对同租户的发起人可见；同租户的审批人只在 `WAITING_APPROVAL` 时能看到去掉结果的版本。其他人一律 404。
 - **审批。** 进入审批时，`build_pending_action` 把要执行的动作（SQL、参数、指标、时间窗、租户、请求人、SQL 策略版本、catalog 版本）连同权限来源 id 和权限版本一起存下，并记动作的哈希。`approve` 在 `_approval_lock` 里完成“检查再执行”：同租户、审批人角色、不是请求人本人、没过期（10 分钟）、权限来源仍然有效且版本不变，然后只执行被批准的那一条。找不到有效的权限来源时，`_approval_permission` 让这次查询以 503 `approval_permission_unavailable` 结束，不建审批。
@@ -88,7 +88,7 @@ HTTP 接口都在 `src/queryshield/api/main.py`：
 `src/queryshield/tools/semantic.py` 的 `ControlledTools` 是模型能碰到的全部工具。工具参数里不能带身份字段，身份只来自 `ExecutionContext`。
 
 - `query_readonly` 是唯一读业务数据的工具。SQL 先过 `src/queryshield/policy/sql.py` 的 `parse_readonly_select`：项目自己的分词器和解析器，只接受单条 SELECT，表只能是 customers、orders、refunds，函数只有 `SUM`、`COUNT`、`COALESCE`，只支持内连接，不接受 CTE、集合运算、注释和类型转换，长度不超过 4000 字符。
-- 执行在 `src/queryshield/db/guarded.py`：只按解析结果重新渲染 SQL，每张表替换成 `(SELECT * FROM t WHERE tenant_id = %s)` 子查询（`_scoped_table`），没有 LIMIT 时补 `LIMIT 101`，多于 100 行以 422 `result_row_limit` 结束。连接来自 `src/queryshield/db/readonly.py` 的 `connect_readonly`：只读角色、`default_transaction_read_only=on`、`statement_timeout=2000`，并在事务里设置 `queryshield.tenant_id`，配合 `migrations/002_w04_rls.sql` 里三张表的行级安全（ENABLE + FORCE）。
+- 执行在 `src/queryshield/db/guarded.py`：只按解析结果重新渲染 SQL，每张表替换成 `(SELECT * FROM t WHERE tenant_id = %s)` 子查询（`_scoped_table`），没有 LIMIT 时补 `LIMIT 101`，多于 100 行以 422 `result_row_limit` 结束。连接来自 `src/queryshield/db/readonly.py` 的 `connect_readonly`：只读角色、`default_transaction_read_only=on`、`statement_timeout=2000`，并在事务里设置 `queryshield.tenant_id`，配合 `migrations/002_rls.sql` 里三张表的行级安全（ENABLE + FORCE）。
 - 查客户姓名（`customers.name` 或 `customers.*`）时，非审批人会得到 `approval_required`，run 进入等待审批（`check_sensitive_access`）。单次提案入口 `POST /query-proposals` 用同一个检查，请求人查姓名直接返回 403。
 
 ### catalog：指标、说法表、追问
@@ -122,7 +122,7 @@ HTTP 接口都在 `src/queryshield/api/main.py`：
 - **导入与快照**（`ingest.py`）：按来源登记表导入文档，切块（每块最多 800 字、重叠 100 字），快照 id 是版本加内容清单哈希的前 16 位，内容不变 id 就不变。
 - **权限**（`retrieval.py`）：来源必须是 active、角色在允许列表里、租户范围是全局或本租户；catalog 里要审批的条目对非审批人不可见。
 - **混合检索**（`retrieval.py` 的 `HybridRetriever`）：关键词路（词频加同义词扩展）和向量路（余弦相似度，下限 0.60）各取最多 10 个候选，用 RRF（k=60）融合。支持可选的重排，产品路径不启用。
-- **快照发布**：产品服务在第一次运行前把实际使用的快照和权限表写进状态库，同一个快照 id 只发布一次；权限变化时版本号加 1，等待中的审批据此失效（`W04RunService.product_knowledge`）。
+- **快照发布**：产品服务在第一次运行前把实际使用的快照和权限表写进状态库，同一个快照 id 只发布一次；权限变化时版本号加 1，等待中的审批据此失效（`RunService.product_knowledge`）。
 
 ### MCP 元数据工具
 
@@ -132,14 +132,24 @@ HTTP 接口都在 `src/queryshield/api/main.py`：
 
 `src/queryshield/providers/`：`QUERYSHIELD_PROVIDER_MODE` 为 `fake`（默认）时用确定性的 `FakeModel`，为 `real` 时用 OpenAI 兼容的 `OpenAICompatibleModel`（`/chat/completions`，超时默认 15 秒，输出上限默认 512 tokens）。缺配置以 503 结束，不退回 Fake。用量只记提供方返回的值：没有就记 `unknown`，不补 0；Fake 的用量一律是 `unknown`。另有嵌入（`embedding.py`）和重排（`rerank.py`）适配器。
 
-### 评测（W05）
+### 两种动作协议
+
+`QUERYSHIELD_MODEL_PROTOCOL` 选择模型怎样给出决定，只对 B1 生效（B0 是对照基线，始终用 json）：
+
+- **json**（默认）：模型在回复正文里写一个 JSON 动作，`src/queryshield/agent/proposals.py` 的 `parse_query_proposal` 严格解析。
+- **native**：请求带六个函数（`src/queryshield/agent/context.py` 的 `native_tools`：`search_catalog`、`describe_tables`、`query_readonly`、`ask_user`、`final_answer`、`deny`），`tool_choice` 为 `auto`，`parallel_tool_calls` 为 false。回复里的那一个调用由 `src/queryshield/agent/proposals.py` 的 `native_action_text` 转成它代表的 JSON 动作，再交给同一个 `parse_query_proposal`。没有调用、多个调用都直接结束 run，不额外修复。
+- 函数的参数 Schema 取自校验器用的同一组常量，只是给模型的提示；服务端的校验器仍是唯一的判断。原生模式的系统消息保留全部语义规则，只去掉被 Schema 取代的线上格式。
+- 原生模式有自己的四个版本号（提示词、动作 schema、工具描述、适配器），记在事件和 checkpoint 里。一个 run 始终按开始时的协议继续；协议不同的 checkpoint 不能交给另一种协议的 Agent 恢复。
+- 事件只记函数名（不在提供列表里的记 `<other>`）、arguments 的长度和 sha256、`finish_reason`，不记原文。
+
+### 评测
 
 `src/queryshield/evaluation/` 用同一个模型、同一组受控工具、同一个身份，成对运行两种配置：
 
 - **B0**（`run_b0_single_pass`）：一次模型生成、一次受控执行，不检索、不追问、不修复，作对照基线；
 - **B1**（`build_b1_agent`）：产品的有界 Agent。
 
-题目在 `evals/w05/`：冻结的 20 道题（其中 8 道关键题，`state_cases.py` 要求关键题集合恰好是这 8 道）和 3 道补充题。安全违规按安全题的禁止副作用计数（`state_oracle.py`）。评测直接构造 `W04RunService`，走的是与 HTTP 相同的 Agent 装配和受控工具。
+题目在 `evals/development/`：冻结的 20 道题（其中 8 道关键题，`state_cases.py` 要求关键题集合恰好是这 8 道）和 3 道补充题。安全违规按安全题的禁止副作用计数（`state_oracle.py`）。评测直接构造 `RunService`，走的是与 HTTP 相同的 Agent 装配和受控工具。
 
 ## 一次请求的完整流程
 
@@ -215,3 +225,4 @@ sequenceDiagram
 8. **MCP 只是传输，外部错误码走白名单。** 结果逐条与宿主自己的记录比对，错误码也不原样采信。为什么：终态（尤其 DENIED）是安全语义，不能由不可信的一方决定。代价：宿主要维护与服务进程完全一致的目录和索引；恶意服务端仍能把失败标成上游故障，只是失败原因的标注不准。
 9. **只能单进程部署。** 审批的“检查再执行”靠进程内的锁。为什么：状态库是 SQLite，单进程足够演示和评测，跨进程的原子状态转换要先改状态库接口。代价：不能横向扩展；见[运维说明](operations.md)第 6 节。
 10. **Fake 与真实模型严格分开。** 缺配置时服务以 503 结束（检查脚本记为 blocked），不会退回 Fake；用量未知记 `unknown`，不补 0。为什么：“跑通了”必须能说明跑的是什么。代价：没有密钥时只能看 Fake 结果，Fake 只认演示和评测里写好的题。
+11. **原生 function calling 只换输出方式。** 原生模式下，上下文仍然每次由服务端重建，工具结果仍作为不可信数据放在 user 消息里；不回放模型上一轮的 `tool_calls`，也不加带 `tool_call_id` 的 tool 消息。为什么：与 json 协议对比时只改一个变量；服务端也从不回显模型自己的输出。代价：这不是标准的多轮工具消息形式，模型看不到自己上一轮调用的原文，只看到服务端记下的结果。

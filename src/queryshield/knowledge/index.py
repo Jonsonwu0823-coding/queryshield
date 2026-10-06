@@ -1,19 +1,24 @@
-"""Versioned local embedding index construction for the W03 knowledge snapshot."""
+"""Versioned local embedding index construction for a knowledge snapshot."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-import hashlib
 import json
 import math
 from pathlib import Path
-import tempfile
 from typing import Protocol
 from uuid import uuid4
 
-from queryshield.knowledge.ingest import KnowledgeSnapshot
-from queryshield.providers.embedding import EmbeddingCallResult, OperationUsage
+from queryshield.knowledge.ingest import (
+    KnowledgeSnapshot,
+    atomic_write_text,
+    canonical_bytes,
+    sha256_hex,
+    with_identity,
+)
+from queryshield.providers.contracts import finite_float
+from queryshield.providers.embedding import EmbeddingCallResult, OperationUsage, finite_vector
 
 
 INDEX_VERSION = "vector-index-v1"
@@ -84,7 +89,7 @@ class EmbeddingIndex:
         for chunk in self.chunks:
             if len(chunk.vector) != self.dimensions:
                 raise IndexValidationError("index contains a mixed vector dimension")
-            if any(not math.isfinite(value) for value in chunk.vector):
+            if any(finite_float(value) is None for value in chunk.vector):
                 raise IndexValidationError("index contains a non-finite vector value")
 
     def as_dict(self) -> dict[str, object]:
@@ -98,24 +103,6 @@ class EmbeddingIndex:
             "dimensions": self.dimensions,
             "index_hash": self.index_hash,
             "chunks": [chunk.as_dict() for chunk in self.chunks],
-        }
-
-
-@dataclass(frozen=True)
-class IndexHit:
-    chunk_id: str
-    source_id: str
-    source_version: str
-    text: str
-    score: float
-
-    def as_dict(self) -> dict[str, object]:
-        return {
-            "chunk_id": self.chunk_id,
-            "source_id": self.source_id,
-            "source_version": self.source_version,
-            "text": self.text,
-            "score": self.score,
         }
 
 
@@ -146,23 +133,18 @@ def new_ingest_job_id() -> str:
     return f"ingest-{uuid4()}"
 
 
-def _canonical_bytes(value: object) -> bytes:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-
-
-def _sha256(value: object) -> str:
-    return hashlib.sha256(_canonical_bytes(value)).hexdigest()
-
-
-def _validate_vector(vector: Sequence[object], *, dimensions: int) -> tuple[float, ...]:
-    if isinstance(vector, (str, bytes)) or len(vector) != dimensions:
-        raise IndexValidationError("embedding vector has an unexpected dimension")
-    values: list[float] = []
-    for value in vector:
-        if type(value) not in {int, float} or isinstance(value, bool) or not math.isfinite(float(value)):
-            raise IndexValidationError("embedding vector contains a non-finite value")
-        values.append(float(value))
-    return tuple(values)
+def _index_hash(*, model: str, model_revision: str, dimensions: int, chunks: Sequence[IndexChunk]) -> str:
+    return sha256_hex(
+        canonical_bytes(
+            {
+                "index_version": INDEX_VERSION,
+                "model": model,
+                "model_revision": model_revision,
+                "dimensions": dimensions,
+                "chunks": [chunk.as_dict() for chunk in chunks],
+            }
+        )
+    )
 
 
 def _embedded_snapshot(
@@ -172,36 +154,17 @@ def _embedded_snapshot(
     dimensions: int,
     index_hash: str,
 ) -> KnowledgeSnapshot:
-    manifest = {
-        "knowledge_version": snapshot.knowledge_version,
-        "catalog_version": snapshot.catalog_version,
-        "chunker_version": snapshot.chunker_version,
-        "embedding_model_revision": model_revision,
-        "embedding_dimensions": dimensions,
-        "index_hash": index_hash,
-        "sources": [source.as_dict() for source in snapshot.source_records],
-        "chunks": [chunk.as_dict() for chunk in snapshot.chunk_records],
-    }
-    manifest_sha256 = _sha256(manifest)
-    return replace(
-        snapshot,
-        snapshot_id=f"{snapshot.knowledge_version}-{manifest_sha256[:16]}",
-        embedding_model_revision=model_revision,
-        embedding_dimensions=dimensions,
-        index_hash=index_hash,
-        manifest_sha256=manifest_sha256,
+    return with_identity(
+        replace(
+            snapshot,
+            embedding_model_revision=model_revision,
+            embedding_dimensions=dimensions,
+            index_hash=index_hash,
+        )
     )
 
 
-def build_embedding_index(
-    snapshot: KnowledgeSnapshot,
-    embedder: EmbeddingAdapter,
-    *,
-    ingest_job_id: str | None = None,
-    batch_size: int = MAX_BATCH_SIZE,
-) -> EmbeddingBuildResult:
-    """Embed a snapshot and return a fully validated, not-yet-published index."""
-
+def _check_build_arguments(snapshot: KnowledgeSnapshot, embedder: EmbeddingAdapter, batch_size: int) -> None:
     if not isinstance(snapshot, KnowledgeSnapshot):
         raise TypeError("snapshot must be a KnowledgeSnapshot")
     if type(batch_size) is not int or not 1 <= batch_size <= MAX_BATCH_SIZE:
@@ -216,7 +179,15 @@ def build_embedding_index(
     if not snapshot.chunk_records:
         raise IndexValidationError("cannot build an index from an empty snapshot")
 
-    job_id = ingest_job_id or new_ingest_job_id()
+
+def _embed_chunks(
+    snapshot: KnowledgeSnapshot,
+    embedder: EmbeddingAdapter,
+    job_id: str,
+    batch_size: int,
+) -> tuple[list[IndexChunk], list[OperationUsage]]:
+    """Embed the chunks in id order, one batch per call, and check every result."""
+
     chunks = sorted(snapshot.chunk_records, key=lambda chunk: chunk.chunk_id)
     indexed_chunks: list[IndexChunk] = []
     operation_usages: list[OperationUsage] = []
@@ -245,19 +216,32 @@ def build_embedding_index(
                     source_id=chunk.source_id,
                     source_version=chunk.source_version,
                     text=chunk.text,
-                    vector=_validate_vector(vector, dimensions=embedder.dimensions),
+                    vector=finite_vector(
+                        vector, dimensions=embedder.dimensions, label="embedding vector", error=IndexValidationError
+                    ),
                 )
             )
         operation_usages.append(result.usage)
+    return indexed_chunks, operation_usages
 
-    index_hash = _sha256(
-        {
-            "index_version": INDEX_VERSION,
-            "model": embedder.model,
-            "model_revision": embedder.model_revision,
-            "dimensions": embedder.dimensions,
-            "chunks": [chunk.as_dict() for chunk in indexed_chunks],
-        }
+
+def build_embedding_index(
+    snapshot: KnowledgeSnapshot,
+    embedder: EmbeddingAdapter,
+    *,
+    ingest_job_id: str | None = None,
+    batch_size: int = MAX_BATCH_SIZE,
+) -> EmbeddingBuildResult:
+    """Embed a snapshot and return a fully validated, not-yet-published index."""
+
+    _check_build_arguments(snapshot, embedder, batch_size)
+    job_id = ingest_job_id or new_ingest_job_id()
+    indexed_chunks, operation_usages = _embed_chunks(snapshot, embedder, job_id, batch_size)
+    index_hash = _index_hash(
+        model=embedder.model,
+        model_revision=embedder.model_revision,
+        dimensions=embedder.dimensions,
+        chunks=indexed_chunks,
     )
     embedded_snapshot = _embedded_snapshot(
         snapshot,
@@ -289,23 +273,11 @@ def publish_index(index: EmbeddingIndex, output_path: str | Path) -> Path:
     """Atomically publish a complete index after all validation has succeeded."""
 
     destination = Path(output_path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(index.as_dict(), ensure_ascii=False, indent=2) + "\n"
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=".embedding-index-",
-        suffix=".tmp",
-        dir=destination.parent,
+    atomic_write_text(
+        destination,
+        json.dumps(index.as_dict(), ensure_ascii=False, indent=2) + "\n",
+        temporary_prefix=".embedding-index-",
     )
-    try:
-        with open(descriptor, "w", encoding="utf-8", newline="\n", closefd=True) as handle:
-            handle.write(payload)
-        Path(temporary_name).replace(destination)
-    except Exception:
-        try:
-            Path(temporary_name).unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
     return destination
 
 
@@ -344,14 +316,11 @@ def load_index(path: str | Path) -> EmbeddingIndex:
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise IndexValidationError("embedding index fields are invalid") from exc
-    expected_hash = _sha256(
-        {
-            "index_version": index.index_version,
-            "model": index.model,
-            "model_revision": index.model_revision,
-            "dimensions": index.dimensions,
-            "chunks": [chunk.as_dict() for chunk in index.chunks],
-        }
+    expected_hash = _index_hash(
+        model=index.model,
+        model_revision=index.model_revision,
+        dimensions=index.dimensions,
+        chunks=index.chunks,
     )
     if expected_hash != index.index_hash:
         raise IndexValidationError("embedding index hash does not match its vectors")
@@ -366,8 +335,6 @@ def embedded_snapshot_for_index(snapshot: KnowledgeSnapshot, index: EmbeddingInd
     embedding call is made.  A caller compares it with ``index.snapshot_id``.
     """
 
-    if not isinstance(snapshot, KnowledgeSnapshot) or not isinstance(index, EmbeddingIndex):
-        raise TypeError("a KnowledgeSnapshot and an EmbeddingIndex are required")
     return _embedded_snapshot(
         snapshot,
         model_revision=index.model_revision,
@@ -377,38 +344,15 @@ def embedded_snapshot_for_index(snapshot: KnowledgeSnapshot, index: EmbeddingInd
 
 
 def cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
-    if isinstance(left, (str, bytes)) or isinstance(right, (str, bytes)) or len(left) != len(right):
+    """Both vectors were validated when they entered an index or an embedding result."""
+
+    if len(left) != len(right):
         raise IndexValidationError("cosine vectors must have the same dimension")
-    left_values = _validate_vector(left, dimensions=len(left))
-    right_values = _validate_vector(right, dimensions=len(right))
-    left_norm = math.sqrt(sum(value * value for value in left_values))
-    right_norm = math.sqrt(sum(value * value for value in right_values))
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
     if left_norm == 0 or right_norm == 0:
         return 0.0
-    return sum(a * b for a, b in zip(left_values, right_values, strict=True)) / (left_norm * right_norm)
-
-
-def search_index(
-    index: EmbeddingIndex,
-    query_vector: Sequence[float],
-    *,
-    top_k: int = 3,
-) -> tuple[IndexHit, ...]:
-    if type(top_k) is not int or not 1 <= top_k <= 5:
-        raise IndexValidationError("top_k must be between one and five")
-    normalized_query = _validate_vector(query_vector, dimensions=index.dimensions)
-    ranked = [
-        IndexHit(
-            chunk_id=chunk.chunk_id,
-            source_id=chunk.source_id,
-            source_version=chunk.source_version,
-            text=chunk.text,
-            score=cosine_similarity(normalized_query, chunk.vector),
-        )
-        for chunk in index.chunks
-    ]
-    ranked.sort(key=lambda hit: (-hit.score, hit.chunk_id))
-    return tuple(ranked[:top_k])
+    return sum(a * b for a, b in zip(left, right, strict=True)) / (left_norm * right_norm)
 
 
 __all__ = [
@@ -417,7 +361,6 @@ __all__ = [
     "EmbeddingIndex",
     "INDEX_VERSION",
     "IndexChunk",
-    "IndexHit",
     "IndexValidationError",
     "build_embedding_index",
     "cosine_similarity",
@@ -425,5 +368,4 @@ __all__ = [
     "load_index",
     "new_ingest_job_id",
     "publish_index",
-    "search_index",
 ]

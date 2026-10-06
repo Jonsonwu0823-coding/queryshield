@@ -1,4 +1,4 @@
-"""Strict request models for W04 approval/cancellation endpoints."""
+"""Strict request models for approval/cancellation endpoints."""
 
 from pydantic import BaseModel, ConfigDict, StrictBool, field_validator
 

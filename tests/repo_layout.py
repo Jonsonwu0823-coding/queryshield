@@ -3,8 +3,8 @@
 Most tests only need this project directory.  A few also read things that exist in only one layout:
 
 * "development": this directory sits inside the development repository, whose root holds
-  ``control/evidence/upstream/accepted-assets.json`` (the upstream asset register that W04-X01 and
-  W05-X01 read) and the CI workflow under ``.github/workflows/``.
+  ``control/evidence/upstream/accepted-assets.json`` (the upstream asset register that STATE-X01 and
+  EVAL-X01 read) and the CI workflow under ``.github/workflows/``.
 * "standalone": this directory is itself the repository root; the workflow is
   ``.github/workflows/queryshield-ci.yml`` inside it, and there is no register.
 * "unknown": neither.

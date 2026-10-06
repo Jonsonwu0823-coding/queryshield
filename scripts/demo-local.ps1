@@ -4,17 +4,18 @@ param(
     [string]$EvidenceRoot,
     [ValidateRange(1, 65535)][int]$PostgresPort = 5433,
     [switch]$FakeDryRun,
+    [ValidateSet('json', 'native')][string]$ModelProtocol = 'json',
     [switch]$NonInteractive
 )
 
-# B3d demo run: starts a real uvicorn process on the DEMO database
+# Demo run: starts a real uvicorn process on the DEMO database
 # (queryshield_demo) and drives the demo questions over HTTP, comparing verified
 # values with the independently computed expected answers (scripts/demo_run.py).
 # Credentials are entered the same way as the HTTP smoke script, live only in
 # this process environment, are never written or printed, and are restored when
 # the script ends.  The demo setting is given to the server process by demo_run.py,
 # not set in your session; an existing QUERYSHIELD_DATABASE_URL (the test database)
-# is ignored and restored.  Create the demo database first: docs/b3d-demo-data.md.
+# is ignored and restored.  Create the demo database first: docs/demo-data.md.
 # -FakeDryRun checks the wiring with the Fake model at no cost.
 
 $ErrorActionPreference = "Stop"
@@ -88,7 +89,7 @@ try {
             throw [ArgumentException]::new('Invalid Bailian workspace endpoint.')
         }
 
-        # Same public service profile as w05-local-real.ps1 (the product B1
+        # Same public service profile as eval-local-real.ps1 (the product B1
         # retriever uses no reranker, so rerank values are not required here).
         $bailianOrigin = $serviceUri.GetLeftPart([UriPartial]::Authority)
         $profileValues = @{
@@ -182,11 +183,11 @@ try {
         # -EvidenceRoot is the base directory; the run directory below reuses the name (PowerShell variables ignore case) once it has been read.
         $evidenceBase = if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) { Join-Path $projectRoot "evidence" } else { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($EvidenceRoot) }
         $mode = if ($FakeDryRun) { 'fake' } else { 'real' }
-        $evidenceRoot = Join-Path $evidenceBase "B3d-demo-$mode-$stamp"
+        $evidenceRoot = Join-Path $evidenceBase "demo-$mode-$stamp"
         New-Item -ItemType Directory -Path $evidenceRoot -Force | Out-Null
         Set-Location -LiteralPath $projectRoot
-        Write-Output "Running the B3d demo questions ($mode) against a local uvicorn process on the demo database; output is question ids, verdicts and known gaps only. The raw file (b3d-demo-raw.json) holds answers and customer names: do not share it."
-        & $pythonPath $demoScript --mode $mode --evidence-dir $evidenceRoot
+        Write-Output "Running the demo questions ($mode) against a local uvicorn process on the demo database; output is question ids, verdicts and known gaps only. The raw file (demo-raw.json) holds answers and customer names: do not share it."
+        & $pythonPath $demoScript --mode $mode --model-protocol $ModelProtocol --evidence-dir $evidenceRoot
         $demoExitCode = $LASTEXITCODE
         Write-Output "Evidence root: $evidenceRoot"
         $exitCode = if ($demoExitCode -eq 0) { 0 } elseif ($demoExitCode -eq 2) { 2 } else { 1 }
@@ -194,7 +195,7 @@ try {
 }
 catch {
     # Avoid printing exception messages that could contain a local endpoint or secret.
-    Write-Output ("B3d demo run stopped after a sanitized failure (" + $_.Exception.GetType().Name + "). Credentials will be restored.")
+    Write-Output ("Demo run stopped after a sanitized failure (" + $_.Exception.GetType().Name + "). Credentials will be restored.")
     if ($exitCode -ne 2) { $exitCode = 1 }
 }
 finally {

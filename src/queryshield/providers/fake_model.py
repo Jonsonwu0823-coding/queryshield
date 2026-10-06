@@ -15,6 +15,8 @@ from uuid import uuid4
 
 from queryshield.providers.contracts import (
     ModelCallResult,
+    NativeToolCall,
+    native_call_for,
     new_local_call_id,
     new_request_id,
 )
@@ -32,11 +34,11 @@ _MONTH_RANGE_RE = re.compile(
 _DEFAULT_WINDOW = {"start": "2026-09-01T00:00:00Z", "end": "2026-10-01T00:00:00Z"}
 AMBIGUOUS_METRIC_QUESTION = "请说明按支付金额还是退款后净额计算。"
 UNKNOWN_METRIC_QUESTION = "请说明要查询的指标：已支付订单数、支付金额，还是退款后净额？"
-# B3c-1 HTTP smoke step: a question with no time range, asked without a request
+# HTTP smoke step: a question with no time range, asked without a request
 # window.  The fake asks for the range and names the metric while doing so.
 UNDATED_SMOKE_QUESTION = "支付金额是多少？"
 TIME_RANGE_QUESTION = "请问要查哪个时间范围的支付金额？"
-# B3c-2 HTTP smoke steps: a question that needs no data, and a definition
+# HTTP smoke steps: a question that needs no data, and a definition
 # question answered from this run's catalog search.
 NO_DATA_SMOKE_QUESTION = "你好，你能做什么？"
 KNOWLEDGE_SMOKE_QUESTION = "退款后净额是怎么算的？"
@@ -55,10 +57,17 @@ class FakeModel:
         *,
         request_id: str | None = None,
         model_call_id: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> ModelCallResult:
         if not messages:
             raise ValueError("messages must not be empty")
-        content = _fake_content(messages)
+        content = _fake_content(messages, tools)
+        tool_calls = None
+        if tools is not None:
+            # Native: the same decision, returned as one function call.
+            name, arguments = native_call_for(json.loads(content))
+            tool_calls = (NativeToolCall("fake-call", name, _dump(arguments)),)
+            content = ""
         return ModelCallResult(
             mode="fake",
             provider="fake",
@@ -70,6 +79,8 @@ class FakeModel:
             content=content,
             usage=None,
             usage_status="unknown",
+            tool_calls=tool_calls,
+            finish_reason="tool_calls" if tool_calls else None,
         )
 
     def generate(
@@ -79,7 +90,7 @@ class FakeModel:
         *,
         model_call_id: str | None = None,
     ) -> dict[str, str]:
-        """W01 answer-template helper kept for the W01 commerce check."""
+        """Answer-template helper kept for the commerce check."""
 
         if question == "2026年9月已支付订单数":
             answer = f"2026年9月已支付订单数:{facts['paid_count']} 笔"
@@ -153,7 +164,7 @@ def _question_and_clarifications(messages: list[dict[str, str]], baseline: bool)
 
 
 def _range_window(text: str) -> dict[str, str] | None:
-    """B3d demo: "YYYY年M月至N月" (or 到/-/～) is one half-open window over those months."""
+    """Demo questions: "YYYY年M月至N月" (or 到/-/～) is one half-open window over those months."""
 
     match = _MONTH_RANGE_RE.search(text)
     if match is None:
@@ -228,7 +239,52 @@ def _query_call(question: str, clarification: str, request_window: object) -> di
     return {"sql": sql, "params": params, "metrics": metrics, "time_window": window}
 
 
-def _fake_content(messages: list[dict[str, str]]) -> str:
+def _answer_from_query_result(tool_results: list[dict[str, object]]) -> str | None:
+    """A final answer citing the last successful query's verified metrics, if there is one."""
+
+    succeeded = [
+        record["output"]
+        for record in tool_results
+        if record.get("tool_name") == "query_readonly"
+        and record.get("status") == "succeeded"
+        and isinstance(record.get("output"), dict)
+        and isinstance(record["output"].get("result_id"), str)
+    ]
+    if not succeeded:
+        return None
+    output = succeeded[-1]
+    verified = output.get("verified_metrics") if isinstance(output.get("verified_metrics"), list) else []
+    rows = output.get("rows") if isinstance(output.get("rows"), list) else []
+    grouped = any(isinstance(row, dict) and "customer_id" in row for row in rows)
+    return _dump({
+        "type": "final_answer",
+        "answer": "customer_id row set verified" if grouped else "read-only result verified",
+        "source_ids": [],
+        "fact_refs": [
+            {"result_id": output["result_id"], "metric_id": str(item["metric_id"])}
+            for item in verified
+            if isinstance(item, dict) and isinstance(item.get("metric_id"), str)
+        ],
+    })
+
+
+def _retrieval_offered(context: dict[str, object], tools: list[dict[str, Any]] | None) -> bool:
+    """Whether this call may search the catalog: a native tool, or the json action contract."""
+
+    if tools is not None:
+        return any(tool["function"]["name"] == "search_catalog" for tool in tools)
+    return '"search_catalog"' in json.dumps(context.get("action_contract", {}), ensure_ascii=False)
+
+
+def _searched(tool_results: list[dict[str, object]], messages: list[dict[str, str]]) -> bool:
+    """Whether this run already searched, or the server already sent retrieval sources."""
+
+    return any(record.get("tool_name") == "search_catalog" for record in tool_results) or any(
+        payload.get("items") or payload.get("item") for payload in _data_payloads(messages, _RETRIEVAL_PREFIX)
+    )
+
+
+def _fake_content(messages: list[dict[str, str]], tools: list[dict[str, Any]] | None = None) -> str:
     """Return one deterministic B1/B0 action from the server-built messages."""
 
     last = str(messages[-1].get("content", ""))
@@ -240,32 +296,12 @@ def _fake_content(messages: list[dict[str, str]]) -> str:
     context = _server_context(messages)
     declaration = context.get("metric_declaration") if isinstance(context.get("metric_declaration"), dict) else {}
     request_window = declaration.get("request_time_window") if isinstance(declaration, dict) else None
-    retrieval_offered = '"search_catalog"' in json.dumps(context.get("action_contract", {}), ensure_ascii=False)
+    retrieval_offered = _retrieval_offered(context, tools)
 
     tool_results = _data_payloads(messages, _TOOL_RESULT_PREFIX)
-    succeeded = [
-        record["output"]
-        for record in tool_results
-        if record.get("tool_name") == "query_readonly"
-        and record.get("status") == "succeeded"
-        and isinstance(record.get("output"), dict)
-        and isinstance(record["output"].get("result_id"), str)
-    ]
-    if succeeded:
-        output = succeeded[-1]
-        verified = output.get("verified_metrics") if isinstance(output.get("verified_metrics"), list) else []
-        rows = output.get("rows") if isinstance(output.get("rows"), list) else []
-        grouped = any(isinstance(row, dict) and "customer_id" in row for row in rows)
-        return _dump({
-            "type": "final_answer",
-            "answer": "customer_id row set verified" if grouped else "read-only result verified",
-            "source_ids": [],
-            "fact_refs": [
-                {"result_id": output["result_id"], "metric_id": str(item["metric_id"])}
-                for item in verified
-                if isinstance(item, dict) and isinstance(item.get("metric_id"), str)
-            ],
-        })
+    answer = _answer_from_query_result(tool_results)
+    if answer is not None:
+        return answer
 
     if question == UNDATED_SMOKE_QUESTION and _MONTH_RE.search(f"{question} {clarification}") is None:
         return _dump({"type": "ask_user", "question": TIME_RANGE_QUESTION})
@@ -279,9 +315,7 @@ def _fake_content(messages: list[dict[str, str]]) -> str:
     if ambiguous:
         return _dump({"type": "ask_user", "clarification_id": "clarify.metric_basis", "question": AMBIGUOUS_METRIC_QUESTION})
 
-    searched = any(record.get("tool_name") == "search_catalog" for record in tool_results) or any(
-        payload.get("items") or payload.get("item") for payload in _data_payloads(messages, _RETRIEVAL_PREFIX)
-    )
+    searched = _searched(tool_results, messages)
     if question == KNOWLEDGE_SMOKE_QUESTION and not baseline:
         if retrieval_offered and not searched:
             return _dump({"type": "tool_call", "name": "search_catalog", "arguments": {"query": question[:200], "top_k": 3}})

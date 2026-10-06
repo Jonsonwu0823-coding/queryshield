@@ -37,7 +37,7 @@ METRIC_VERIFIERS: Final[Mapping[str, Mapping[str, str | None]]] = {
 }
 DECLARATION_ERROR_CODES: Final = frozenset(QUERY_DECLARATION_ERROR_CODES)
 _DECLARATION_FIELDS: Final = frozenset({"metrics", "time_window"})
-_UTC_INSTANT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+_UTC_INSTANT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 _EXAMPLE_WINDOW: Final = {"start": "2026-09-01T00:00:00Z", "end": "2026-10-01T00:00:00Z"}
 _EXAMPLE_PARAMS: Final = {"0": "paid", "1": _EXAMPLE_WINDOW["start"], "2": _EXAMPLE_WINDOW["end"]}
 _WINDOW_FILTER = "status = %s AND created_at >= %s AND created_at < %s"
@@ -147,6 +147,12 @@ def declarable_metric_ids(catalog: SemanticCatalog) -> tuple[str, ...]:
     )
 
 
+def no_data_metric_names(catalog: SemanticCatalog) -> list[str]:
+    """The metric names a no_data reply lists: every metric the model can declare."""
+
+    return [catalog.metric_name(metric_id) for metric_id in declarable_metric_ids(catalog)]
+
+
 def build_metric_binding(
     catalog: SemanticCatalog,
     metric_id: str,
@@ -221,8 +227,6 @@ def resolve_query_declaration(
     """
 
     prebound = tuple(prebound)
-    if not isinstance(arguments, Mapping):
-        return ResolvedDeclaration(arguments, prebound, ())
     stripped = {key: value for key, value in arguments.items() if key not in _DECLARATION_FIELDS}
     request = (
         normalize_time_window(request_time_window, field="request_time_window")
@@ -289,8 +293,8 @@ def declaration_examples(request_time_window: Mapping[str, str] | None = None) -
     """
 
     examples = {name: json.loads(json.dumps(example)) for name, example in DECLARATION_EXAMPLES.items()}
-    if request_time_window is not None:
-        window = {"start": request_time_window["start"], "end": request_time_window["end"]}
+    window = _request_window_echo(request_time_window)
+    if window is not None:
         for example in examples.values():
             example["time_window"] = dict(window)
             example["params"] = {"0": "paid", "1": window["start"], "2": window["end"]}
@@ -316,11 +320,7 @@ def undeclared_metric_hint(
             "result's verified_metrics in fact_refs. If request_time_window is set, copy it exactly."
         ),
         "declare_metrics": metrics,
-        "request_time_window": (
-            {"start": request_time_window["start"], "end": request_time_window["end"]}
-            if request_time_window is not None
-            else None
-        ),
+        "request_time_window": _request_window_echo(request_time_window),
     }
 
 
@@ -335,11 +335,7 @@ def answer_without_query_hint(request_time_window: Mapping[str, str] | None) -> 
             "First send a tool_call named query_readonly with arguments.metrics and time_window, then cite only "
             "result_id values returned in this run. A window with no data is still queried and reported as 0."
         ),
-        "request_time_window": (
-            {"start": request_time_window["start"], "end": request_time_window["end"]}
-            if request_time_window is not None
-            else None
-        ),
+        "request_time_window": _request_window_echo(request_time_window),
     }
 
 
@@ -354,11 +350,11 @@ def answer_not_grounded_hint(
     *,
     retrieval_available: bool = True,
 ) -> dict[str, object]:
-    """Send-back hint for an answer nothing in this run grounds (B3c-2).
+    """Send-back hint for an answer nothing in this run grounds.
 
     Querying for business values comes first; knowledge and no_data are only
     conditions, so a data question is never steered away from its query.
-    R1: each condition carries an action the model can copy as is (every one
+    Each condition carries an action the model can copy as is (every one
     parses).  Fixed text plus the server request window; no model or user text.
     """
 
@@ -385,7 +381,7 @@ def answer_not_grounded_hint(
     return hint
 
 
-# Copyable actions in the answer send-back hint (B3c-2 R1); NO_DATA_ACTION is
+# Copyable actions in the answer send-back hint; NO_DATA_ACTION is
 # the context's own example.  The knowledge source_ids come from the server's
 # retrieval sources, so [] is fine.
 DEFINITION_SEARCH_ACTION = '{"type":"tool_call","name":"search_catalog","arguments":{"query":"<指标名>","top_k":3}}'
@@ -393,7 +389,7 @@ DEFINITION_ANSWER_SHAPE = '{"type":"final_answer","answer":"...","source_ids":[]
 
 
 def knowledge_from_server_search_hint() -> dict[str, object]:
-    """Send-back hint after the server searched the catalog for a knowledge answer (B3c-2 R2).
+    """Send-back hint after the server searched the catalog for a knowledge answer.
 
     Knowledge only: no query or no_data menu, no request window.  Fixed text.
     """
@@ -409,7 +405,7 @@ def knowledge_from_server_search_hint() -> dict[str, object]:
 
 
 def answer_basis_conflict_hint(request_time_window: Mapping[str, str] | None) -> dict[str, object]:
-    """Send-back hint for a basis the run contradicts (B3c-2); fixed text only."""
+    """Send-back hint for a basis the run contradicts; fixed text only."""
 
     return {
         "action": (

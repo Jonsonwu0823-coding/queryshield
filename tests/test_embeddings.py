@@ -15,7 +15,6 @@ from queryshield.knowledge.index import (
     cosine_similarity,
     load_index,
     publish_index,
-    search_index,
 )
 from queryshield.knowledge.ingest import ChunkRecord, KnowledgeSnapshot, SourceRecord
 from queryshield.providers.embedding import (
@@ -85,8 +84,9 @@ def test_fake_build_records_revision_usage_and_deterministic_cosine_order(tmp_pa
     assert all(usage.usage_status == "known" for usage in result.operation_usages)
     assert cosine_similarity((1.0, 0.0, 0.0), (1.0, 0.0, 0.0)) == pytest.approx(1.0)
 
-    hits = search_index(result.index, (1.0, 0.0, 0.0), top_k=3)
-    assert [hit.chunk_id for hit in hits] == [
+    query = (1.0, 0.0, 0.0)
+    ranked = sorted(result.index.chunks, key=lambda chunk: (-cosine_similarity(query, chunk.vector), chunk.chunk_id))
+    assert [chunk.chunk_id for chunk in ranked] == [
         "semantic-test@2026-09-21#0000",
         "semantic-test@2026-09-21#0001",
         "semantic-test@2026-09-21#0002",
@@ -165,7 +165,7 @@ def test_real_embedding_adapter_validates_count_dimensions_ids_and_usage() -> No
     assert result.provider_request_id == "provider-request-embed-1"
     assert result.usage.total_tokens == 9
     assert result.usage.usage_status == "known"
-    assert "test-secret" not in str(result.to_redacted_record())
+    assert "test-secret" not in repr(result)
 
 
 def test_real_adapter_rejects_bad_provider_vector() -> None:

@@ -1,4 +1,4 @@
-"""Bounded same-agent read-only parallel scheduling for W03-U02.
+"""Bounded same-agent read-only parallel scheduling for AGENT-U02.
 
 This module is intentionally an in-process Fake scheduler.  It owns branch
 identity, plan hashing, result merging, and the peak-active invariant; a later
@@ -23,6 +23,7 @@ from queryshield.agent.proposals import (
     PARALLEL_METRICS,
     ParallelReadonlyAction,
 )
+from queryshield.policy.sql import SQL_POLICY_VERSION
 
 
 PARALLEL_VERSION = "qs-parallel-v1"
@@ -112,7 +113,7 @@ class ParallelPlan:
         metric_ids: Sequence[str],
         *,
         time_window: Mapping[str, str],
-        policy_version: str = "qs-sql-v1",
+        policy_version: str = SQL_POLICY_VERSION,
         catalog_version: str = DEFAULT_CATALOG_VERSION,
     ) -> ParallelPlan:
         if not isinstance(context, ExecutionContext):
@@ -218,7 +219,7 @@ class _Group:
 
 
 class ParallelGroupStore:
-    """Thread-safe in-memory group/branch identity store for the W03 Fake path."""
+    """Thread-safe in-memory group/branch identity store for the Fake path."""
 
     def __init__(self) -> None:
         self._lock = Lock()
@@ -312,9 +313,10 @@ class ParallelScheduler:
             raise ParallelPlanConflict()
         group = existing_group
         existing = tuple(group.results.values()) if group is not None else ()
-        if group is not None and len(existing) == len(group.branch_ids) and all(item.status == "SUCCEEDED" for item in existing):
-            return self._result(group, run_id=context.run_id, plan_hash=plan.plan_hash, new_branch_count=0, reused=True)
-        if group is not None and any(item.status == "FAILED" for item in existing):
+        if group is not None and (
+            (len(existing) == len(group.branch_ids) and all(item.status == "SUCCEEDED" for item in existing))
+            or any(item.status == "FAILED" for item in existing)
+        ):
             return self._result(group, run_id=context.run_id, plan_hash=plan.plan_hash, new_branch_count=0, reused=True)
 
         pending_metrics = (
@@ -455,7 +457,7 @@ class ParallelScheduler:
         new_branch_count: int,
         reused: bool,
     ) -> ParallelRunResult:
-        branches = tuple(group.results[metric_id] for metric_id in sorted(group.results, key=lambda branch_id: group.branch_ids.get(branch_id.split(":", 1)[-1], branch_id)))
+        branches = tuple(group.results[branch_id] for branch_id in sorted(group.results))
         status: Literal["SUCCEEDED", "FAILED"] = (
             "SUCCEEDED"
             if len(branches) == len(group.branch_ids) and all(branch.status == "SUCCEEDED" for branch in branches)

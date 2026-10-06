@@ -1,0 +1,1832 @@
+{
+  "schema": "queryshield-name-label-exceptions-v1",
+  "exceptions": [
+    {
+      "file": "src/queryshield/agent/runtime.py",
+      "literal": "You are the W05 single-pass baseline",
+      "count": 1,
+      "class": "A",
+      "reason": "B0 system prompt sent to the model (ticket decision 2)"
+    },
+    {
+      "file": "src/queryshield/providers/fake_model.py",
+      "literal": "You are the W05 single-pass baseline",
+      "count": 1,
+      "class": "A",
+      "reason": "Fake model recognises B0 by this sentence"
+    },
+    {
+      "file": "src/queryshield/evaluation/stateful_product.py",
+      "literal": "You are the W05 single-pass baseline",
+      "count": 1,
+      "class": "A",
+      "reason": "same marker, startswith check"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "You are the W05 single-pass baseline",
+      "count": 1,
+      "class": "A",
+      "reason": "same marker in a Fake-model test double"
+    },
+    {
+      "file": "tests/test_fake_model_outputs.py",
+      "literal": "You are the W05 single-pass baseline",
+      "count": 1,
+      "class": "A",
+      "reason": "same marker as test input; pinned in fake_model_output_pins.json"
+    },
+    {
+      "file": "src/queryshield/agent/config.py",
+      "literal": "queryshield-w03-hybrid-v1",
+      "count": 1,
+      "class": "A",
+      "reason": "DEFAULT_PROFILE reaches the model context (runtime_versions) and is pinned"
+    },
+    {
+      "file": "src/queryshield/approval/service.py",
+      "literal": "qs-w04-state-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "run checkpoint state_schema_version"
+    },
+    {
+      "file": "src/queryshield/knowledge/runtime.py",
+      "literal": "w05-hash-feature-fake-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "index hash and snapshot id"
+    },
+    {
+      "file": "src/queryshield/knowledge/runtime.py",
+      "literal": "w05-hash-feature-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "index hash and snapshot id"
+    },
+    {
+      "file": "src/queryshield/knowledge/runtime.py",
+      "literal": "\"w05-retrieval\"",
+      "count": 2,
+      "class": "B",
+      "reason": "ingest job and request ids in usage records"
+    },
+    {
+      "file": "src/queryshield/evaluation/state_cases.py",
+      "literal": "w05-state-evaluation-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "schema_version must equal the frozen case file"
+    },
+    {
+      "file": "src/queryshield/evaluation/state_cases.py",
+      "literal": "w05-state-evaluation-supplement-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "schema_version must equal the supplement file"
+    },
+    {
+      "file": "src/queryshield/evaluation/state_cases.py",
+      "literal": "w05-development-erratum-r3",
+      "count": 1,
+      "class": "B",
+      "reason": "hashed into case_config_sha256"
+    },
+    {
+      "file": "src/queryshield/evaluation/source_retrieval.py",
+      "literal": "w05-retrieval-evaluation-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "schema_version must equal the frozen file"
+    },
+    {
+      "file": "src/queryshield/evaluation/source_retrieval.py",
+      "literal": "w05-retrieval-gold-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "schema_version of the gold file"
+    },
+    {
+      "file": "src/queryshield/evaluation/profile_budgets.py",
+      "literal": "w05-execution-profile-budgets-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "schema_version must equal the frozen file"
+    },
+    {
+      "file": "src/queryshield/evaluation/holdout_dataset.py",
+      "literal": "w05-holdout-payload-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "schema_version inside the sealed payload"
+    },
+    {
+      "file": "src/queryshield/evaluation/holdout_dataset.py",
+      "literal": "w05-sealed-case-manifest-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "schema_version inside the sealed payload"
+    },
+    {
+      "file": "src/queryshield/evaluation/sealed_holdout.py",
+      "literal": "w05-sealed-case-manifest-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "schema_version in the sealed metadata"
+    },
+    {
+      "file": "src/queryshield/evaluation/comparison.py",
+      "literal": "w05-b0-b1-comparison-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "comparison_version in hashed shared configuration"
+    },
+    {
+      "file": "src/queryshield/evaluation/comparison.py",
+      "literal": "w05-b0-single-pass-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "prompt_version in the B0 profile record"
+    },
+    {
+      "file": "src/queryshield/evaluation/comparison.py",
+      "literal": "\"W04RunService\"",
+      "count": 1,
+      "class": "B",
+      "reason": "class name stored as a value in the hashed security boundary"
+    },
+    {
+      "file": "src/queryshield/evaluation/profile_runner.py",
+      "literal": "w05-b0-b1-comparison-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "comparison_version in the comparison record"
+    },
+    {
+      "file": "src/queryshield/evaluation/report.py",
+      "literal": "w05-comparison-report-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "report_schema"
+    },
+    {
+      "file": "src/queryshield/evaluation/stateful_replay.py",
+      "literal": "f\"w05-{profile.lower()}-{uuid4().hex}\"",
+      "count": 1,
+      "class": "B",
+      "reason": "profile_run_id in the raw record"
+    },
+    {
+      "file": "src/queryshield/evaluation/stateful_product.py",
+      "literal": "w05-state-case-script",
+      "count": 2,
+      "class": "B",
+      "reason": "provider and model names in model-call records"
+    },
+    {
+      "file": "src/queryshield/evaluation/stateful_product.py",
+      "literal": "w05-single-repair-invalid-sql-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "fault_injection.id in the SQL record"
+    },
+    {
+      "file": "src/queryshield/evaluation/stateful_product.py",
+      "literal": "W05EvaluatorFaultInjection",
+      "count": 1,
+      "class": "B",
+      "reason": "error_type value in the SQL record"
+    },
+    {
+      "file": "src/queryshield/evaluation/stateful_product.py",
+      "literal": "controlled W05 evaluator fault injected",
+      "count": 1,
+      "class": "A",
+      "reason": "error text returned to the model in the repair turn"
+    },
+    {
+      "file": "src/queryshield/evaluation/stateful_product.py",
+      "literal": "\"W05 state case\"",
+      "count": 2,
+      "class": "A",
+      "reason": "question text of a case without messages"
+    },
+    {
+      "file": "*",
+      "literal": "W03-A04",
+      "count": 2,
+      "class": "C",
+      "reason": "asset id in the upstream register"
+    },
+    {
+      "file": "*",
+      "literal": "W04-A05",
+      "count": 6,
+      "class": "C",
+      "reason": "asset id in the upstream register"
+    },
+    {
+      "file": "*",
+      "literal": "W04-TASKS",
+      "count": 3,
+      "class": "C",
+      "reason": "register entry W04-TASKS and W04-TASKS.snapshot.md (accepted W04 record)"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "\"W03\": \"1309",
+      "count": 1,
+      "class": "C",
+      "reason": "upstream record label (register key upstream_records.W03)"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "\"W04\": \"d784",
+      "count": 1,
+      "class": "C",
+      "reason": "upstream record label (register key upstream_records.W04)"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "\"W03\": Path(",
+      "count": 1,
+      "class": "C",
+      "reason": "upstream record label"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "\"W04\": Path(",
+      "count": 1,
+      "class": "C",
+      "reason": "upstream record label"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "[\"W03\"]",
+      "count": 2,
+      "class": "C",
+      "reason": "upstream record label"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "[\"W04\"]",
+      "count": 2,
+      "class": "C",
+      "reason": "upstream record label"
+    },
+    {
+      "file": "scripts/check_agent_fs.py",
+      "literal": "the single B2a repair",
+      "count": 1,
+      "class": "B",
+      "reason": "usage_boundary text in the FS02 evidence record"
+    },
+    {
+      "file": "scripts/check_agent_t06.py",
+      "literal": "W02 GuardedQueryExecutor plus W03 qs-facts-v1 ResultEvidence binding",
+      "count": 1,
+      "class": "B",
+      "reason": "trusted_facts text in the T06 evidence record"
+    },
+    {
+      "file": "scripts/check_agent_t06.py",
+      "literal": "W03 context-v1 keeps retrieval and tool receipts outside system",
+      "count": 1,
+      "class": "B",
+      "reason": "context_boundary text in the T06 evidence record (same object as trusted_facts)"
+    },
+    {
+      "file": "migrations/002_rls.sql",
+      "literal": "W04 server-bound tenant context; guarded SQL also injects tenant predicates",
+      "count": 3,
+      "class": "B",
+      "reason": "COMMENT ON POLICY text written into the database"
+    },
+    {
+      "file": "tests/test_stateful_replay.py",
+      "literal": "W05EvaluatorFaultInjection",
+      "count": 3,
+      "class": "B",
+      "reason": "error_type value in the SQL record (see stateful_product.py)"
+    },
+    {
+      "file": "tests/test_native_runtime.py",
+      "literal": "NativeToolCall(\"w05\"",
+      "count": 1,
+      "class": "B",
+      "reason": "tool call id of the test double"
+    },
+    {
+      "file": "tests/test_stateful_replay.py",
+      "literal": "You are the W05 single-pass baseline",
+      "count": 2,
+      "class": "A",
+      "reason": "B0 system prompt marker used as test input (Fake model recognises it)"
+    },
+    {
+      "file": "evals/development/execution-profiles-v1.json",
+      "literal": "w05-execution-profile-budgets-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: frozen data (schema_version or family_id); evals and fixtures are not edited (ticket decision 2)"
+    },
+    {
+      "file": "evals/development/retrieval-cases-v1.json",
+      "literal": "w05-retrieval-evaluation-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: frozen data (schema_version or family_id); evals and fixtures are not edited (ticket decision 2)"
+    },
+    {
+      "file": "evals/development/retrieval-gold-v1.json",
+      "literal": "w05-retrieval-gold-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: frozen data (schema_version or family_id); evals and fixtures are not edited (ticket decision 2)"
+    },
+    {
+      "file": "evals/development/state-cases-supplement-v1.json",
+      "literal": "b2a-queries-ambiguous-sales",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: frozen data (schema_version or family_id); evals and fixtures are not edited (ticket decision 2)"
+    },
+    {
+      "file": "evals/development/state-cases-supplement-v1.json",
+      "literal": "b2a-queries-net-fen",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: frozen data (schema_version or family_id); evals and fixtures are not edited (ticket decision 2)"
+    },
+    {
+      "file": "evals/development/state-cases-supplement-v1.json",
+      "literal": "b2a-rephrased-dual-metric",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: frozen data (schema_version or family_id); evals and fixtures are not edited (ticket decision 2)"
+    },
+    {
+      "file": "evals/development/state-cases-supplement-v1.json",
+      "literal": "w05-state-evaluation-supplement-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: frozen data (schema_version or family_id); evals and fixtures are not edited (ticket decision 2)"
+    },
+    {
+      "file": "evals/development/state-cases-v1.json",
+      "literal": "w05-state-evaluation-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: frozen data (schema_version or family_id); evals and fixtures are not edited (ticket decision 2)"
+    },
+    {
+      "file": "evals/development/state-cases-v2.json",
+      "literal": "w05-state-evaluation-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: frozen data (schema_version or family_id); evals and fixtures are not edited (ticket decision 2)"
+    },
+    {
+      "file": "evals/development/state-cases-v3.json",
+      "literal": "w05-state-evaluation-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: frozen data (schema_version or family_id); evals and fixtures are not edited (ticket decision 2)"
+    },
+    {
+      "file": "evals/development/state-cases-v4.json",
+      "literal": "w05-state-evaluation-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: frozen data (schema_version or family_id); evals and fixtures are not edited (ticket decision 2)"
+    },
+    {
+      "file": "scripts/check.ps1",
+      "literal": "fake-model-real-postgres-w04-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: capability or profile identifier written into the check summary (record value)"
+    },
+    {
+      "file": "scripts/check.ps1",
+      "literal": "fake-model-real-postgres-w05-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: capability or profile identifier written into the check summary (record value)"
+    },
+    {
+      "file": "scripts/check.ps1",
+      "literal": "real-mode-db-only-w04-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: capability or profile identifier written into the check summary (record value)"
+    },
+    {
+      "file": "scripts/check.ps1",
+      "literal": "real-model-real-postgres-w05-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: capability or profile identifier written into the check summary (record value)"
+    },
+    {
+      "file": "scripts/check.ps1",
+      "literal": "w04-approval-recovery-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: capability or profile identifier written into the check summary (record value)"
+    },
+    {
+      "file": "scripts/check.ps1",
+      "literal": "w04-confirmed-preferences-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: capability or profile identifier written into the check summary (record value)"
+    },
+    {
+      "file": "scripts/check.ps1",
+      "literal": "w04-context-restore-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: capability or profile identifier written into the check summary (record value)"
+    },
+    {
+      "file": "scripts/check.ps1",
+      "literal": "w04-events-sse-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: capability or profile identifier written into the check summary (record value)"
+    },
+    {
+      "file": "scripts/check.ps1",
+      "literal": "w04-identity-rbac-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: capability or profile identifier written into the check summary (record value)"
+    },
+    {
+      "file": "scripts/check.ps1",
+      "literal": "w04-knowledge-snapshot-acl-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: name of a row the check inserts or probes in the database (written value)"
+    },
+    {
+      "file": "scripts/check.ps1",
+      "literal": "w04-parallel-durable-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: capability or profile identifier written into the check summary (record value)"
+    },
+    {
+      "file": "scripts/check.ps1",
+      "literal": "w04-postgres-rls-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: capability or profile identifier written into the check summary (record value)"
+    },
+    {
+      "file": "scripts/check.ps1",
+      "literal": "w05-b0-b1-shared-boundary-regression-controls-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: capability or profile identifier written into the check summary (record value)"
+    },
+    {
+      "file": "scripts/check.ps1",
+      "literal": "w05-empty-run-report-contract-controls-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: capability or profile identifier written into the check summary (record value)"
+    },
+    {
+      "file": "scripts/check.ps1",
+      "literal": "w05-rerank-adapter-and-fake-protocol-controls-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: capability or profile identifier written into the check summary (record value)"
+    },
+    {
+      "file": "scripts/check.ps1",
+      "literal": "w05-state-case-loader-oracle-controls-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: name of a row the check inserts or probes in the database (written value)"
+    },
+    {
+      "file": "scripts/check.ps1",
+      "literal": "w05-versioned-retrieval-development-eval-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: capability or profile identifier written into the check summary (record value)"
+    },
+    {
+      "file": "scripts/check_agent_en02.py",
+      "literal": "ingest-w03-en02-dimension",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_agent_en02.py",
+      "literal": "ingest-w03-en02-fake",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_agent_en02.py",
+      "literal": "ingest-w03-en02-real",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_agent_en02.py",
+      "literal": "ingest-w03-en02-revision",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_agent_en03.py",
+      "literal": "ingest-w03-en03-{args.mode}",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_agent_en04.py",
+      "literal": "ingest-w03-en04-fake",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_agent_en04.py",
+      "literal": "queryshield-w03-en04-fake-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_agent_fs.py",
+      "literal": "provider-request-w03-fs-{index",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_agent_fs.py",
+      "literal": "provider-w03-fs-{index",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_agent_fs.py",
+      "literal": "run-w03-fs01-{label}",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_agent_fs.py",
+      "literal": "run-w03-fs02-foreign-source",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_agent_fs.py",
+      "literal": "run-w03-fs02-{label}",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_agent_fs.py",
+      "literal": "scripted-w03-fs",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_agent_fs.py",
+      "literal": "scripted-w03-fs-model",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_commerce.py",
+      "literal": "w05-db01-checker",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_commerce.py",
+      "literal": "w05-db01-injection-a",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_commerce.py",
+      "literal": "w05-db01-{case_id}-{tenant_id.lower",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_db.py",
+      "literal": "__w01_permission_probe_customer__",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: name of a row the check inserts or probes in the database (written value)"
+    },
+    {
+      "file": "scripts/check_db.py",
+      "literal": "__w01_permission_probe_order__",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: name of a row the check inserts or probes in the database (written value)"
+    },
+    {
+      "file": "scripts/check_db.py",
+      "literal": "__w01_permission_probe_refund__",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: name of a row the check inserts or probes in the database (written value)"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "W05-holdout.enc",
+      "count": 1,
+      "class": "C",
+      "reason": "seeded: name of a past record or of local evidence outside the repository (ticket decision 2)"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "W05-holdout.meta.json",
+      "count": 1,
+      "class": "C",
+      "reason": "seeded: name of a past record or of local evidence outside the repository (ticket decision 2)"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "W05_冻结评测与失败归因",
+      "count": 1,
+      "class": "C",
+      "reason": "seeded: name of a past record or of local evidence outside the repository (ticket decision 2)"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "control/evidence/upstream/W03-accepted-source-manifest.txt",
+      "count": 1,
+      "class": "C",
+      "reason": "seeded: name of a past record or of local evidence outside the repository (ticket decision 2)"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "control/evidence/upstream/W04-accepted-source-manifest.txt",
+      "count": 1,
+      "class": "C",
+      "reason": "seeded: name of a past record or of local evidence outside the repository (ticket decision 2)"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "principal-W05-retrieval",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "qs-w03-accepted-20260922",
+      "count": 1,
+      "class": "C",
+      "reason": "seeded: name of an acceptance git tag; tags are never renamed (ticket decision 2)"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "qs-w04-accepted-20260923",
+      "count": 3,
+      "class": "C",
+      "reason": "seeded: name of an acceptance git tag; tags are never renamed (ticket decision 2)"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "result-w05-rt03",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "tool-w05-rt03",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w03_manifest_path",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w03_manifest_sha256",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w04_accepted_commit",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w04_accepted_tag",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w04_manifest_path",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w04_manifest_sha256",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-ablation-fake",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-ablation-plan-v1",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-call-{uuid4",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-dangerous-write-probe",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: name of a row the check inserts or probes in the database (written value)"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-en03-rag-{mode}-{uuid4",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-fake-{scenario}",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-real-r05-{name}",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-request-{uuid4",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-requester-A",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-retrieval-gold-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-rt01-budget",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-rt01-failed-branch",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-rt01-postgres",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-rt01-recover-submitted",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-rt01-recover-unknown",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-rt01-success-2",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-rt01-success-3",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-rt01-tenant",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-rt02-call-{strategy}-{trial}",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-rt02-request-{strategy}-{trial}",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-rt02-{strategy}-{trial}",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-rt03-context",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-safe-gross-probe",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: name of a row the check inserts or probes in the database (written value)"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-scripted-regression",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-scripted-regression-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-state-case-script",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-state-case-script-v2",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-token-overlap-fake-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-uncertain-group",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-unrelated-run",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-{config_id}-{case.family_id}",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_state.py",
+      "literal": "W04-candidate-20260923",
+      "count": 1,
+      "class": "C",
+      "reason": "seeded: name of a past record or of local evidence outside the repository (ticket decision 2)"
+    },
+    {
+      "file": "scripts/check_state.py",
+      "literal": "W04_租户审批与恢复",
+      "count": 1,
+      "class": "C",
+      "reason": "seeded: name of a past record or of local evidence outside the repository (ticket decision 2)"
+    },
+    {
+      "file": "scripts/check_state.py",
+      "literal": "__w04_acl_{suffix}",
+      "count": 3,
+      "class": "B",
+      "reason": "seeded: name of a row the check inserts or probes in the database (written value)"
+    },
+    {
+      "file": "scripts/check_state.py",
+      "literal": "catalog-v1-w04-update",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_state.py",
+      "literal": "qs-w03-accepted-20260922",
+      "count": 1,
+      "class": "C",
+      "reason": "seeded: name of an acceptance git tag; tags are never renamed (ticket decision 2)"
+    },
+    {
+      "file": "scripts/check_state.py",
+      "literal": "w04-check-a-approver",
+      "count": 4,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_state.py",
+      "literal": "w04-check-a-requester",
+      "count": 18,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_state.py",
+      "literal": "w04-check-b-approver",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/check_state.py",
+      "literal": "w04-check-b-requester",
+      "count": 4,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "scripts/proposal_identity_bypass_probe.py",
+      "literal": "w02-t06-offline",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: run, principal, provider or model id of a check; sent to the model or written into its evidence record"
+    },
+    {
+      "file": "tests/test_answer_contract.py",
+      "literal": "run-b3c2",
+      "count": 10,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_answer_contract.py",
+      "literal": "run-b3c2-b0",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_answer_contract.py",
+      "literal": "run-b3c2-b0-scalar",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_answer_contract.py",
+      "literal": "run-b3c2-checkpoint",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_answer_contract.py",
+      "literal": "run-b3c2-hint",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_answer_contract.py",
+      "literal": "run-b3c2-prepared",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_answer_contract.py",
+      "literal": "run-b3c2-r1-events",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_answer_contract.py",
+      "literal": "run-b3c2-r2",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_answer_contract.py",
+      "literal": "run-b3c2-v3",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_answer_contract.py",
+      "literal": "run-b3c2-v4-missing",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_answer_grounding.py",
+      "literal": "run-b2b-query-then-plain-answer",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_answer_grounding.py",
+      "literal": "run-b2b-query-verified",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_answer_grounding.py",
+      "literal": "run-b2b-ungrounded",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_approval_api_pins.py",
+      "literal": "queryshield-w03-hybrid-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_ask_review.py",
+      "literal": "run-b3c1-contradiction",
+      "count": 3,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_ask_review.py",
+      "literal": "run-b3c1-contradiction-repair",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_ask_review.py",
+      "literal": "run-b3c1-contradiction-twice",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_ask_review.py",
+      "literal": "run-b3c1-id-on-time",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_ask_review.py",
+      "literal": "run-b3c1-o4-ask",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_ask_review.py",
+      "literal": "run-b3c1-o4-declare",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_ask_review.py",
+      "literal": "run-b3c1-o5",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_ask_review.py",
+      "literal": "run-b3c1-parallel",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_ask_review.py",
+      "literal": "run-b3c1-r1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_ask_review.py",
+      "literal": "run-b3c1-shared",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_check_all.py",
+      "literal": "qs-w03",
+      "count": 8,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_check_all.py",
+      "literal": "qs-w03-accepted-20260922",
+      "count": 7,
+      "class": "C",
+      "reason": "seeded: name of an acceptance git tag; tags are never renamed (ticket decision 2)"
+    },
+    {
+      "file": "tests/test_check_all.py",
+      "literal": "qs-w04-accepted-20260923",
+      "count": 5,
+      "class": "C",
+      "reason": "seeded: name of an acceptance git tag; tags are never renamed (ticket decision 2)"
+    },
+    {
+      "file": "tests/test_check_all.py",
+      "literal": "qs-w05",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_check_all.py",
+      "literal": "refs/tags/qs-w03-accepted-20260922",
+      "count": 1,
+      "class": "C",
+      "reason": "seeded: name of an acceptance git tag; tags are never renamed (ticket decision 2)"
+    },
+    {
+      "file": "tests/test_check_all.py",
+      "literal": "refs/tags/qs-w04-accepted-20260923",
+      "count": 1,
+      "class": "C",
+      "reason": "seeded: name of an acceptance git tag; tags are never renamed (ticket decision 2)"
+    },
+    {
+      "file": "tests/test_clarification.py",
+      "literal": "b3b-scripted",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_clarification.py",
+      "literal": "b3b-scripted-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_clarification.py",
+      "literal": "run-b3b",
+      "count": 14,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_clarification.py",
+      "literal": "run-b3b-b0",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_clarification.py",
+      "literal": "run-b3b-bounce",
+      "count": 4,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_clarification.py",
+      "literal": "run-b3b-bounce-repair",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_clarification.py",
+      "literal": "run-b3b-bounce-resume",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_clarification.py",
+      "literal": "run-b3b-bounce-twice",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_clarification.py",
+      "literal": "run-b3b-echo",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_clarification.py",
+      "literal": "run-b3b-empty",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_clarification.py",
+      "literal": "run-b3b-fields",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_clarification.py",
+      "literal": "run-b3b-id",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_clarification.py",
+      "literal": "run-b3b-month",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_clarification.py",
+      "literal": "run-b3b-normalized",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_clarification.py",
+      "literal": "run-b3b-sales",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_clarification.py",
+      "literal": "run-b3b-v2",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_commerce_preflight.py",
+      "literal": "w05-db01-checker",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_commerce_preflight.py",
+      "literal": "w05-db01-september-a",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_demo_setting.py",
+      "literal": "w05-hash-feature-fake-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_demo_setting.py",
+      "literal": "w05-retrieval-fake",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_docs.py",
+      "literal": "w03-",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_docs.py",
+      "literal": "w03-a04-versioned-runtime.md",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_eval_script_regressions.py",
+      "literal": "w04_accepted_commit",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_eval_script_regressions.py",
+      "literal": "w05-b1-regression",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_eval_script_regressions.py",
+      "literal": "w05-b1-single-repair-regression",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_eval_script_regressions.py",
+      "literal": "w05-server-prefetch-regression",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_evaluation.py",
+      "literal": "w05-development-erratum-r3",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_evaluation.py",
+      "literal": "w05-sealed-case-manifest-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_holdout_dataset.py",
+      "literal": "w05-holdout-payload-v1",
+      "count": 1,
+      "class": "C",
+      "reason": "seeded: name of a past record or of local evidence outside the repository (ticket decision 2)"
+    },
+    {
+      "file": "tests/test_holdout_dataset.py",
+      "literal": "w05-retrieval-evaluation-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_holdout_dataset.py",
+      "literal": "w05-retrieval-gold-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_holdout_dataset.py",
+      "literal": "w05-sealed-case-manifest-v1",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_http_queries.py",
+      "literal": "b2b-a-approver",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_http_queries.py",
+      "literal": "b2b-a-requester",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_http_queries.py",
+      "literal": "b2b-b-approver",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_http_queries.py",
+      "literal": "b2b-b-requester",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_knowledge_mcp_pins.py",
+      "literal": "w05-hash-feature-fake-v1",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_knowledge_mcp_pins.py",
+      "literal": "w05-hash-feature-v1",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_knowledge_mcp_pins.py",
+      "literal": "w05-retrieval-fake",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_metric_intent.py",
+      "literal": "b2a-scripted",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_metric_intent.py",
+      "literal": "b2a-scripted-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_metric_intent.py",
+      "literal": "run-b2a",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_metric_intent.py",
+      "literal": "run-b2a-example-{index}",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_metric_intent.py",
+      "literal": "w05-b1-",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_metric_intent.py",
+      "literal": "w05-en03-rag-{mode}-{32hex}",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_metric_intent.py",
+      "literal": "w05-en03-rag-{mode}-{hex32}-state-case-gross-total-fen",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_metric_intent.py",
+      "literal": "w05-requester-A",
+      "count": 3,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_metric_intent.py",
+      "literal": "w05-{profile}-{32hex}-state-{alias}",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_metric_intent.py",
+      "literal": "w05-{profile}-{hex32}-state-{alias}",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_native_runtime.py",
+      "literal": "run-c1-w05-{protocol}",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_parallel_ablation.py",
+      "literal": "w05-parallel-cap-{max_active}",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_parse_relaxation.py",
+      "literal": "run-b2b-empty-metrics",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_profile_runner.py",
+      "literal": "run-w05-foreign-tenant",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_profile_runner.py",
+      "literal": "run-w05-owned-fact",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_profile_runner.py",
+      "literal": "run-w05-pair",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_profile_runner.py",
+      "literal": "w05-b0-alias-negative",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_profile_runner.py",
+      "literal": "w05-b0-multi-metric",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_profile_runner.py",
+      "literal": "w05-scripted",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_profile_runner.py",
+      "literal": "w05-scripted-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_projection_checks.py",
+      "literal": "run-b3b-o5",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_proposal_sensitive.py",
+      "literal": "b4d-approver-token",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_proposal_sensitive.py",
+      "literal": "b4d-requester-token",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_public_layout.py",
+      "literal": "run_w04_rework_secure.ps1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_scalar_facts.py",
+      "literal": "b3e-scripted",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_scalar_facts.py",
+      "literal": "b3e-scripted-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_scalar_facts.py",
+      "literal": "run-b3e",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_scalar_facts.py",
+      "literal": "run-b3e-demo",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_state_checks.py",
+      "literal": "qs-w03-accepted-20260922",
+      "count": 1,
+      "class": "C",
+      "reason": "seeded: name of an acceptance git tag; tags are never renamed (ticket decision 2)"
+    },
+    {
+      "file": "tests/test_stateful_replay.py",
+      "literal": "run-w05-customer-rowset",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_stateful_replay.py",
+      "literal": "run-w05-semantic-query-shape",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_stateful_replay.py",
+      "literal": "synthetic-b2a-{profile.lower",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_stateful_replay.py",
+      "literal": "w05-unit-run",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_upstream_assets.py",
+      "literal": "W03-accepted-source-manifest.txt",
+      "count": 2,
+      "class": "C",
+      "reason": "seeded: name of a past record or of local evidence outside the repository (ticket decision 2)"
+    },
+    {
+      "file": "tests/test_upstream_assets.py",
+      "literal": "W04-accepted-source-manifest.txt",
+      "count": 2,
+      "class": "C",
+      "reason": "seeded: name of a past record or of local evidence outside the repository (ticket decision 2)"
+    },
+    {
+      "file": "tests/test_upstream_assets.py",
+      "literal": "docs/w03-a04-versioned-runtime.md",
+      "count": 2,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "tests/test_upstream_assets.py",
+      "literal": "qs-w03-accepted-20260922",
+      "count": 4,
+      "class": "C",
+      "reason": "seeded: name of an acceptance git tag; tags are never renamed (ticket decision 2)"
+    },
+    {
+      "file": "tests/test_upstream_assets.py",
+      "literal": "qs-w04-accepted-20260923",
+      "count": 1,
+      "class": "C",
+      "reason": "seeded: name of an acceptance git tag; tags are never renamed (ticket decision 2)"
+    },
+    {
+      "file": "tests/test_upstream_assets.py",
+      "literal": "queryshield/docs/w03-a04-versioned-runtime.md",
+      "count": 1,
+      "class": "B",
+      "reason": "seeded: value of a test (run, token, principal, provider or file id); data values stay (controller answer 4)"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "route actions use isolated W04RunService/StateStore",
+      "count": 1,
+      "class": "B",
+      "reason": "part of shared_config, hashed into shared_runtime_configuration_sha256 of the replay metadata"
+    },
+    {
+      "file": "scripts/check_eval.py",
+      "literal": "w05-stateful-product-replay-v1",
+      "count": 1,
+      "class": "B",
+      "reason": "evaluation_version written into the replay metadata"
+    }
+  ]
+}

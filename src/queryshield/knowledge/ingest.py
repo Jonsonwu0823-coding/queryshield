@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import tempfile
+
+from queryshield.catalog.catalog import ALLOWED_ROLES
 
 
 KNOWLEDGE_VERSION = "knowledge-v1"
@@ -19,7 +21,6 @@ MAX_CHUNKS = 200
 MAX_CHUNK_CHARS = 800
 CHUNK_OVERLAP_CHARS = 100
 ALLOWED_SUFFIXES = frozenset({".md", ".txt"})
-ALLOWED_ROLES = frozenset({"requester", "approver"})
 ALLOWED_TENANT_SCOPES = frozenset({"global", "A", "B"})
 _SOURCE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9.-]+$")
 
@@ -120,7 +121,7 @@ def _duplicate_check(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def _canonical_bytes(value: object) -> bytes:
+def canonical_bytes(value: object) -> bytes:
     return json.dumps(
         value,
         ensure_ascii=False,
@@ -129,8 +130,50 @@ def _canonical_bytes(value: object) -> bytes:
     ).encode("utf-8")
 
 
-def _sha256(value: bytes) -> str:
+def sha256_hex(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def with_identity(snapshot: KnowledgeSnapshot) -> KnowledgeSnapshot:
+    """The snapshot with its manifest hash and id computed from its other fields.
+
+    The id is the knowledge version and the first 16 hex digits of the manifest hash, so it
+    changes with the content, the catalog version, the embedding revision and the index hash.
+    """
+
+    manifest = {
+        "knowledge_version": snapshot.knowledge_version,
+        "catalog_version": snapshot.catalog_version,
+        "chunker_version": snapshot.chunker_version,
+        "embedding_model_revision": snapshot.embedding_model_revision,
+        "embedding_dimensions": snapshot.embedding_dimensions,
+        "index_hash": snapshot.index_hash,
+        "sources": [item.as_dict() for item in snapshot.source_records],
+        "chunks": [item.as_dict() for item in snapshot.chunk_records],
+    }
+    manifest_sha256 = sha256_hex(canonical_bytes(manifest))
+    return replace(
+        snapshot,
+        snapshot_id=f"{snapshot.knowledge_version}-{manifest_sha256[:16]}",
+        manifest_sha256=manifest_sha256,
+    )
+
+
+def atomic_write_text(destination: Path, text: str, *, temporary_prefix: str) -> None:
+    """Write beside the destination and replace it, so a failure leaves the old file and no temporary one."""
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=temporary_prefix, suffix=".tmp", dir=destination.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+        os.replace(temporary_name, destination)
+    except Exception:
+        try:
+            Path(temporary_name).unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def _string(value: object, *, path: str) -> str:
@@ -155,8 +198,6 @@ def _mapping(value: object, *, path: str) -> Mapping[str, object]:
 
 
 def _resolve_inside(root: Path, relative_path: str, *, path: str) -> Path:
-    if type(relative_path) is not str or not relative_path.strip():
-        raise KnowledgeImportError(f"{path} must be a relative path")
     candidate_path = Path(relative_path)
     if candidate_path.is_absolute() or candidate_path.drive:
         raise KnowledgeImportError(f"{path} must not be absolute")
@@ -172,7 +213,7 @@ def _resolve_inside(root: Path, relative_path: str, *, path: str) -> Path:
     return candidate
 
 
-def _load_registry(root: Path, registry_path: Path) -> tuple[SourceSpec, ...]:
+def _registry_sources(root: Path, registry_path: Path) -> list[object]:
     try:
         registry = registry_path.resolve(strict=True)
         registry.relative_to(root)
@@ -182,22 +223,53 @@ def _load_registry(root: Path, registry_path: Path) -> tuple[SourceSpec, ...]:
         document = json.loads(
             registry.read_text(encoding="utf-8"), object_pairs_hook=_duplicate_check
         )
-    except KnowledgeImportError:
-        raise
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise KnowledgeImportError(f"cannot read source registry: {registry}") from exc
 
-    root_document = _mapping(document, path="registry")
-    raw_sources = root_document.get("sources")
+    raw_sources = _mapping(document, path="registry").get("sources")
     if type(raw_sources) is not list or not raw_sources:
         raise KnowledgeImportError("registry.sources must be a non-empty list")
     if len(raw_sources) > MAX_FILES:
         raise KnowledgeImportError(f"registry contains more than {MAX_FILES} files")
+    return raw_sources
 
+
+def _acl_fields(source: Mapping[str, object], path: str) -> tuple[str, tuple[str, ...], str]:
+    tenant_scope = _string(source.get("tenant_scope"), path=f"{path}.tenant_scope")
+    if tenant_scope not in ALLOWED_TENANT_SCOPES:
+        raise KnowledgeImportError(f"{path}.tenant_scope is unsupported")
+    allowed_roles = _string_list(source.get("allowed_roles"), path=f"{path}.allowed_roles")
+    if not set(allowed_roles) <= ALLOWED_ROLES:
+        raise KnowledgeImportError(f"{path}.allowed_roles contains an unknown role")
+    status = _string(source.get("status"), path=f"{path}.status")
+    if status not in {"active", "deleted"}:
+        raise KnowledgeImportError(f"{path}.status must be active or deleted")
+    return tenant_scope, allowed_roles, status
+
+
+def _reject_unregistered_files(root: Path, registered_paths: set[str]) -> None:
+    discovered_paths: set[str] = set()
+    for file in root.rglob("*"):
+        if not file.is_file() or file.suffix.lower() not in ALLOWED_SUFFIXES:
+            continue
+        try:
+            discovered_paths.add(file.resolve(strict=True).relative_to(root).as_posix())
+        except (OSError, ValueError) as exc:
+            raise KnowledgeImportError(
+                f"knowledge file escapes the configured root: {file}"
+            ) from exc
+    unknown_paths = discovered_paths - registered_paths
+    if unknown_paths:
+        raise KnowledgeImportError(
+            f"unregistered knowledge files are not allowed: {sorted(unknown_paths)}"
+        )
+
+
+def _load_registry(root: Path, registry_path: Path) -> tuple[SourceSpec, ...]:
     specs: list[SourceSpec] = []
     seen_paths: set[str] = set()
     seen_versions: set[tuple[str, str]] = set()
-    for index, raw_source in enumerate(raw_sources):
+    for index, raw_source in enumerate(_registry_sources(root, registry_path)):
         path = f"registry.sources[{index}]"
         source = _mapping(raw_source, path=path)
         source_id = _string(source.get("source_id"), path=f"{path}.source_id")
@@ -213,15 +285,7 @@ def _load_registry(root: Path, registry_path: Path) -> tuple[SourceSpec, ...]:
         if (source_id, version) in seen_versions:
             raise KnowledgeImportError(f"duplicate source version: {source_id}/{version}")
         seen_versions.add((source_id, version))
-        tenant_scope = _string(source.get("tenant_scope"), path=f"{path}.tenant_scope")
-        if tenant_scope not in ALLOWED_TENANT_SCOPES:
-            raise KnowledgeImportError(f"{path}.tenant_scope is unsupported")
-        allowed_roles = _string_list(source.get("allowed_roles"), path=f"{path}.allowed_roles")
-        if not set(allowed_roles) <= ALLOWED_ROLES:
-            raise KnowledgeImportError(f"{path}.allowed_roles contains an unknown role")
-        status = _string(source.get("status"), path=f"{path}.status")
-        if status not in {"active", "deleted"}:
-            raise KnowledgeImportError(f"{path}.status must be active or deleted")
+        tenant_scope, allowed_roles, status = _acl_fields(source, path)
         updated_at = _string(source.get("updated_at"), path=f"{path}.updated_at")
         if not updated_at.endswith("Z"):
             raise KnowledgeImportError(f"{path}.updated_at must be UTC")
@@ -236,22 +300,7 @@ def _load_registry(root: Path, registry_path: Path) -> tuple[SourceSpec, ...]:
                 updated_at=updated_at,
             )
         )
-
-    discovered_paths: set[str] = set()
-    for file in root.rglob("*"):
-        if not file.is_file() or file.suffix.lower() not in ALLOWED_SUFFIXES:
-            continue
-        try:
-            discovered_paths.add(file.resolve(strict=True).relative_to(root).as_posix())
-        except (OSError, ValueError) as exc:
-            raise KnowledgeImportError(
-                f"knowledge file escapes the configured root: {file}"
-            ) from exc
-    unknown_paths = discovered_paths - seen_paths
-    if unknown_paths:
-        raise KnowledgeImportError(
-            f"unregistered knowledge files are not allowed: {sorted(unknown_paths)}"
-        )
+    _reject_unregistered_files(root, seen_paths)
     return tuple(sorted(specs, key=lambda item: (item.source_id, item.version)))
 
 
@@ -276,6 +325,35 @@ def _chunk_text(text: str) -> tuple[str, ...]:
     return tuple(chunks)
 
 
+def _read_source_text(root: Path, spec: SourceSpec) -> str:
+    raw_bytes = (root / spec.path).read_bytes()
+    if len(raw_bytes) > MAX_FILE_BYTES:
+        raise KnowledgeImportError(
+            f"{spec.path} exceeds the {MAX_FILE_BYTES}-byte file limit"
+        )
+    try:
+        text = _normalize_text(raw_bytes.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        raise KnowledgeImportError(f"{spec.path} is not valid UTF-8") from exc
+    if not text:
+        raise KnowledgeImportError(f"{spec.path} is empty")
+    return text
+
+
+def _chunk_records(spec: SourceSpec, text: str) -> list[ChunkRecord]:
+    return [
+        ChunkRecord(
+            chunk_id=f"{spec.source_id}@{spec.version}#{index:04d}",
+            source_id=spec.source_id,
+            source_version=spec.version,
+            text=chunk_text,
+            text_sha256=sha256_hex(chunk_text.encode("utf-8")),
+            chunker_version=CHUNKER_VERSION,
+        )
+        for index, chunk_text in enumerate(_chunk_text(text))
+    ]
+
+
 def build_snapshot(
     source_root: str | Path,
     registry_path: str | Path,
@@ -283,6 +361,8 @@ def build_snapshot(
     catalog_version: str,
     knowledge_version: str = KNOWLEDGE_VERSION,
 ) -> KnowledgeSnapshot:
+    """Build a deterministic snapshot; no model or database call is made."""
+
     root = Path(source_root).resolve(strict=True)
     if not root.is_dir():
         raise KnowledgeImportError("source_root must be a directory")
@@ -290,102 +370,49 @@ def build_snapshot(
     if not registry.is_absolute():
         rooted_registry = (root / registry).resolve()
         registry = rooted_registry if rooted_registry.exists() else registry.resolve()
-    specs = _load_registry(root, registry)
 
     source_records: list[SourceRecord] = []
     chunk_records: list[ChunkRecord] = []
-    for spec in specs:
-        source_path = root / spec.path
-        raw_bytes = source_path.read_bytes()
-        if len(raw_bytes) > MAX_FILE_BYTES:
-            raise KnowledgeImportError(
-                f"{spec.path} exceeds the {MAX_FILE_BYTES}-byte file limit"
-            )
-        try:
-            text = _normalize_text(raw_bytes.decode("utf-8"))
-        except UnicodeDecodeError as exc:
-            raise KnowledgeImportError(f"{spec.path} is not valid UTF-8") from exc
-        if not text:
-            raise KnowledgeImportError(f"{spec.path} is empty")
-
+    for spec in _load_registry(root, registry):
+        text = _read_source_text(root, spec)
         source_records.append(
             SourceRecord(
                 source_id=spec.source_id,
                 path=spec.path,
                 version=spec.version,
-                content_sha256=_sha256(text.encode("utf-8")),
+                content_sha256=sha256_hex(text.encode("utf-8")),
                 tenant_scope=spec.tenant_scope,
                 allowed_roles=spec.allowed_roles,
                 status=spec.status,
                 updated_at=spec.updated_at,
             )
         )
-        if spec.status == "deleted":
-            continue
-        for index, chunk_text in enumerate(_chunk_text(text)):
-            chunk_records.append(
-                ChunkRecord(
-                    chunk_id=f"{spec.source_id}@{spec.version}#{index:04d}",
-                    source_id=spec.source_id,
-                    source_version=spec.version,
-                    text=chunk_text,
-                    text_sha256=_sha256(chunk_text.encode("utf-8")),
-                    chunker_version=CHUNKER_VERSION,
-                )
-            )
+        if spec.status != "deleted":
+            chunk_records.extend(_chunk_records(spec, text))
 
     if len(chunk_records) > MAX_CHUNKS:
         raise KnowledgeImportError(f"snapshot contains more than {MAX_CHUNKS} chunks")
-    source_records_tuple = tuple(source_records)
-    chunk_records_tuple = tuple(chunk_records)
-    index_hash = _sha256(
-        _canonical_bytes(
-            {
-                "chunker_version": CHUNKER_VERSION,
-                "chunks": [item.as_dict() for item in chunk_records_tuple],
-            }
+    chunks = tuple(chunk_records)
+    index_hash = sha256_hex(
+        canonical_bytes({"chunker_version": CHUNKER_VERSION, "chunks": [item.as_dict() for item in chunks]})
+    )
+    return with_identity(
+        KnowledgeSnapshot(
+            snapshot_id="",
+            knowledge_version=knowledge_version,
+            catalog_version=catalog_version,
+            chunker_version=CHUNKER_VERSION,
+            embedding_model_revision=None,
+            embedding_dimensions=None,
+            index_hash=index_hash,
+            manifest_sha256="",
+            source_records=tuple(source_records),
+            chunk_records=chunks,
         )
     )
-    manifest = {
-        "knowledge_version": knowledge_version,
-        "catalog_version": catalog_version,
-        "chunker_version": CHUNKER_VERSION,
-        "embedding_model_revision": None,
-        "embedding_dimensions": None,
-        "index_hash": index_hash,
-        "sources": [item.as_dict() for item in source_records_tuple],
-        "chunks": [item.as_dict() for item in chunk_records_tuple],
-    }
-    manifest_sha256 = _sha256(_canonical_bytes(manifest))
-    snapshot_id = f"{knowledge_version}-{manifest_sha256[:16]}"
-    return KnowledgeSnapshot(
-        snapshot_id=snapshot_id,
-        knowledge_version=knowledge_version,
-        catalog_version=catalog_version,
-        chunker_version=CHUNKER_VERSION,
-        embedding_model_revision=None,
-        embedding_dimensions=None,
-        index_hash=index_hash,
-        manifest_sha256=manifest_sha256,
-        source_records=source_records_tuple,
-        chunk_records=chunk_records_tuple,
-    )
 
 
-def import_knowledge(
-    source_root: str | Path,
-    registry_path: str | Path,
-    *,
-    catalog_version: str,
-    knowledge_version: str = KNOWLEDGE_VERSION,
-) -> KnowledgeSnapshot:
-    """Build a deterministic snapshot; no model or database call is made."""
-    return build_snapshot(
-        source_root,
-        registry_path,
-        catalog_version=catalog_version,
-        knowledge_version=knowledge_version,
-    )
+import_knowledge = build_snapshot
 
 
 def load_snapshot(path: str | Path) -> KnowledgeSnapshot:
@@ -444,23 +471,12 @@ def load_snapshot(path: str | Path) -> KnowledgeSnapshot:
 
 
 def write_snapshot(snapshot: KnowledgeSnapshot, output_dir: str | Path) -> Path:
-    destination_dir = Path(output_dir)
-    destination_dir.mkdir(parents=True, exist_ok=True)
-    destination = destination_dir / f"{snapshot.snapshot_id}.json"
-    payload = json.dumps(snapshot.as_dict(), ensure_ascii=False, indent=2) + "\n"
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=".knowledge-snapshot-", suffix=".tmp", dir=destination_dir
+    destination = Path(output_dir) / f"{snapshot.snapshot_id}.json"
+    atomic_write_text(
+        destination,
+        json.dumps(snapshot.as_dict(), ensure_ascii=False, indent=2) + "\n",
+        temporary_prefix=".knowledge-snapshot-",
     )
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(payload)
-        os.replace(temporary_name, destination)
-    except Exception:
-        try:
-            Path(temporary_name).unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
     return destination
 
 

@@ -1,4 +1,4 @@
-"""Verify W05 holdout commitments without opening or decrypting the dataset."""
+"""Verify holdout commitments without opening or decrypting the dataset."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import json
 from pathlib import Path
 import re
 
-from queryshield.evaluation.state_cases import W05StateCase
-from queryshield.evaluation.w05_retrieval import W05RetrievalCase
+from queryshield.evaluation.state_cases import StateCase
+from queryshield.evaluation.source_retrieval import SourceRetrievalCase
 
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -19,11 +19,11 @@ class HoldoutSealError(ValueError):
     """The sealed holdout artifact or its metadata commitment is invalid."""
 
 
-def verify_w05_holdout_seal(
+def verify_holdout_seal(
     metadata_path: str | Path,
     ciphertext_path: str | Path,
-    development_cases: Sequence[W05StateCase],
-    development_retrieval_cases: Sequence[W05RetrievalCase],
+    development_cases: Sequence[StateCase],
+    development_retrieval_cases: Sequence[SourceRetrievalCase],
 ) -> dict[str, object]:
     """Check counts, ciphertext digest and hashed-family separation only."""
 
@@ -62,7 +62,7 @@ def verify_w05_holdout_seal(
         or catalog_versions.get("catalog") != "catalog-v2"
         or catalog_versions.get("knowledge") != "knowledge-v1"
     ):
-        raise HoldoutSealError("holdout is not bound to the frozen W05 source versions")
+        raise HoldoutSealError("holdout is not bound to the frozen source versions")
     paired_hash = metadata.get("paired_family_id_sha256")
     if (
         metadata.get("paired_family_count") != 1
@@ -146,4 +146,4 @@ def verify_w05_holdout_seal(
     }
 
 
-__all__ = ["HoldoutSealError", "verify_w05_holdout_seal"]
+__all__ = ["HoldoutSealError", "verify_holdout_seal"]

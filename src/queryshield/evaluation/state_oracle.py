@@ -1,11 +1,11 @@
-"""Independent, exact state/result/safety judgement for W05 raw records."""
+"""Independent, exact state/result/safety judgement for raw records."""
 
 from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from queryshield.evaluation.state_cases import W05StateCase, canonical_sha256
-from queryshield.evaluation.profile_budgets import load_w05_profile_budgets
+from queryshield.evaluation.state_cases import StateCase, canonical_sha256
+from queryshield.evaluation.profile_budgets import load_profile_budgets
 
 
 class StateOracleError(ValueError):
@@ -100,11 +100,11 @@ def _normalize_facts(observed: object, expected: object) -> object:
     return sorted(projected, key=canonical_sha256)
 
 
-def judge_state_case(case: W05StateCase, observation: Mapping[str, object]) -> dict[str, object]:
+def judge_state_case(case: StateCase, observation: Mapping[str, object]) -> dict[str, object]:
     """Compare server-visible outcomes and side effects to the frozen case oracle."""
 
-    if not isinstance(case, W05StateCase):
-        raise TypeError("case must be a W05StateCase")
+    if not isinstance(case, StateCase):
+        raise TypeError("case must be a StateCase")
     observed = _mapping(observation, field="observation")
     expected = _mapping(case.case["expected"], field="expected")
     execution_status = observed.get("execution_status")
@@ -213,7 +213,7 @@ def judge_state_case(case: W05StateCase, observation: Mapping[str, object]) -> d
     profile = observed.get("evaluation_profile")
     metrics = observed.get("execution_metrics")
     if profile is not None:
-        budget_document = load_w05_profile_budgets()
+        budget_document = load_profile_budgets()
         profile_budgets = budget_document["profiles"]
         if profile not in profile_budgets:
             mismatches.append("evaluation_profile_invalid")
@@ -443,8 +443,8 @@ def _aggregate_call_usage(raw_records: Sequence[Mapping[str, object]]) -> dict[s
     }
 
 
-def recompute_w05_metrics(
-    cases: Sequence[W05StateCase],
+def recompute_metrics(
+    cases: Sequence[StateCase],
     raw_records: Sequence[Mapping[str, object]],
 ) -> dict[str, object]:
     """Recompute quality, safety, calls, latency and usage from all raw cases."""
@@ -569,4 +569,4 @@ def recompute_w05_metrics(
     }
 
 
-__all__ = ["StateOracleError", "judge_state_case", "recompute_w05_metrics"]
+__all__ = ["StateOracleError", "judge_state_case", "recompute_metrics"]

@@ -94,7 +94,7 @@ def judge_product_step(
         }
         if not answer_source_ids or not set(answer_source_ids) <= returned:
             failures.append("definition_sources_not_from_mcp")
-        # Same name as the B2b HTTP smoke: the server searched after the model answered without sources.
+        # Same name as in the HTTP smoke: the server searched after the model answered without sources.
         if any(event.get("tool_name") == "search_catalog" and event.get("initiated_by") == "server" for event in tool_events):
             gaps.append("knowledge_after_send_back")
     return failures, gaps
@@ -205,7 +205,7 @@ def run_protocol() -> tuple[dict[str, bool], dict[str, object]]:
 # -- product part -------------------------------------------------------------
 #
 # The state store is read while the server still runs (WAL allows a concurrent
-# reader, as in the B2b smoke).  On Windows the uvicorn process is a child of
+# reader, as in the HTTP smoke).  On Windows the uvicorn process is a child of
 # the venv launcher that Popen started, so after terminate() it may still hold
 # the SQLite file for a moment: nothing opens the store after the stop.
 
@@ -229,13 +229,13 @@ class _Server:
 
 
 def _database_ready() -> bool:
-    from b2b_http_smoke import _database_reachable
+    from http_smoke import _database_reachable
 
     return _database_reachable()
 
 
 def _start_server(env: dict[str, str]) -> _Server | None:
-    from b2b_http_smoke import _free_port
+    from http_smoke import _free_port
     from urllib.error import URLError
     from urllib.request import urlopen
 
@@ -258,7 +258,7 @@ def _start_server(env: dict[str, str]) -> _Server | None:
 
 
 def _ask(base: str, token: str, question: str) -> tuple[int, dict]:
-    from b2b_http_smoke import _http
+    from http_smoke import _http
 
     return _http(base, "/queries", token=token, method="POST", body={"question": question})
 
@@ -266,7 +266,7 @@ def _ask(base: str, token: str, question: str) -> tuple[int, dict]:
 def _read_run(state_path: Path, run_id: str) -> tuple[list[dict], list[dict]]:
     """(tool_call event payloads, metadata_session payloads) of one run, while the server runs."""
 
-    from queryshield.db.w04_state import StateStore
+    from queryshield.db.state_store import StateStore
 
     with StateStore(state_path) as store:
         events = store.events(run_id, after_event_id=0, limit=1000)
@@ -304,7 +304,7 @@ def run_product(mode: str) -> tuple[list[dict], list[str], list[str]]:
     state_path = workdir / "state.sqlite3"
     requester = uuid4().hex
     env = os.environ.copy()
-    for name in ("QUERYSHIELD_W04_FAKE_DB", "QUERYSHIELD_AGENT_PROFILE", "QUERYSHIELD_RETRIEVAL", "QUERYSHIELD_DEMO_DATASET"):
+    for name in ("QUERYSHIELD_FAKE_DB", "QUERYSHIELD_AGENT_PROFILE", "QUERYSHIELD_RETRIEVAL", "QUERYSHIELD_DEMO_DATASET"):
         env.pop(name, None)
     env.update({
         "QUERYSHIELD_METADATA_TOOLS": "mcp",
@@ -366,7 +366,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--part", choices=("all", "protocol", "product"), default="all")
     args = parser.parse_args(argv)
     args.evidence_dir.mkdir(parents=True, exist_ok=True)
-    from b2b_http_smoke import REQUIRED_NAMES
+    from http_smoke import REQUIRED_NAMES
 
     summary: dict[str, object] = {"mode": args.mode, "part": args.part}
     hard_failures: list[str] = []

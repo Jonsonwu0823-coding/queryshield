@@ -1,4 +1,4 @@
-"""Server-verified business facts for the W03 answer boundary."""
+"""Server-verified business facts for the answer boundary."""
 
 from queryshield.facts.facts import (
     FACTS_SCHEMA_VERSION,

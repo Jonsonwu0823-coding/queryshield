@@ -189,16 +189,23 @@ def setup(*, test: bool, demo: bool) -> None:
         make_readonly_default(conn)
 
 
+def _split_superuser_url(url: str):
+    try:
+        return urlsplit(url)
+    except ValueError as exc:  # never echo the URL
+        raise SetupRefused("the superuser database URL cannot be parsed") from exc
+
+
 def _superuser_name(url: str) -> str:
     from urllib.parse import unquote
 
-    return unquote(urlsplit(url).username or "")
+    return unquote(_split_superuser_url(url).username or "")
 
 
 def _superuser_password(url: str) -> str:
     from urllib.parse import unquote
 
-    return unquote(urlsplit(url).password or "")
+    return unquote(_split_superuser_url(url).password or "")
 
 
 def main(argv: list[str] | None = None) -> int:

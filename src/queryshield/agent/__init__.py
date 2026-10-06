@@ -1,4 +1,4 @@
-"""Server-owned contracts for the W02 model proposal boundary."""
+"""Server-owned contracts for the model proposal boundary."""
 
 from queryshield.agent.proposals import (
     CallIdentityError,

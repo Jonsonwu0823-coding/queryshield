@@ -14,14 +14,14 @@ import time
 import pytest
 
 from queryshield.api.main import app, get_model_provider
-from queryshield.approval.service import shared_w04_service
+from queryshield.approval.service import shared_run_service
 from queryshield.knowledge.runtime import shared_retrieval_runtime
 from queryshield.mcp_metadata.launch import LaunchSpec, product_launch
 from queryshield.mcp_metadata.process import process_exists
 from queryshield.tools.semantic import ControlledTools
 
 from mcp_helpers import config
-from test_b2b_http_queries import OTHER, REQUESTER, Scripted, ask, auth, env, wait  # noqa: F401  (env is a fixture)
+from test_http_queries import OTHER, REQUESTER, Scripted, ask, auth, env, wait  # noqa: F401  (env is a fixture)
 
 
 DATA_QUESTION = "已支付订单有几笔"
@@ -35,7 +35,7 @@ def mcp(env, monkeypatch):
 
 
 def _events(run_id: str) -> list[dict]:
-    return shared_w04_service().store.events(run_id, after_event_id=0, limit=1000)
+    return shared_run_service().store.events(run_id, after_event_id=0, limit=1000)
 
 
 def _tool_events(run_id: str) -> list[dict]:
@@ -84,9 +84,9 @@ def test_a_data_question_reads_metadata_over_mcp_and_queries_locally(mcp, monkey
 
 
 def test_the_snapshot_ids_are_the_local_ones(env, monkeypatch):
-    local = shared_w04_service().store.get_run(ask(env, DATA_QUESTION).json()["run_id"])["run_config"]
+    local = shared_run_service().store.get_run(ask(env, DATA_QUESTION).json()["run_id"])["run_config"]
     monkeypatch.setenv("QUERYSHIELD_METADATA_TOOLS", "mcp")
-    remote = shared_w04_service().store.get_run(ask(env, DATA_QUESTION).json()["run_id"])["run_config"]
+    remote = shared_run_service().store.get_run(ask(env, DATA_QUESTION).json()["run_id"])["run_config"]
     assert remote["knowledge_snapshot_id"] == local["knowledge_snapshot_id"]
     assert remote["agent_run_config"] == local["agent_run_config"]
 
@@ -118,7 +118,7 @@ def test_the_server_search_for_a_knowledge_answer_goes_over_mcp(mcp):
 def test_an_mcp_timeout_in_the_server_search_fails_with_mcp_timeout(mcp, monkeypatch):
     model = Scripted([KNOWLEDGE_WITHOUT_SOURCE, KNOWLEDGE_WITHOUT_SOURCE])
     app.dependency_overrides[get_model_provider] = lambda: model
-    monkeypatch.setattr(shared_w04_service(), "_metadata_tools", config(fixture="sleep", call_timeout=1.0))
+    monkeypatch.setattr(shared_run_service(), "_metadata_tools", config(fixture="sleep", call_timeout=1.0))
     response = ask(mcp, DEFINITION_QUESTION)
     body = response.json()
     assert response.status_code == 504 and body["error"]["code"] == "mcp_timeout", body
@@ -144,7 +144,7 @@ def test_identity_fields_from_the_model_never_reach_the_server(mcp):
 )
 def test_mcp_failures_fail_the_run_without_any_local_fallback(mcp, monkeypatch, fixture, http_status, code):
     _local_tools_forbidden(monkeypatch)
-    monkeypatch.setattr(shared_w04_service(), "_metadata_tools", config(fixture=fixture, call_timeout=1.0))
+    monkeypatch.setattr(shared_run_service(), "_metadata_tools", config(fixture=fixture, call_timeout=1.0))
     response = ask(mcp, DATA_QUESTION)
     body = response.json()
     assert response.status_code == http_status and body["status"] == "FAILED" and body["error"]["code"] == code, body
@@ -189,7 +189,7 @@ def test_waiting_for_the_user_and_the_resume_each_close_their_session(mcp):
 
 
 def test_a_cancelled_run_closes_its_session(mcp, monkeypatch):
-    monkeypatch.setattr(shared_w04_service(), "_metadata_tools", config(fixture="slow"))
+    monkeypatch.setattr(shared_run_service(), "_metadata_tools", config(fixture="slow"))
     accepted = ask(mcp, DATA_QUESTION, asynchronous=True).json()
     time.sleep(0.3)  # the first metadata call is in flight
     cancelled = mcp.post(f"/runs/{accepted['run_id']}/cancel", headers=auth(REQUESTER), json={})
@@ -224,7 +224,7 @@ def _wrong_snapshot(ctx, retriever, mode, cwd):
 
 
 def test_an_index_that_is_not_the_runs_snapshot_never_starts(mcp, monkeypatch):
-    monkeypatch.setattr(shared_w04_service(), "_metadata_tools", config(launcher=_wrong_snapshot))
+    monkeypatch.setattr(shared_run_service(), "_metadata_tools", config(launcher=_wrong_snapshot))
     response = ask(mcp, DATA_QUESTION)
     body = response.json()
     assert response.status_code == 503 and body["error"]["code"] == "mcp_unavailable"

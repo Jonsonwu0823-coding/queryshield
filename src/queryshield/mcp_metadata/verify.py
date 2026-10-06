@@ -16,6 +16,7 @@ import json
 from typing import Any
 
 from queryshield.agent.proposals import ExecutionContext
+from queryshield.knowledge.acl import catalog_entry_visible, chunk_visible
 from queryshield.mcp_metadata.schemas import (
     KNOWN_TOOL_ERROR_CODES,
     KNOWN_TOOL_ERROR_MESSAGES,
@@ -96,8 +97,6 @@ def checked_search_items(
 ) -> dict[str, object]:
     """search_catalog: every item is a visible catalog entry or a visible chunk of the host index."""
 
-    from queryshield.knowledge.retrieval import _source_visible
-
     items = _structured("search_catalog", result)["items"]
     if not isinstance(items, Sequence) or len(items) > top_k:
         raise ResultInvalid("more items than top_k")
@@ -116,21 +115,16 @@ def checked_search_items(
         entry = entries.get(item_id)
         if entry is not None:
             expected = entry.as_search_item()
-            visible = not entry.requires_approval or context.role == "approver"
+            visible = catalog_entry_visible(entry, context.role)
         elif item_id in chunks:
             chunk = chunks[item_id]
-            source = sources.get(chunk.source_id)
             expected = {
                 "id": chunk.chunk_id,
                 "text": chunk.text,
                 "source_id": chunk.source_id,
                 "version": chunk.source_version,
             }
-            visible = (
-                source is not None
-                and source.version == chunk.source_version
-                and _source_visible(source, context)
-            )
+            visible = chunk_visible(chunk, sources, context)
         else:
             raise ResultInvalid("the item is not in the host catalog or index")
         if dict(item) != expected:

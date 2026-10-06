@@ -57,7 +57,7 @@ def main() -> int:
 
         assert normal.status_code == 200
         assert normal_body["mode"] == "fake"
-        # B2b: /queries runs the product Agent; the value is a verified fact.
+        # /queries runs the product Agent; the value is a verified fact.
         assert normal_body["status"] == "SUCCEEDED"
         assert _fact_value(normal_body, "gross_fen") == 15000
         assert normal_body["result"]["tenant_id"] == "A"

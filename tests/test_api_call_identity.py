@@ -17,7 +17,7 @@ from queryshield.providers.openai_compatible import (
 )
 
 
-# B2b: sync /queries runs the product Agent runtime.  These tests keep the W02
+# Sync /queries runs the product Agent runtime.  These tests keep the proposal-boundary
 # requirements (call identity, pre-model tenant rejection, provider/usage
 # separation, no Fake fallback, controlled SQL errors, no DB before a valid
 # proposal) on the new path; response shapes follow the shared outcome table.
@@ -28,7 +28,7 @@ def api_env(tmp_path, monkeypatch):
     monkeypatch.setenv("QUERYSHIELD_STATE_STORE_PATH", str(tmp_path / "state.sqlite3"))
     monkeypatch.setenv("QUERYSHIELD_TOKEN_A_REQUESTER", "test-token-a")
     monkeypatch.setenv("QUERYSHIELD_PROVIDER_MODE", "fake")
-    monkeypatch.delenv("QUERYSHIELD_W04_FAKE_DB", raising=False)
+    monkeypatch.delenv("QUERYSHIELD_FAKE_DB", raising=False)
     reset_shared_state_stores()
     yield tmp_path
     app.dependency_overrides.clear()

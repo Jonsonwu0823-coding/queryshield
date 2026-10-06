@@ -11,8 +11,8 @@ import json
 
 import pytest
 
-from queryshield.approval.service import FixtureQueryExecutor, W04RunService, shared_w04_service
-from queryshield.db.w04_state import StateStore
+from queryshield.approval.service import FixtureQueryExecutor, RunService, shared_run_service
+from queryshield.db.state_store import StateStore
 from queryshield.mcp_metadata.launch import (
     MetadataToolsConfigurationError,
     call_timeout_seconds,
@@ -21,7 +21,7 @@ from queryshield.mcp_metadata.launch import (
 )
 from queryshield.mcp_metadata.process import process_exists
 
-from test_b2b_http_queries import ask, env  # noqa: F401  (env is a fixture)
+from test_http_queries import ask, env  # noqa: F401  (env is a fixture)
 
 
 IDENTITY = {"tenant_id": "A", "principal_id": "a-requester", "role": "requester"}
@@ -68,7 +68,7 @@ def test_the_product_refuses_a_bad_value_with_503_before_any_run(env, monkeypatc
         response = ask(env, "已支付订单有几笔", asynchronous=asynchronous)
         assert response.status_code == 503
         assert response.json()["error"]["code"] == "invalid_metadata_tools_configuration"
-    assert shared_w04_service()._active_count() == 0
+    assert shared_run_service()._active_count() == 0
 
 
 def _no_mcp_anywhere(store, run_id):
@@ -81,10 +81,10 @@ def _no_mcp_anywhere(store, run_id):
 
 def test_a_directly_constructed_service_stays_local_whatever_the_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("QUERYSHIELD_METADATA_TOOLS", "mcp")
-    monkeypatch.setenv("QUERYSHIELD_W04_FAKE_DB", "1")
+    monkeypatch.setenv("QUERYSHIELD_FAKE_DB", "1")
     monkeypatch.delenv("QUERYSHIELD_RETRIEVAL", raising=False)
     store = StateStore(tmp_path / "own.sqlite3")
-    service = W04RunService(store=store, executor_factory=FixtureQueryExecutor, mode="fake")
+    service = RunService(store=store, executor_factory=FixtureQueryExecutor, mode="fake")
     assert service.metadata_config() is None
     run = service.run_sync(identity=IDENTITY, question="已支付订单有几笔")
     assert run["status"] == "SUCCEEDED"
@@ -96,14 +96,14 @@ def test_the_local_setting_adds_nothing_to_the_product_records(env, monkeypatch)
     monkeypatch.delenv("QUERYSHIELD_METADATA_TOOLS", raising=False)
     for question in ("已支付订单有几笔", "退款后净额是怎么算的？", "查询客户姓名"):
         body = ask(env, question).json()
-        _no_mcp_anywhere(shared_w04_service().store, body["run_id"])
+        _no_mcp_anywhere(shared_run_service().store, body["run_id"])
 
 
 def test_an_explicit_mcp_service_with_catalog_search_uses_the_keyword_server(tmp_path, monkeypatch):
-    monkeypatch.setenv("QUERYSHIELD_W04_FAKE_DB", "1")
+    monkeypatch.setenv("QUERYSHIELD_FAKE_DB", "1")
     monkeypatch.setenv("QUERYSHIELD_RETRIEVAL", "catalog")
     store = StateStore(tmp_path / "own.sqlite3")
-    service = W04RunService(store=store, executor_factory=FixtureQueryExecutor, mode="fake", metadata_tools="mcp")
+    service = RunService(store=store, executor_factory=FixtureQueryExecutor, mode="fake", metadata_tools="mcp")
     run = service.run_sync(identity=IDENTITY, question="已支付订单有几笔")
     assert run["status"] == "SUCCEEDED"
     [session] = [e["payload"] for e in store.events(run["run_id"], after_event_id=0, limit=1000) if e["type"] == "metadata_session"]
@@ -113,11 +113,11 @@ def test_an_explicit_mcp_service_with_catalog_search_uses_the_keyword_server(tmp
 
 
 def test_b0_reads_its_table_description_over_mcp(tmp_path, monkeypatch):
-    monkeypatch.setenv("QUERYSHIELD_W04_FAKE_DB", "1")
+    monkeypatch.setenv("QUERYSHIELD_FAKE_DB", "1")
     monkeypatch.setenv("QUERYSHIELD_AGENT_PROFILE", "b0")
     monkeypatch.delenv("QUERYSHIELD_RETRIEVAL", raising=False)
     store = StateStore(tmp_path / "own.sqlite3")
-    service = W04RunService(store=store, executor_factory=FixtureQueryExecutor, mode="fake", metadata_tools="mcp")
+    service = RunService(store=store, executor_factory=FixtureQueryExecutor, mode="fake", metadata_tools="mcp")
     run = service.run_sync(identity=IDENTITY, question="已支付订单有几笔")
     [session] = [e["payload"] for e in store.events(run["run_id"], after_event_id=0, limit=1000) if e["type"] == "metadata_session"]
     assert session["call_count"] == 1 and session["retrieval"] == "keyword" and session["cleanup"] == "ok"

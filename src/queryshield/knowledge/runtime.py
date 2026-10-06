@@ -1,7 +1,7 @@
 """Product-side retriever assembly shared by HTTP entrypoints and evaluation.
 
 The same snapshot, embedding index and ``HybridRetriever`` configuration are
-used whether a request arrives over HTTP or through the W05 harness.  Fake mode
+used whether a request arrives over HTTP or through the evaluation harness.  Fake mode
 uses a deterministic hashed-feature embedding that works for any text; real
 mode uses the configured embedding service and never falls back to Fake.
 """
@@ -19,36 +19,30 @@ from threading import Lock
 from typing import Any, Sequence
 
 from queryshield.catalog.catalog import DEFAULT_CATALOG_VERSION
+from queryshield.knowledge.ingest import KNOWLEDGE_VERSION, import_knowledge
 from queryshield.providers.embedding import (
     EmbeddingCallResult,
     FixedEmbedding,
     OpenAICompatibleEmbedding,
     _normalize_inputs,
-    _validate_vectors,
 )
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_KNOWLEDGE_ROOT = PROJECT_ROOT / "fixtures" / "knowledge"
-# The knowledge snapshot's catalog version, identical to the W05 B1 setup.
-#
-# Why the snapshot says catalog-v2 while facts and the run configuration say
-# catalog-v4 (B3b acceptance O8): the knowledge snapshot was built, and recorded in
-# the frozen W05 evidence, when catalog-v2 was current, so the label stays.
-# catalog-v3 and catalog-v4 only added names, phrasings and recognition words; the
-# definition text of the four metrics is the same as in v1 and v2 (tests
-# test_catalog_v3_keeps_the_v1_entries_and_adds_only_names_and_phrases and
-# test_catalog_v4_is_v3_without_the_generic_markers_and_with_one_business_phrase).
-# Changing the label would change the frozen evaluation's identity.  The demo
-# knowledge base is new and is labelled catalog-v4 directly.
+# The knowledge snapshot keeps the catalog label that the frozen evidence recorded,
+# while facts and the run configuration use the current catalog version.  Later catalog
+# versions only added names, phrasings and recognition words, so the metric definitions
+# are the same; changing the label would change the frozen evaluation's identity.  The
+# demo knowledge base is new and carries the current version directly.
 KNOWLEDGE_CATALOG_VERSION = "catalog-v2"
-# B3d: the demo knowledge base (Chinese, product only).  It lives outside
-# fixtures/knowledge, which the frozen W05 fixture hash covers.
+# The demo knowledge base (Chinese, product only) lives outside fixtures/knowledge,
+# which the frozen fixture hash covers.
 DEMO_KNOWLEDGE_ROOT = PROJECT_ROOT / "fixtures" / "demo" / "knowledge"
 DEMO_KNOWLEDGE_VERSION = "knowledge-demo-v1"
 # The product's current catalog version (catalog-v4), read from its one constant, not spelled again.
 DEMO_CATALOG_VERSION = DEFAULT_CATALOG_VERSION
-# Frozen identifiers: W05 evidence recorded these names for the hashed-feature
+# Frozen identifiers: evidence recorded these names for the hashed-feature
 # Fake embedding, so the product Fake keeps them for evidence continuity.
 FAKE_EMBEDDING_MODEL = "w05-hash-feature-fake-v1"
 FAKE_EMBEDDING_REVISION = "w05-hash-feature-v1"
@@ -58,8 +52,8 @@ RETRIEVAL_CATALOG_VALUES = frozenset({"catalog", "catalog-only"})
 
 
 class _CatalogSearchOnly:
-    """Server setting: search_catalog searches the semantic catalog only (the W03
-    keyword search); no knowledge index or embedding service is used."""
+    """Server setting: search_catalog searches the semantic catalog only (the keyword
+    search); no knowledge index or embedding service is used."""
 
     def __repr__(self) -> str:
         return "CATALOG_SEARCH_ONLY"
@@ -115,11 +109,7 @@ class HashFeatureEmbedding(FixedEmbedding):
         with self._register_lock:
             for value in normalized:
                 if value not in self._vectors:
-                    self._vectors[value] = _validate_vectors(
-                        [feature_vector(value, dimensions=self.dimensions)],
-                        expected_count=1,
-                        dimensions=self.dimensions,
-                    )[0]
+                    self._vectors[value] = feature_vector(value, dimensions=self.dimensions)
             return super().embed(inputs, request_id=request_id, model_call_id=model_call_id)
 
 
@@ -147,7 +137,6 @@ def build_retrieval_runtime(
 
     from queryshield.catalog import load_default_catalog
     from queryshield.knowledge.index import build_embedding_index
-    from queryshield.knowledge.ingest import KNOWLEDGE_VERSION, import_knowledge
     from queryshield.knowledge.retrieval import HybridRetriever
 
     if mode not in {"fake", "real"}:
@@ -171,9 +160,9 @@ def build_retrieval_runtime(
     return RetrievalRuntime(mode, index_build.snapshot, index_build, embedder, retriever)
 
 
-# B3e: the approver-only source that guards customer names, per knowledge base.
+# The approver-only source that guards customer names, per knowledge base.
 # A server table: neither the model nor a request can name another source, and
-# fixtures/knowledge (covered by the frozen W05 fingerprint) is not edited.
+# fixtures/knowledge (covered by the frozen fingerprint) is not edited.
 DEFAULT_SENSITIVE_PERMISSION_SOURCE_ID = "semantic-sensitive-customer-name"
 DEMO_SENSITIVE_PERMISSION_SOURCE_ID = "demo-sensitive-customer-name"
 
@@ -196,28 +185,59 @@ class ProductKnowledge:
         return str(self.snapshot.snapshot_id)
 
 
+@dataclass(frozen=True)
+class _KnowledgeBase:
+    root: Path
+    knowledge_version: str
+    catalog_version: str
+    sensitive_source_id: str
+    ingest_job_prefix: str
+
+
+def _knowledge_base(demo: bool) -> _KnowledgeBase:
+    """The server's table of the two knowledge bases; nothing a request carries picks one."""
+
+    if demo:
+        return _KnowledgeBase(
+            DEMO_KNOWLEDGE_ROOT,
+            DEMO_KNOWLEDGE_VERSION,
+            DEMO_CATALOG_VERSION,
+            DEMO_SENSITIVE_PERMISSION_SOURCE_ID,
+            "demo-retrieval",
+        )
+    return _KnowledgeBase(
+        DEFAULT_KNOWLEDGE_ROOT,
+        KNOWLEDGE_VERSION,
+        KNOWLEDGE_CATALOG_VERSION,
+        DEFAULT_SENSITIVE_PERMISSION_SOURCE_ID,
+        "w05-retrieval",
+    )
+
+
+def _import_base(base: _KnowledgeBase) -> Any:
+    return import_knowledge(
+        base.root,
+        base.root / "source_registry.json",
+        catalog_version=base.catalog_version,
+        knowledge_version=base.knowledge_version,
+    )
+
+
 _PRODUCT_KNOWLEDGE: dict[bool, ProductKnowledge] = {}
 
 
 def product_knowledge(*, demo: bool) -> ProductKnowledge:
     """The default or the demo knowledge base (cached per process)."""
 
-    from queryshield.knowledge.ingest import KNOWLEDGE_VERSION, import_knowledge
-
     with _CACHE_LOCK:
         cached = _PRODUCT_KNOWLEDGE.get(demo)
         if cached is not None:
             return cached
-        if demo:
-            root, version, catalog_version = DEMO_KNOWLEDGE_ROOT, DEMO_KNOWLEDGE_VERSION, DEMO_CATALOG_VERSION
-            source_id = DEMO_SENSITIVE_PERMISSION_SOURCE_ID
-        else:
-            root, version, catalog_version = DEFAULT_KNOWLEDGE_ROOT, KNOWLEDGE_VERSION, KNOWLEDGE_CATALOG_VERSION
-            source_id = DEFAULT_SENSITIVE_PERMISSION_SOURCE_ID
-        snapshot = import_knowledge(root, root / "source_registry.json", catalog_version=catalog_version, knowledge_version=version)
-        if not any(source.source_id == source_id for source in snapshot.source_records):
+        base = _knowledge_base(demo)
+        snapshot = _import_base(base)
+        if not any(source.source_id == base.sensitive_source_id for source in snapshot.source_records):
             raise ValueError("the knowledge base has no permission source for customer names")
-        knowledge = ProductKnowledge(snapshot, source_id)
+        knowledge = ProductKnowledge(snapshot, base.sensitive_source_id)
         _PRODUCT_KNOWLEDGE[demo] = knowledge
         return knowledge
 
@@ -234,10 +254,6 @@ def retrieval_setting() -> str:
     if value in RETRIEVAL_CATALOG_VALUES:
         return "catalog"
     return "hybrid"
-
-
-def retrieval_disabled() -> bool:
-    return retrieval_setting() == "disabled"
 
 
 _CACHE: dict[tuple[str, ...], RetrievalRuntime] = {}
@@ -261,35 +277,33 @@ def _cache_key(mode: str, root: Path) -> tuple[str, ...]:
     return (mode, str(root), registry_sha) + fingerprint
 
 
-def shared_retrieval_runtime(mode: str, *, knowledge_root: Path | None = None) -> RetrievalRuntime:
+def _shared_runtime(mode: str, *, demo: bool) -> RetrievalRuntime:
     """Build lazily on first use and cache per process; failures are not cached."""
 
-    root = knowledge_root or DEFAULT_KNOWLEDGE_ROOT
-    key = _cache_key(mode, root)
-    with _CACHE_LOCK:
-        runtime = _CACHE.get(key)
-        if runtime is None:
-            runtime = build_retrieval_runtime(mode, knowledge_root=root)
-            _CACHE[key] = runtime
-        return runtime
-
-
-def shared_demo_retrieval_runtime(mode: str) -> RetrievalRuntime:
-    """The demo knowledge base, cached per process under its own key (own root, own registry)."""
-
-    key = _cache_key(mode, DEMO_KNOWLEDGE_ROOT)
+    base = _knowledge_base(demo)
+    key = _cache_key(mode, base.root)
     with _CACHE_LOCK:
         runtime = _CACHE.get(key)
         if runtime is None:
             runtime = build_retrieval_runtime(
                 mode,
-                knowledge_root=DEMO_KNOWLEDGE_ROOT,
-                knowledge_version=DEMO_KNOWLEDGE_VERSION,
-                catalog_version=DEMO_CATALOG_VERSION,
-                ingest_job_prefix="demo-retrieval",
+                knowledge_root=base.root,
+                knowledge_version=base.knowledge_version,
+                catalog_version=base.catalog_version,
+                ingest_job_prefix=base.ingest_job_prefix,
             )
             _CACHE[key] = runtime
         return runtime
+
+
+def shared_retrieval_runtime(mode: str) -> RetrievalRuntime:
+    return _shared_runtime(mode, demo=False)
+
+
+def shared_demo_retrieval_runtime(mode: str) -> RetrievalRuntime:
+    """The demo knowledge base, cached per process under its own key (own root, own registry)."""
+
+    return _shared_runtime(mode, demo=True)
 
 
 class IndexFileMismatch(ValueError):
@@ -314,28 +328,18 @@ def retriever_from_index_file(
 
     from queryshield.catalog import load_default_catalog
     from queryshield.knowledge.index import embedded_snapshot_for_index, load_index
-    from queryshield.knowledge.ingest import KNOWLEDGE_VERSION, import_knowledge
     from queryshield.knowledge.retrieval import HybridRetriever
 
     if mode not in {"fake", "real"}:
         raise ValueError("retrieval mode must be fake or real")
-    if demo:
-        root, version, catalog_version = DEMO_KNOWLEDGE_ROOT, DEMO_KNOWLEDGE_VERSION, DEMO_CATALOG_VERSION
-    else:
-        root, version, catalog_version = DEFAULT_KNOWLEDGE_ROOT, KNOWLEDGE_VERSION, KNOWLEDGE_CATALOG_VERSION
     index = load_index(index_path)
-    snapshot = import_knowledge(
-        root,
-        root / "source_registry.json",
-        catalog_version=catalog_version,
-        knowledge_version=version,
-    )
-    embedded = embedded_snapshot_for_index(snapshot, index)
+    embedded = embedded_snapshot_for_index(_import_base(_knowledge_base(demo)), index)
     if not (embedded.snapshot_id == index.snapshot_id == expected_snapshot_id):
         raise IndexFileMismatch("the index file is not the expected embedded snapshot")
     embedder = HashFeatureEmbedding() if mode == "fake" else OpenAICompatibleEmbedding.from_env()
-    if (embedder.model, embedder.model_revision, embedder.dimensions) != (index.model, index.model_revision, index.dimensions):
+    if embedder.model != index.model:
         raise IndexFileMismatch("the embedding configuration does not match the index")
+    # The retriever itself refuses an embedder whose revision or dimensions differ from the index.
     return HybridRetriever(
         catalog=load_default_catalog(),
         snapshot=embedded,
@@ -367,7 +371,6 @@ __all__ = [
     "DEMO_KNOWLEDGE_VERSION",
     "reset_retrieval_cache",
     "retriever_from_index_file",
-    "retrieval_disabled",
     "retrieval_setting",
     "shared_demo_retrieval_runtime",
     "shared_retrieval_runtime",

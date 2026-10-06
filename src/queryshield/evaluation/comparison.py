@@ -11,10 +11,11 @@ from pathlib import Path
 from queryshield.agent.config import (
     ACTION_SCHEMA_VERSION,
     DEFAULT_ADAPTER_VERSION,
-    SYSTEM_PROMPT_VERSION,
+    DEFAULT_RUN_CONFIG,
     TOOL_DESCRIPTION_VERSION,
 )
 from queryshield.evaluation.state_cases import canonical_sha256
+from queryshield.evaluation.stateful_product import evaluation_run_config
 
 
 COMPARISON_VERSION = "w05-b0-b1-comparison-v1"
@@ -95,11 +96,11 @@ def _fixture_sha256(project_root: str | Path) -> str:
 def _source_sha256(project_root: str | Path, relative_path: str) -> str:
     path = Path(project_root) / relative_path
     if not path.is_file():
-        raise ValueError(f"required W05 profile source is missing: {relative_path}")
+        raise ValueError(f"required profile source is missing: {relative_path}")
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def build_w05_comparison_profiles(
+def build_comparison_profiles(
     project_root: str | Path,
     *,
     provider_mode: str,
@@ -116,7 +117,7 @@ def build_w05_comparison_profiles(
     if type(model_name) is not str or not model_name.strip():
         raise ValueError("model_name must be a non-empty safe model identifier")
     if type(temperature) is not int or temperature != 0:
-        raise ValueError("W05 comparison fixes temperature at zero")
+        raise ValueError("comparison fixes temperature at zero")
     if type(max_output_tokens) is not int or not 1 <= max_output_tokens <= 2048:
         raise ValueError("max_output_tokens must be between 1 and 2048")
     if model_endpoint_fingerprint is not None and (
@@ -139,13 +140,14 @@ def build_w05_comparison_profiles(
         "same_model_adapter_instance": True,
         "same_database_role_and_fixture": True,
         "same_sampling_configuration": True,
-        "action_schema_version": ACTION_SCHEMA_VERSION,
-        "tool_description_version": TOOL_DESCRIPTION_VERSION,
-        "adapter_version": DEFAULT_ADAPTER_VERSION,
-        "b0_prompt_source_sha256": _source_sha256(project_root, "src/queryshield/evaluation/w05_runner.py"),
+        "b0_prompt_source_sha256": _source_sha256(project_root, "src/queryshield/agent/runtime.py"),
         "b1_prompt_source_sha256": _source_sha256(project_root, "src/queryshield/agent/context.py"),
     }
     shared_digest = canonical_sha256(shared)
+    # The model protocol is the native-calling experiment's variable, so its
+    # versions are per profile, not shared: B0 is always json, B1 follows
+    # evaluation_run_config.
+    b1_config = evaluation_run_config(DEFAULT_RUN_CONFIG, provider_mode)
     profiles = (
         ComparisonProfile(
             profile_id=B0_PROFILE,
@@ -171,11 +173,11 @@ def build_w05_comparison_profiles(
             max_output_tokens=max_output_tokens,
             uses_semantic_retrieval=True,
             supports_clarification_and_repair=True,
-            prompt_version=SYSTEM_PROMPT_VERSION,
+            prompt_version=b1_config.prompt_version,
             prompt_source_sha256=shared["b1_prompt_source_sha256"],
-            action_schema_version=ACTION_SCHEMA_VERSION,
-            tool_description_version=TOOL_DESCRIPTION_VERSION,
-            adapter_version=DEFAULT_ADAPTER_VERSION,
+            action_schema_version=b1_config.action_schema_version,
+            tool_description_version=b1_config.tool_description_version,
+            adapter_version=b1_config.adapter_version,
             security_boundary_sha256=boundary_digest,
             shared_configuration_sha256=shared_digest,
         ),
@@ -203,5 +205,5 @@ __all__ = [
     "COMMON_SECURITY_BOUNDARY",
     "COMPARISON_VERSION",
     "ComparisonProfile",
-    "build_w05_comparison_profiles",
+    "build_comparison_profiles",
 ]

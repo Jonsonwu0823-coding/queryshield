@@ -1,4 +1,4 @@
-# CI only (B4b, N8): not part of the normal setup.
+# CI only: not part of the normal setup.
 #
 # compose.yaml keeps /tmp on tmpfs. A tmpfs is emptied whenever the container stops, so
 # "after stop and start there is no MCP index directory" would hold even if the service

@@ -1,15 +1,15 @@
-"""Raw-bound W05 B0/B1 quality, safety, latency and usage reports."""
+"""Raw-bound B0/B1 quality, safety, latency and usage reports."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
-from queryshield.evaluation.state_cases import W05StateCase
-from queryshield.evaluation.state_oracle import recompute_w05_metrics
+from queryshield.evaluation.state_cases import StateCase
+from queryshield.evaluation.state_oracle import recompute_metrics
 
 
-def build_w05_comparison_report(
-    cases: Sequence[W05StateCase],
+def build_comparison_report(
+    cases: Sequence[StateCase],
     profile_records: Mapping[str, Sequence[Mapping[str, object]]],
     *,
     metadata: Mapping[str, object],
@@ -21,18 +21,18 @@ def build_w05_comparison_report(
     """
 
     if set(profile_records) != {"B0", "B1"}:
-        raise ValueError("W05 report requires raw B0 and B1 records")
+        raise ValueError("report requires raw B0 and B1 records")
     if not isinstance(metadata, Mapping):
         raise TypeError("metadata must be a mapping")
     frozen_ids = {case.case_id for case in cases}
     if len(frozen_ids) != len(cases) or not frozen_ids:
-        raise ValueError("the W05 case manifest must have unique case IDs")
+        raise ValueError("the case manifest must have unique case IDs")
 
     reports: dict[str, dict[str, object]] = {}
     judged_by_profile: dict[str, dict[str, Mapping[str, object]]] = {}
     for profile in ("B0", "B1"):
         raw = tuple(profile_records[profile])
-        metrics = recompute_w05_metrics(cases, raw)
+        metrics = recompute_metrics(cases, raw)
         present = {str(row.get("case_id")) for row in raw}
         if len(present) != len(raw):
             raise ValueError(f"{profile} raw case IDs are missing or duplicated")
@@ -114,4 +114,4 @@ def build_w05_comparison_report(
     }
 
 
-__all__ = ["build_w05_comparison_report"]
+__all__ = ["build_comparison_report"]

@@ -22,11 +22,12 @@ from queryshield.policy.sql import (
     parse_readonly_select,
 )
 from queryshield.agent.metric_intent import MetricDeclarationError, resolve_query_declaration
-from queryshield.agent.proposals import ExecutionContext, MetricBinding, ResultEvidence
-from queryshield.catalog.catalog import ALLOWED_TABLE_COLUMNS, ClarificationRule, ClarificationValue
+from queryshield.agent.proposals import ExecutionContext, ResultEvidence
+from queryshield.catalog.catalog import ClarificationRule, ClarificationValue
 from queryshield.catalog.phrases import ClarificationReading, check_declaration
 from queryshield.db.guarded import GuardedQueryError, render_scoped_select
-from queryshield.tools.semantic import ToolError, _controlled_error_detail, _params
+from queryshield.policy.params import ordered_param_values
+from queryshield.tools.semantic import ToolError, _as_tool_error, _validated_select
 
 # The guarded executor refuses results over its 100-row bound with
 # GuardedQueryError("limit_reached").  Inside the Agent that is a failed query,
@@ -105,7 +106,7 @@ def _driver_error(exc: DatabaseDriverError) -> ToolError:
     return ToolError("database_error", "database execution failed")
 
 
-def _row_limit_error(exc: ToolError) -> ToolError:
+def _row_limit_error() -> ToolError:
     return ToolError(RESULT_ROW_LIMIT_CODE, "query returned more than the 100 row limit")
 
 
@@ -148,7 +149,7 @@ def call_tool(tools, name, arguments, *, context, metric_bindings=(), request_ti
                     _pending_call(execution_arguments, execution_bindings)
                 ) from exc
             if name == "query_readonly" and exc.code == "limit_reached":
-                raise _row_limit_error(exc) from exc
+                raise _row_limit_error() from exc
             raise
         if declared_metric_ids and isinstance(output, Mapping) and type(output.get("result_id")) is str:
             output = {
@@ -198,7 +199,7 @@ def _resolve_call(tools, name, arguments, *, context, metric_bindings=(), reques
         execution_bindings = declaration.bindings
         declared_metric_ids = declaration.declared_metric_ids
         check_clarification(clarifications, declared_metric_ids)
-        if any(binding.metric_id.removeprefix("metric.") == "net_fen" for binding in execution_bindings if isinstance(binding, MetricBinding)) and declared_metric_ids:
+        if declared_metric_ids and any(binding.metric_id.removeprefix("metric.") == "net_fen" for binding in execution_bindings):
             if not _net_fen_request_matches(execution_arguments, execution_bindings):
                 raise ToolError(
                     "evidence_validation_failed",
@@ -235,13 +236,12 @@ def prepare_pending_call(tools, arguments, *, context, request_time_window=None)
 def _pending_call(arguments, bindings) -> dict[str, object]:
     """Canonical approvable call: exactly what will run after approval."""
 
-    metric_bindings = [binding for binding in bindings if isinstance(binding, MetricBinding)]
-    window = dict(metric_bindings[0].time_window) if metric_bindings else None
+    window = dict(bindings[0].time_window) if bindings else None
     return {
         "tool": "query_readonly",
         "sql": str(arguments["sql"]),
         "params": {str(key): value for key, value in dict(arguments["params"]).items()},
-        "metrics": [binding.metric_id.removeprefix("metric.") for binding in metric_bindings],
+        "metrics": [binding.metric_id.removeprefix("metric.") for binding in bindings],
         "time_window": window,
     }
 
@@ -254,22 +254,13 @@ def _verified_read(arguments, bindings, *, context) -> tuple[str, tuple[object, 
     sql = arguments.get("sql")
     if type(sql) is not str or not 1 <= len(sql.strip()) <= 4000:
         raise ToolError("invalid_argument", "sql length is outside the allowed range")
-    params = _params(arguments.get("params"))
-    try:
-        statement = parse_readonly_select(sql)
-    except SQLPolicyError as exc:
-        raise ToolError(exc.code, _controlled_error_detail(exc, exc.code)) from exc
-    if any(table not in ALLOWED_TABLE_COLUMNS for table in statement.referenced_tables):
-        raise ToolError("table_not_allowed", "query references a table outside the server allowlist")
-    if any(
-        isinstance(binding, MetricBinding) and binding.metric_id.removeprefix("metric.") == "net_fen"
-        for binding in bindings
-    ):
+    params, statement = _validated_select(sql, arguments.get("params"))
+    if any(binding.metric_id.removeprefix("metric.") == "net_fen" for binding in bindings):
         raise ToolError("invalid_binding", "net_fen controlled plan accepts only orders and refunds requests")
     try:
         render_scoped_select(statement, tenant_id=context.tenant_id, input_params=params)
     except (SQLPolicyError, GuardedQueryError) as exc:
-        raise ToolError(exc.code, _controlled_error_detail(exc, exc.code)) from exc
+        raise _as_tool_error(exc) from exc
     return sql, params
 
 
@@ -305,10 +296,10 @@ def execute_approved_query(tools, pending_call: Mapping[str, object], *, context
         result = tools.executor.execute(sql, context=context, params=params, metric_bindings=bindings)
     except GuardedQueryError as exc:
         if exc.code == "limit_reached":
-            raise ToolError(RESULT_ROW_LIMIT_CODE, "query returned more than the 100 row limit") from exc
-        raise ToolError(exc.code, _controlled_error_detail(exc, exc.code)) from exc
+            raise _row_limit_error() from exc
+        raise _as_tool_error(exc) from exc
     except SQLPolicyError as exc:
-        raise ToolError(exc.code, _controlled_error_detail(exc, exc.code)) from exc
+        raise _as_tool_error(exc) from exc
     except DatabaseDriverError as exc:
         raise _driver_error(exc) from exc
     return result.evidence
@@ -321,17 +312,11 @@ def _bind_tenant_equality_params(arguments, context):
         not isinstance(arguments, Mapping)
         or type(arguments.get("sql")) is not str
         or not isinstance(arguments.get("params"), Mapping)
-        or type(getattr(context, "tenant_id", None)) is not str
-        or not context.tenant_id.strip()
     ):
         return arguments
     params = arguments["params"]
-    keys = list(params)
-    if (
-        any(type(key) is not str or not key.isdecimal() or str(int(key)) != key for key in keys)
-        or sorted(int(key) for key in keys) != list(range(len(keys)))
-        or any(value is not None and type(value) not in {str, int, float, bool} for value in params.values())
-    ):
+    values = ordered_param_values(params)
+    if values is None or any(value is not None and type(value) not in {str, int, float, bool} for value in values):
         return arguments
     try:
         statement = parse_readonly_select(arguments["sql"])
@@ -386,11 +371,8 @@ def _net_fen_request_matches(arguments, bindings) -> bool:
     params = arguments.get("params")
     if type(sql) is not str or not isinstance(params, Mapping):
         return False
-    keys = list(params)
-    if (
-        any(type(key) is not str or not key.isdecimal() or str(int(key)) != key for key in keys)
-        or sorted(int(key) for key in keys) != list(range(len(keys)))
-    ):
+    parameter_values = ordered_param_values(params)
+    if parameter_values is None:
         return False
     try:
         statement = parse_readonly_select(sql)
@@ -400,7 +382,6 @@ def _net_fen_request_matches(arguments, bindings) -> bool:
     if "orders" not in tables or not tables <= {"orders", "refunds"}:
         return False
     terms = _and_comparisons(statement.where)
-    parameter_values = tuple(params[str(index)] for index in range(len(params)))
     return terms is not None and _has_bound_window(terms, parameter_values, binding.time_window, statement)
 
 
@@ -414,21 +395,15 @@ def _bind_metric_result_positions(arguments, metric_bindings, *, context):
     params = arguments.get("params")
     if type(sql) is not str or not isinstance(params, Mapping):
         return None
-    if any(not isinstance(binding, MetricBinding) for binding in bindings):
-        return None
     if not any(binding.metric_id.removeprefix("metric.") in {"gross_fen", "paid_count"} for binding in bindings):
         return bindings
-    keys = list(params)
-    if (
-        any(type(key) is not str or not key.isdecimal() or str(int(key)) != key for key in keys)
-        or sorted(int(key) for key in keys) != list(range(len(keys)))
-    ):
+    parameter_values = ordered_param_values(params)
+    if parameter_values is None:
         return None
     try:
         statement = parse_readonly_select(sql)
     except SQLPolicyError:
         return bindings
-    parameter_values = tuple(params[str(index)] for index in range(len(params)))
     terms = _and_comparisons(statement.where)
     if terms is None or not _metric_scope_filters_match(terms, parameter_values, statement, bindings, context.tenant_id):
         return None
@@ -466,7 +441,7 @@ def _bind_metric_result_positions(arguments, metric_bindings, *, context):
         if len(matches) != 1 or not matches[0].alias or not matches[0].alias.islower():
             return None
         index = next(i for i, item in enumerate(output) if item.metric_id.removeprefix("metric.") == metric_id)
-        # B3e: a GROUP BY makes every row a per-group value, so the binding is
+        # A GROUP BY makes every row a per-group value, so the binding is
         # a rowset even when one row comes back (ORDER BY ... LIMIT 1).
         output[index] = replace(binding, result_position=matches[0].alias, grouped=bool(statement.group_by))
     return tuple(output)
@@ -490,14 +465,14 @@ def _expression_value(expression, params):
     return object()
 
 
-def _column_table(column: ColumnRef, statement: SelectStatement) -> str | None:
-    if column.qualifier is None:
-        return statement.from_table.name if column.name.casefold() in {"status", "created_at", "amount_fen"} and "orders" in statement.referenced_tables else None
-    aliases = {
-        table.alias or table.name: table.name
-        for table in (statement.from_table,) + tuple(join.table for join in statement.joins)
-    }
-    return aliases.get(column.qualifier)
+_FLIPPED = {"<": ">", "<=": ">=", ">": "<", ">=": "<="}
+
+
+def _oriented(term: Comparison):
+    """The comparison read both ways round: ``column op value`` and ``value op column``."""
+
+    yield term.left, term.right, term.operator
+    yield term.right, term.left, _FLIPPED.get(term.operator, term.operator)
 
 
 def _metric_scope_filters_match(terms, params, statement: SelectStatement, bindings, tenant_id: str) -> bool:
@@ -509,10 +484,7 @@ def _metric_scope_filters_match(terms, params, statement: SelectStatement, bindi
     has_end = False
     for term in terms:
         matched = False
-        for column, value, operator in (
-            (term.left, term.right, term.operator),
-            (term.right, term.left, {"<": ">", "<=": ">=", ">": "<", ">=": "<="}.get(term.operator, term.operator)),
-        ):
+        for column, value, operator in _oriented(term):
             if not isinstance(column, ColumnRef):
                 continue
             field = column.name.casefold()
@@ -541,10 +513,7 @@ def _has_bound_window(terms, params, time_window, statement: SelectStatement) ->
     found_start = False
     found_end = False
     for term in terms:
-        for column, value, operator in (
-            (term.left, term.right, term.operator),
-            (term.right, term.left, {"<": ">", "<=": ">=", ">": "<", ">=": "<="}.get(term.operator, term.operator)),
-        ):
+        for column, value, operator in _oriented(term):
             if (
                 not isinstance(column, ColumnRef)
                 or column.name.casefold() != "created_at"
@@ -562,11 +531,7 @@ def _has_bound_window(terms, params, time_window, statement: SelectStatement) ->
 def _resolved_table(column: ColumnRef, statement: SelectStatement) -> str | None:
     if column.qualifier is None:
         return "orders" if "orders" in statement.referenced_tables else None
-    aliases = {
-        table.alias or table.name: table.name
-        for table in (statement.from_table,) + tuple(join.table for join in statement.joins)
-    }
-    return aliases.get(column.qualifier)
+    return statement.table_aliases.get(column.qualifier)
 
 
 def _columns_in(expression):
@@ -580,8 +545,6 @@ def _columns_in(expression):
 def _is_count_star(expression) -> bool:
     candidate = expression
     if isinstance(candidate, FunctionCall) and candidate.name == "COALESCE":
-        if len(candidate.arguments) != 2:
-            return False
         left, right = candidate.arguments
         if isinstance(left, FunctionCall) and isinstance(right, LiteralValue) and right.value == 0:
             candidate = left
@@ -638,16 +601,13 @@ def _has_trusted_customer_join(statement: SelectStatement) -> bool:
     for condition in conditions:
         if condition.operator == "=" and isinstance(condition.left, ColumnRef) and isinstance(condition.right, ColumnRef):
             pairs.add(frozenset(((condition.left.qualifier, condition.left.name.casefold()), (condition.right.qualifier, condition.right.name.casefold()))))
-    aliases = {
-        table.name: table.alias or table.name
-        for table in (statement.from_table,) + tuple(join.table for join in statement.joins)
-    }
+    aliases = {name: alias for alias, name in statement.table_aliases.items()}
     order_alias = aliases.get("orders")
     customer_alias = aliases.get("customers")
     expected = {
         frozenset(((order_alias, "tenant_id"), (customer_alias, "tenant_id"))),
         frozenset(((order_alias, "customer_id"), (customer_alias, "customer_id"))),
     }
-    # B3e: exactly the two key equalities.  Any further ON condition narrows
+    # Exactly the two key equalities.  Any further ON condition narrows
     # the rows (one customer, or an orders filter) like an unbound WHERE term.
     return len(pairs) == len(conditions) and pairs == expected

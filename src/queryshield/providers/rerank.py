@@ -1,15 +1,18 @@
-"""Strict, ACL-scoped W05 rerank adapter with auditable usage records."""
+"""Strict, ACL-scoped rerank adapter with auditable usage records."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-import math
 import os
 from typing import Protocol
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
+
+from queryshield.providers.contracts import finite_float
+from queryshield.providers.http import base_url_is_valid
 
 
 MAX_RERANK_CANDIDATES = 10
@@ -118,17 +121,14 @@ def authorized_candidates(
 ) -> tuple[tuple[RerankCandidate, ...], tuple[str, ...]]:
     """Filter ACL-invisible candidates before any provider request is built."""
 
+    # A string here would turn the ACL membership test into substring matching.
+    # The candidates that are kept are checked by the adapter's _validate_request.
     if not isinstance(authorized_candidate_ids, (set, frozenset)):
         raise RerankInputError("authorized_candidate_ids must be a set")
-    if any(not isinstance(candidate, RerankCandidate) for candidate in candidates):
-        raise RerankInputError("candidate must be a RerankCandidate")
-    ids = [candidate.candidate_id for candidate in candidates]
-    if any(type(candidate_id) is not str or not candidate_id.strip() for candidate_id in ids):
-        raise RerankInputError("candidate IDs must be non-empty strings")
-    if len(ids) != len(set(ids)):
-        raise RerankInputError("candidate IDs must be unique")
     visible = tuple(candidate for candidate in candidates if candidate.candidate_id in authorized_candidate_ids)
-    filtered = tuple(candidate_id for candidate_id in ids if candidate_id not in authorized_candidate_ids)
+    filtered = tuple(
+        candidate.candidate_id for candidate in candidates if candidate.candidate_id not in authorized_candidate_ids
+    )
     if len(visible) > MAX_RERANK_CANDIDATES:
         raise RerankInputError("at most ten authorized candidates may be reranked")
     return visible, filtered
@@ -174,10 +174,11 @@ def parse_rerank_response(
             raise RerankResponseError("result index is out of range")
         if index in seen:
             raise RerankResponseError("result indexes must be unique")
-        if type(score) not in {int, float} or not math.isfinite(float(score)):
+        number = finite_float(score)
+        if number is None:
             raise RerankResponseError("relevance_score must be finite numeric")
         seen.add(index)
-        parsed.append((index, float(score)))
+        parsed.append((index, number))
     parsed.sort(key=lambda item: (-item[1], item[0]))
     ids = tuple(candidates[index].candidate_id for index, _ in parsed)
     scores = tuple(score for _, score in parsed)
@@ -203,9 +204,10 @@ class FakeReranker:
         scored: list[tuple[float, int, str]] = []
         for index, candidate in enumerate(candidates):
             score = self.scores_by_candidate_id.get(candidate.candidate_id)
-            if type(score) not in {int, float} or not math.isfinite(float(score)):
+            number = finite_float(score)
+            if number is None:
                 raise RerankInputError("fake score must be finite numeric for every candidate")
-            scored.append((float(score), index, candidate.candidate_id))
+            scored.append((number, index, candidate.candidate_id))
         scored.sort(key=lambda item: (-item[0], item[1]))
         selected = scored[:top_n]
         return RerankCallRecord(
@@ -218,6 +220,15 @@ class FakeReranker:
             usage_status="unknown",
             total_tokens=None,
         )
+
+
+def _is_https_or_loopback(endpoint: str) -> bool:
+    """The Key is sent only over HTTPS, or over plain HTTP to this machine."""
+
+    if not base_url_is_valid(endpoint):
+        return False
+    parsed = urlparse(endpoint)
+    return parsed.scheme == "https" or parsed.hostname in {"127.0.0.1", "localhost", "::1"}
 
 
 @dataclass
@@ -244,7 +255,7 @@ class HttpRerankAdapter:
         ]
         if missing:
             raise RerankConfigurationError("missing configuration names: " + ",".join(missing))
-        if not endpoint.startswith(("https://", "http://127.0.0.1", "http://localhost")):
+        if not _is_https_or_loopback(endpoint):
             raise RerankConfigurationError("rerank URL must use HTTPS or a loopback HTTP endpoint")
         return cls(endpoint, api_key, model, transport=transport)
 
@@ -257,6 +268,11 @@ class HttpRerankAdapter:
     ) -> RerankCallRecord:
         _validate_request(query, candidates, top_n=top_n)
         call_id = f"rerank-{uuid4()}"
+        input_ids = tuple(candidate.candidate_id for candidate in candidates)
+
+        def failed(status: str, error_code: str) -> RerankCallRecord:
+            return RerankCallRecord(call_id, status, self.model, input_ids, (), (), "unknown", None, error_code)
+
         headers = {"Authorization": f"Bearer {self.api_key}", "X-Client-Call-Id": call_id}
         payload = {
             "model": self.model,
@@ -272,68 +288,19 @@ class HttpRerankAdapter:
             with httpx.Client(timeout=self.timeout_seconds, transport=self.transport) as client:
                 response = client.post(self.endpoint, headers=headers, json=payload)
             if response.status_code < 200 or response.status_code >= 300:
-                return RerankCallRecord(
-                    call_id,
-                    "failed",
-                    self.model,
-                    tuple(candidate.candidate_id for candidate in candidates),
-                    (),
-                    (),
-                    "unknown",
-                    None,
-                    f"http_{response.status_code}",
-                )
+                return failed("failed", f"http_{response.status_code}")
             try:
                 body = response.json()
             except (ValueError, UnicodeError):
                 raise RerankResponseError("response body is not valid JSON") from None
             ids, scores, usage_status, total_tokens = parse_rerank_response(body, candidates, top_n=top_n)
-            return RerankCallRecord(
-                call_id,
-                "succeeded",
-                self.model,
-                tuple(candidate.candidate_id for candidate in candidates),
-                ids,
-                scores,
-                usage_status,
-                total_tokens,
-            )
+            return RerankCallRecord(call_id, "succeeded", self.model, input_ids, ids, scores, usage_status, total_tokens)
         except httpx.TimeoutException:
-            return RerankCallRecord(
-                call_id,
-                "timeout",
-                self.model,
-                tuple(candidate.candidate_id for candidate in candidates),
-                (),
-                (),
-                "unknown",
-                None,
-                "timeout",
-            )
+            return failed("timeout", "timeout")
         except httpx.HTTPError:
-            return RerankCallRecord(
-                call_id,
-                "failed",
-                self.model,
-                tuple(candidate.candidate_id for candidate in candidates),
-                (),
-                (),
-                "unknown",
-                None,
-                "transport_error",
-            )
+            return failed("failed", "transport_error")
         except RerankResponseError as exc:
-            return RerankCallRecord(
-                call_id,
-                "failed",
-                self.model,
-                tuple(candidate.candidate_id for candidate in candidates),
-                (),
-                (),
-                "unknown",
-                None,
-                "invalid_response:" + str(exc),
-            )
+            return failed("failed", "invalid_response:" + str(exc))
 
 
 def rerank_authorized_candidates(

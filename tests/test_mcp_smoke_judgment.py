@@ -59,7 +59,7 @@ def test_a_search_the_model_made_is_not_a_known_gap():
         assert _step("definition", answer_status="unverified", tools=tools, sources=["semantic-metric-net"]) == ([], [])
 
 
-def test_a_search_the_server_added_is_the_b2b_known_gap_and_changes_no_hard_failure():
+def test_a_search_the_server_added_is_the_known_http_gap_and_changes_no_hard_failure():
     server_search = {**MCP_SEARCH, "initiated_by": "server"}
     # The model searched first and the server searched again after the send-back.
     failures, gaps = _step("definition", tools=(MCP_SEARCH, server_search), sources=["semantic-metric-net"])
@@ -86,7 +86,7 @@ def test_every_protocol_check_must_hold():
     ]
 
 
-# -- R1: the state store is read while the server runs; errors still write the summary --
+# -- The state store is read while the server runs; errors still write the summary --
 
 import json  # noqa: E402
 import sqlite3  # noqa: E402

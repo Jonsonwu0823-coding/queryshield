@@ -1,4 +1,4 @@
-"""B2b follow-up: an unreachable database fails fast instead of waiting for the OS TCP timeout."""
+"""An unreachable database fails fast instead of waiting for the OS TCP timeout."""
 
 from __future__ import annotations
 

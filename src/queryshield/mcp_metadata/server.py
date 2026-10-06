@@ -23,7 +23,6 @@ from typing import Any
 
 READY_PREFIX = "queryshield-mcp-metadata ready pid="
 REFUSED_PREFIX = "queryshield-mcp-metadata refused reason="
-_ALLOWED_ROLES = frozenset({"requester", "approver"})
 
 
 class _Refused(Exception):
@@ -47,6 +46,8 @@ class _NoDatabaseExecutor:
 
 
 def _parse(argv: list[str] | None) -> argparse.Namespace:
+    from queryshield.catalog.catalog import ALLOWED_ROLES
+
     parser = _Parser(add_help=False)
     for name in ("--run-id", "--tenant-id", "--principal-id", "--role", "--package-dir"):
         parser.add_argument(name, required=True)
@@ -58,7 +59,7 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if any(not str(value).strip() for value in (args.run_id, args.tenant_id, args.principal_id)):
         raise _Refused("empty_identity")
-    if args.role not in _ALLOWED_ROLES:
+    if args.role not in ALLOWED_ROLES:
         raise _Refused("invalid_role")
     if args.retrieval == "hybrid" and not (args.index_path and args.expected_snapshot_id):
         raise _Refused("missing_index")

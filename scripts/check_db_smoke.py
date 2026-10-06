@@ -31,7 +31,7 @@ def main() -> int:
                 ORDER BY table_name
                 """
             ).fetchall()
-            # Since W04 the tables force row-level security keyed on the transaction's
+            # The tables force row-level security keyed on the transaction's
             # tenant, so the fixture is counted per tenant with the server-bound context.
             tenant_counts = []
             for tenant_id in ("A", "B"):

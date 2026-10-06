@@ -1,10 +1,10 @@
-"""W04 durable bounded read-only parallel execution and recovery boundary."""
+"""Durable bounded read-only parallel execution and recovery boundary."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
@@ -12,17 +12,28 @@ from threading import Lock
 from uuid import uuid4
 
 from queryshield.agent.context import NET_FEN_PLAN_ID, NET_FEN_TIME_WINDOW
-from queryshield.agent.proposals import ExecutionContext, MetricBinding
+from queryshield.agent.parallel import MAX_ACTIVE_BRANCHES
+from queryshield.agent.proposals import PARALLEL_METRICS, ExecutionContext, MetricBinding
 from queryshield.approval.service import FixtureQueryExecutor
 from queryshield.catalog.catalog import DEFAULT_CATALOG_VERSION
 from queryshield.db.guarded import GuardedQueryExecutor
-from queryshield.db.w04_state import StateStore, StateStoreError, utc_now
-from queryshield.tools import ControlledTools, ToolError
+from queryshield.db.state_store import StateStore, utc_now
+from queryshield.policy.sql import SQL_POLICY_VERSION
+from queryshield.tools import ControlledTools
 
 
 PARALLEL_RUNTIME_VERSION = "qs-parallel-runtime-v1"
-METRICS = frozenset({"paid_count", "gross_fen", "net_fen"})
-MAX_ACTIVE_BRANCHES = 2
+_WINDOWED_METRIC_SQL = {
+    "gross_fen": (
+        "SELECT COALESCE(SUM(o.amount_fen), 0) AS gross_fen FROM orders AS o "
+        "WHERE o.status = %s AND o.created_at >= %s AND o.created_at < %s"
+    ),
+    "paid_count": (
+        "SELECT COUNT(*) AS paid_count FROM orders AS o "
+        "WHERE o.status = %s AND o.created_at >= %s AND o.created_at < %s"
+    ),
+}
+_NET_FEN_SQL = "SELECT COALESCE(SUM(o.amount_fen), 0) AS net_fen FROM orders AS o WHERE o.status = %s"
 
 
 class DurableParallelError(ValueError):
@@ -74,7 +85,7 @@ def _plan(context: ExecutionContext, metric_ids: Sequence[str], time_window: Map
     if not 2 <= len(metric_ids) <= 3:
         raise DurableParallelError("invalid_parallel_action", "metric_ids must contain two or three metrics")
     normalized = tuple(sorted(metric_ids))
-    if len(set(normalized)) != len(normalized) or any(item not in METRICS for item in normalized):
+    if len(set(normalized)) != len(normalized) or any(item not in PARALLEL_METRICS for item in normalized):
         raise DurableParallelError("invalid_parallel_action", "metric_ids are not a unique supported set")
     if set(time_window) != {"start", "end", "timezone"}:
         raise DurableParallelError("invalid_parallel_plan", "time_window is incomplete")
@@ -84,7 +95,7 @@ def _plan(context: ExecutionContext, metric_ids: Sequence[str], time_window: Map
         "time_window": dict(time_window),
         "tenant_id": context.tenant_id,
         "principal_id": context.principal_id,
-        "policy_version": "qs-sql-v1",
+        "policy_version": SQL_POLICY_VERSION,
         "catalog_version": DEFAULT_CATALOG_VERSION,
     }
     digest = hashlib.sha256(json.dumps(plan, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
@@ -178,7 +189,7 @@ class DurableParallelScheduler:
         assert group is not None
         branch_rows = tuple(group["branches"])
         results: dict[str, Mapping[str, object]] = {}
-        with ThreadPoolExecutor(max_workers=self.max_active_branches, thread_name_prefix="qs-w04-parallel") as pool:
+        with ThreadPoolExecutor(max_workers=self.max_active_branches, thread_name_prefix="qs-parallel") as pool:
             futures = [pool.submit(execute_branch, branch) for branch in branch_rows]
             for future in as_completed(futures):
                 try:
@@ -189,12 +200,11 @@ class DurableParallelScheduler:
                     errors.append(exc.code)
 
         if errors:
-            self.state.update_parallel_group(group_id, status="FAILED", summary={"errors": errors})
-            final = self.state.get_parallel_group(context.run_id)
-            assert final is not None
-            return self._result(final, reused=False, peak_active=self._peak, new_branch_count=len(results), sql_count=sql_count)
-        summary = {"branches": [results[key] for key in sorted(results)], "sql_exec_count": sql_count}
-        self.state.update_parallel_group(group_id, status="SUCCEEDED", summary=summary)
+            status, summary = "FAILED", {"errors": errors}
+        else:
+            status = "SUCCEEDED"
+            summary = {"branches": [results[key] for key in sorted(results)], "sql_exec_count": sql_count}
+        self.state.update_parallel_group(group_id, status=status, summary=summary)
         final = self.state.get_parallel_group(context.run_id)
         assert final is not None
         return self._result(final, reused=False, peak_active=self._peak, new_branch_count=len(results), sql_count=sql_count)
@@ -206,26 +216,18 @@ class DurableParallelScheduler:
         time_window: Mapping[str, str],
     ) -> tuple[dict[str, object], int]:
         executor = self.executor_factory()
-        params = ("paid", time_window["start"], time_window["end"])
-        if metric_id == "gross_fen":
+        windowed_sql = _WINDOWED_METRIC_SQL.get(metric_id)
+        if windowed_sql is not None:
             result = executor.execute(  # type: ignore[attr-defined]
-                "SELECT COALESCE(SUM(o.amount_fen), 0) AS gross_fen FROM orders AS o WHERE o.status = %s AND o.created_at >= %s AND o.created_at < %s",
+                windowed_sql,
                 context=context,
-                params=params,
-                metric_bindings=(_binding(metric_id, time_window),),
-            )
-            return result.evidence.as_dict(), 1
-        if metric_id == "paid_count":
-            result = executor.execute(  # type: ignore[attr-defined]
-                "SELECT COUNT(*) AS paid_count FROM orders AS o WHERE o.status = %s AND o.created_at >= %s AND o.created_at < %s",
-                context=context,
-                params=params,
+                params=("paid", time_window["start"], time_window["end"]),
                 metric_bindings=(_binding(metric_id, time_window),),
             )
             return result.evidence.as_dict(), 1
         if isinstance(executor, FixtureQueryExecutor):
             result = executor.execute(
-                "SELECT COALESCE(SUM(o.amount_fen), 0) AS net_fen FROM orders AS o WHERE o.status = %s",
+                _NET_FEN_SQL,
                 context=context,
                 params=("paid",),
                 metric_bindings=(_binding(metric_id, time_window),),
@@ -233,10 +235,7 @@ class DurableParallelScheduler:
             return result.evidence.as_dict(), 1
         tools = ControlledTools(executor=executor)  # type: ignore[arg-type]
         output = tools.query_readonly(
-            {
-                "sql": "SELECT COALESCE(SUM(o.amount_fen), 0) AS net_fen FROM orders AS o WHERE o.status = %s",
-                "params": {"0": "paid"},
-            },
+            {"sql": _NET_FEN_SQL, "params": {"0": "paid"}},
             context=context,
             metric_bindings=(_binding(metric_id, time_window),),
         )
@@ -302,8 +301,6 @@ class DurableParallelScheduler:
                     status="FAILED",
                     error_code="recovery_required",
                 )
-        current = self.state.get_parallel_group(run_id)
-        assert current is not None
         self.state.update_parallel_group(
             group_id,
             status="FAILED",

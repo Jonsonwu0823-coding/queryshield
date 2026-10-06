@@ -1,4 +1,4 @@
-# QueryShield service image (B4b).
+# QueryShield service image.
 #
 # The project directory layout is kept on purpose: the product finds its data files relative
 # to the source tree (src/queryshield/... -> fixtures/), so src/ and fixtures/ must sit
@@ -32,7 +32,7 @@ RUN pip install --no-deps -e .
 COPY fixtures ./fixtures
 COPY migrations ./migrations
 COPY scripts/setup_databases.py scripts/bootstrap_db.py scripts/bootstrap_demo_db.py scripts/generate_demo_data.py \
-     scripts/demo_run.py scripts/demo_walkthrough.py scripts/b2b_http_smoke.py scripts/new_env.py ./scripts/
+     scripts/demo_run.py scripts/demo_walkthrough.py scripts/http_smoke.py scripts/new_env.py ./scripts/
 
 # The only writable place besides /tmp: the run/approval store and the model call records.
 RUN mkdir -p /var/lib/queryshield && chown app:app /var/lib/queryshield

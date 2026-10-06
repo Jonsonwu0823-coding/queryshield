@@ -1,10 +1,10 @@
-# QueryShield CI (B4b). Two jobs, no repository secrets.
+# QueryShield CI. Two jobs, no repository secrets.
 #
-#   checks   full tests, DB-SMOKE/W01-W05 (Fake) and the Fake smokes through scripts/check-all.ps1,
+#   checks   full tests, DB-SMOKE and the five check suites (Fake) and the Fake smokes through scripts/check-all.ps1,
 #            the same entry the local machine uses, against a PostgreSQL started here with
 #            credentials generated at run time and masked in the log.
 #   compose  docker compose up from an empty environment, the demo walkthrough (Fake, then with
-#            the MCP metadata setting) and the stop/start checks (N8).
+#            the MCP metadata setting) and the stop/start checks.
 #
 # The project directory is named once, in defaults.run.working-directory below. Everything else
 # is relative to it or lives under runner.temp. If the project moves in a different repository
@@ -157,8 +157,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/compose-evidence"
           docker compose exec -T app python scripts/demo_walkthrough.py --mode fake --metadata-tools local --evidence-dir /tmp/evidence-local
           docker compose exec -T app python scripts/demo_run.py --mode fake --base-url http://127.0.0.1:8000 --evidence-dir /tmp/evidence-demo-run
-          docker compose exec -T app cat /tmp/evidence-local/b4b-walkthrough-summary.json > "$RUNNER_TEMP/compose-evidence/walkthrough-local-summary.json"
-          docker compose exec -T app cat /tmp/evidence-demo-run/b3d-demo-summary.json > "$RUNNER_TEMP/compose-evidence/demo-run-summary.json"
+          docker compose exec -T app cat /tmp/evidence-local/walkthrough-summary.json > "$RUNNER_TEMP/compose-evidence/walkthrough-local-summary.json"
+          docker compose exec -T app cat /tmp/evidence-demo-run/demo-summary.json > "$RUNNER_TEMP/compose-evidence/demo-run-summary.json"
 
       - name: Running docker compose up again is idempotent
         run: |
@@ -187,7 +187,7 @@ jobs:
           done
           exit 1
 
-      - name: MCP metadata setting - recreate app with /tmp on a volume, demo walkthrough, then stop and start (N8)
+      - name: MCP metadata setting - recreate app with /tmp on a volume, demo walkthrough, then stop and start
         run: |
           # compose.yaml keeps /tmp on tmpfs, which is emptied when the container stops; here /tmp is a
           # named volume so that a leftover index directory would survive and be seen after the restart.
@@ -203,7 +203,7 @@ jobs:
           docker compose $COMPOSE_OVERRIDE up -d --no-deps app
           wait_healthy
           docker compose $COMPOSE_OVERRIDE exec -T app python scripts/demo_walkthrough.py --mode fake --metadata-tools mcp --evidence-dir /tmp/evidence-mcp
-          docker compose $COMPOSE_OVERRIDE exec -T app cat /tmp/evidence-mcp/b4b-walkthrough-summary.json > "$RUNNER_TEMP/compose-evidence/walkthrough-mcp-summary.json"
+          docker compose $COMPOSE_OVERRIDE exec -T app cat /tmp/evidence-mcp/walkthrough-summary.json > "$RUNNER_TEMP/compose-evidence/walkthrough-mcp-summary.json"
           # 1. the MCP run created the index directory
           docker compose $COMPOSE_OVERRIDE exec -T app sh -c 'ls -d /tmp/queryshield-mcp-index-*'
           # 2. a normal stop: exit code 0 or 143 (not 137) and the shutdown record in the log

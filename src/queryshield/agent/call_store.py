@@ -4,16 +4,17 @@ from pathlib import Path
 import sqlite3
 from threading import RLock
 from typing import Self
-from uuid import uuid4
 
 from queryshield.agent.proposals import (
     CallIdentityError,
     ModelCallIdentity,
+    new_call_identity,
+    retry_identity,
 )
 
 
 class DurableModelCallStore:
-    """Minimal local persistence for call identity, not a W04 run/recovery store."""
+    """Minimal local persistence for call identity, not a run/recovery store."""
 
     def __init__(self, database_path: str | Path) -> None:
         self._database_path = str(database_path)
@@ -51,21 +52,16 @@ class DurableModelCallStore:
                 self._connection = None
 
     def new_call(self, run_id: str, *, request_id: str | None = None) -> ModelCallIdentity:
-        identity = ModelCallIdentity(
-            run_id=run_id,
-            model_call_id=f"local-{uuid4()}",
-            request_id=request_id or str(uuid4()),
-            attempt_kind="new",
-        )
+        identity = new_call_identity(run_id, request_id)
         try:
             with self._lock:
                 self._connection.execute(
-                """
-                INSERT INTO model_call_attempts
-                    (run_id, model_call_id, attempt_index, request_id, attempt_kind, retry_of_model_call_id)
-                VALUES (?, ?, 0, ?, 'new', NULL)
-                """,
-                (identity.run_id, identity.model_call_id, identity.request_id),
+                    """
+                    INSERT INTO model_call_attempts
+                        (run_id, model_call_id, attempt_index, request_id, attempt_kind, retry_of_model_call_id)
+                    VALUES (?, ?, 0, ?, 'new', NULL)
+                    """,
+                    (identity.run_id, identity.model_call_id, identity.request_id),
                 )
                 self._connection.commit()
         except sqlite3.IntegrityError as exc:
@@ -81,35 +77,29 @@ class DurableModelCallStore:
         with self._lock:
             canonical = self.get(identity.run_id, identity.model_call_id)
             row = self._connection.execute(
-            """
-            SELECT COALESCE(MAX(attempt_index), -1) + 1
-            FROM model_call_attempts
-            WHERE run_id = ? AND model_call_id = ?
-            """,
-            (canonical.run_id, canonical.model_call_id),
+                """
+                SELECT COALESCE(MAX(attempt_index), -1) + 1
+                FROM model_call_attempts
+                WHERE run_id = ? AND model_call_id = ?
+                """,
+                (canonical.run_id, canonical.model_call_id),
             ).fetchone()
             next_index = int(row[0])
-            retry = ModelCallIdentity(
-            run_id=canonical.run_id,
-            model_call_id=canonical.model_call_id,
-            request_id=request_id or str(uuid4()),
-            attempt_kind="transport_retry",
-            retry_of_model_call_id=canonical.model_call_id,
-            )
+            retry = retry_identity(canonical, request_id)
             try:
                 self._connection.execute(
-                """
-                INSERT INTO model_call_attempts
-                    (run_id, model_call_id, attempt_index, request_id, attempt_kind, retry_of_model_call_id)
-                VALUES (?, ?, ?, ?, 'transport_retry', ?)
-                """,
-                (
-                    retry.run_id,
-                    retry.model_call_id,
-                    next_index,
-                    retry.request_id,
-                    retry.retry_of_model_call_id,
-                ),
+                    """
+                    INSERT INTO model_call_attempts
+                        (run_id, model_call_id, attempt_index, request_id, attempt_kind, retry_of_model_call_id)
+                    VALUES (?, ?, ?, ?, 'transport_retry', ?)
+                    """,
+                    (
+                        retry.run_id,
+                        retry.model_call_id,
+                        next_index,
+                        retry.request_id,
+                        retry.retry_of_model_call_id,
+                    ),
                 )
                 self._connection.commit()
             except sqlite3.IntegrityError as exc:
@@ -119,12 +109,12 @@ class DurableModelCallStore:
     def get(self, run_id: str, model_call_id: str) -> ModelCallIdentity:
         with self._lock:
             row = self._connection.execute(
-            """
-            SELECT run_id, model_call_id, request_id, attempt_kind, retry_of_model_call_id
-            FROM model_call_attempts
-            WHERE run_id = ? AND model_call_id = ? AND attempt_kind = 'new'
-            """,
-            (run_id, model_call_id),
+                """
+                SELECT run_id, model_call_id, request_id, attempt_kind, retry_of_model_call_id
+                FROM model_call_attempts
+                WHERE run_id = ? AND model_call_id = ? AND attempt_kind = 'new'
+                """,
+                (run_id, model_call_id),
             ).fetchone()
         if row is None:
             raise CallIdentityError("model call identity was not found")
@@ -134,13 +124,13 @@ class DurableModelCallStore:
         self.get(run_id, model_call_id)
         with self._lock:
             rows = self._connection.execute(
-            """
-            SELECT run_id, model_call_id, request_id, attempt_kind, retry_of_model_call_id
-            FROM model_call_attempts
-            WHERE run_id = ? AND model_call_id = ?
-            ORDER BY attempt_index
-            """,
-            (run_id, model_call_id),
+                """
+                SELECT run_id, model_call_id, request_id, attempt_kind, retry_of_model_call_id
+                FROM model_call_attempts
+                WHERE run_id = ? AND model_call_id = ?
+                ORDER BY attempt_index
+                """,
+                (run_id, model_call_id),
             ).fetchall()
         return tuple(_identity_from_row(row) for row in rows)
 

@@ -18,6 +18,7 @@ from queryshield.catalog.catalog import DEFAULT_CATALOG_VERSION
 from queryshield.db.readonly import bind_transaction_tenant, connect_readonly
 from queryshield.policy.sql import (
     MAX_RESULT_ROWS,
+    SQL_POLICY_VERSION,
     BinaryExpression,
     BooleanExpression,
     ColumnRef,
@@ -31,7 +32,6 @@ from queryshield.policy.sql import (
     SelectStatement,
     Star,
     TableRef,
-    UnaryExpression,
     parse_readonly_select,
 )
 
@@ -81,14 +81,14 @@ def render_scoped_select(
 
 
 class GuardedQueryExecutor:
-    """Execute the T03 AST through a tenant-scoped, read-only database boundary."""
+    """Execute the parsed AST through a tenant-scoped, read-only database boundary."""
 
     def __init__(
         self,
         *,
         connect: ConnectionFactory = connect_readonly,
         clock: Clock | None = None,
-        policy_version: str = "qs-sql-v1",
+        policy_version: str = SQL_POLICY_VERSION,
         catalog_version: str = DEFAULT_CATALOG_VERSION,
     ) -> None:
         self._connect = connect
@@ -113,13 +113,10 @@ class GuardedQueryExecutor:
             input_params=params,
         )
 
-        connection_factory = self._connect
-        if connection_factory is connect_readonly:
-            connection = connect_readonly(tenant_id=context.tenant_id)
-        else:
-            connection = connection_factory()
+        read_only_default = self._connect is connect_readonly
+        connection = self._connect()
         with connection:
-            if connection_factory is connect_readonly:
+            if read_only_default:
                 bind_transaction_tenant(connection, context.tenant_id)
             with connection.cursor(row_factory=dict_row) as cursor:
                 cursor.execute(rendered.sql, rendered.params)
@@ -242,8 +239,6 @@ class _Renderer:
         if isinstance(expression, FunctionCall):
             args = ", ".join(self._expression(argument) for argument in expression.arguments)
             return f"{expression.name}({args})"
-        if isinstance(expression, UnaryExpression):
-            return f"({expression.operator}{self._expression(expression.operand)})"
         if isinstance(expression, BinaryExpression):
             return f"({self._expression(expression.left)} {expression.operator} {self._expression(expression.right)})"
         raise GuardedQueryError("invalid_ast", "unknown expression node")
@@ -263,10 +258,7 @@ def _validate_input_params(params: Sequence[object]) -> None:
 
 
 def _validate_qualifiers(statement: SelectStatement) -> None:
-    aliases = {
-        table.alias or table.name
-        for table in (statement.from_table,) + tuple(join.table for join in statement.joins)
-    }
+    aliases = statement.table_aliases
     expressions: list[object] = [item.expression for item in statement.projection]
     expressions.extend(statement.group_by)
     expressions.extend(item.expression for item in statement.order_by)
@@ -299,8 +291,6 @@ def _collect_qualifiers(expression: object) -> tuple[str, ...]:
             for argument in expression.arguments
             for qualifier in _collect_qualifiers(argument)
         )
-    if isinstance(expression, UnaryExpression):
-        return _collect_qualifiers(expression.operand)
     if isinstance(expression, BinaryExpression):
         return _collect_qualifiers(expression.left) + _collect_qualifiers(expression.right)
     return ()

@@ -1,8 +1,8 @@
-"""Server-owned, versioned configuration for one W03 graph run."""
+"""Server-owned, versioned configuration for one graph run."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Final
 
 from queryshield.catalog.catalog import DEFAULT_CATALOG_VERSION
@@ -16,6 +16,16 @@ DEFAULT_PROFILE: Final = "queryshield-w03-hybrid-v1"
 DEFAULT_KNOWLEDGE_SNAPSHOT_ID: Final = "knowledge-v1-9f580dd7f887ed0a"
 DEFAULT_MODEL_VERSION: Final = "server-model-v1"
 DEFAULT_ADAPTER_VERSION: Final = "model-adapter-v1"
+NATIVE_ADAPTER_VERSION: Final = "model-adapter-native-v1"
+# A native function-calling run differs from json only in how the model
+# returns its decision; these versions mark it, so a checkpoint of one protocol
+# never resumes under the other.
+NATIVE_VERSIONS: Final = {
+    "prompt_version": "qs-system-prompt-native-v2",
+    "action_schema_version": "qs-action-schema-native-v1",
+    "tool_description_version": "qs-tool-descriptions-native-v2",
+    "adapter_version": NATIVE_ADAPTER_VERSION,
+}
 
 
 def _version_text(value: object, *, field: str) -> str:
@@ -39,18 +49,9 @@ class RunConfig:
     adapter_version: str = DEFAULT_ADAPTER_VERSION
 
     def __post_init__(self) -> None:
-        fields = (
-            ("profile", self.profile),
-            ("prompt_version", self.prompt_version),
-            ("action_schema_version", self.action_schema_version),
-            ("tool_description_version", self.tool_description_version),
-            ("catalog_version", self.catalog_version),
-            ("knowledge_snapshot_id", self.knowledge_snapshot_id),
-            ("model_version", self.model_version),
-            ("adapter_version", self.adapter_version),
-        )
-        for field, value in fields:
-            _version_text(value, field=field)
+        for field in fields(self):
+            if field.name != "skill_versions":
+                _version_text(getattr(self, field.name), field=field.name)
         if type(self.skill_versions) is not tuple:
             raise ValueError("skill_versions must be a tuple")
         normalized = tuple(_version_text(value, field="skill_versions[]") for value in self.skill_versions)
@@ -58,52 +59,25 @@ class RunConfig:
             raise ValueError("skill_versions must not contain duplicates")
         object.__setattr__(self, "skill_versions", normalized)
 
+    @property
+    def model_protocol(self) -> str:
+        return "native" if self.adapter_version == NATIVE_ADAPTER_VERSION else "json"
+
     def as_dict(self) -> dict[str, object]:
-        return {
-            "run_config_version": RUN_CONFIG_VERSION,
-            "profile": self.profile,
-            "prompt_version": self.prompt_version,
-            "action_schema_version": self.action_schema_version,
-            "tool_description_version": self.tool_description_version,
-            "catalog_version": self.catalog_version,
-            "knowledge_snapshot_id": self.knowledge_snapshot_id,
-            "skill_versions": list(self.skill_versions),
-            "model_version": self.model_version,
-            "adapter_version": self.adapter_version,
-        }
+        values = {field.name: getattr(self, field.name) for field in fields(self)}
+        return {"run_config_version": RUN_CONFIG_VERSION, **values, "skill_versions": list(self.skill_versions)}
 
     @classmethod
     def from_dict(cls, value: object) -> "RunConfig":
         if not isinstance(value, dict):
             raise ValueError("run configuration must be an object")
-        fields = {
-            "run_config_version",
-            "profile",
-            "prompt_version",
-            "action_schema_version",
-            "tool_description_version",
-            "catalog_version",
-            "knowledge_snapshot_id",
-            "skill_versions",
-            "model_version",
-            "adapter_version",
-        }
-        if set(value) != fields or value.get("run_config_version") != RUN_CONFIG_VERSION:
+        names = [field.name for field in fields(cls)]
+        if set(value) != {"run_config_version", *names} or value.get("run_config_version") != RUN_CONFIG_VERSION:
             raise ValueError("run configuration fields or version are invalid")
         skills = value.get("skill_versions")
         if type(skills) is not list:
             raise ValueError("skill_versions must be a list in persisted configuration")
-        return cls(
-            profile=value["profile"],
-            prompt_version=value["prompt_version"],
-            action_schema_version=value["action_schema_version"],
-            tool_description_version=value["tool_description_version"],
-            catalog_version=value["catalog_version"],
-            knowledge_snapshot_id=value["knowledge_snapshot_id"],
-            skill_versions=tuple(skills),
-            model_version=value["model_version"],
-            adapter_version=value["adapter_version"],
-        )
+        return cls(**{**{name: value[name] for name in names}, "skill_versions": tuple(skills)})
 
 
 DEFAULT_RUN_CONFIG = RunConfig()
@@ -117,6 +91,8 @@ __all__ = [
     "DEFAULT_MODEL_VERSION",
     "DEFAULT_PROFILE",
     "DEFAULT_RUN_CONFIG",
+    "NATIVE_ADAPTER_VERSION",
+    "NATIVE_VERSIONS",
     "RUN_CONFIG_VERSION",
     "SYSTEM_PROMPT_VERSION",
     "TOOL_DESCRIPTION_VERSION",

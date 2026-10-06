@@ -1,4 +1,4 @@
-"""Usage status normalization shared by W05 runtime and product observations."""
+"""Usage status normalization shared by runtime and product observations."""
 
 from __future__ import annotations
 

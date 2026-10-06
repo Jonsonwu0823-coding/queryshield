@@ -1,4 +1,4 @@
-"""Run independently seeded W05 state cases through profile-specific adapters."""
+"""Run independently seeded state cases through profile-specific adapters."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
-from queryshield.evaluation.report import build_w05_comparison_report
-from queryshield.evaluation.state_cases import W05StateCase, canonical_sha256
+from queryshield.evaluation.report import build_comparison_report
+from queryshield.evaluation.state_cases import StateCase, canonical_sha256
 from queryshield.evaluation.state_oracle import judge_state_case
 
 
@@ -43,9 +43,9 @@ def _missing_observation(error_code: str) -> dict[str, object]:
     }
 
 
-def run_w05_stateful_suite(
-    cases: Sequence[W05StateCase],
-    run_profile: Callable[[W05StateCase, str, str], Mapping[str, object]],
+def run_stateful_suite(
+    cases: Sequence[StateCase],
+    run_profile: Callable[[StateCase, str, str], Mapping[str, object]],
     *,
     metadata: Mapping[str, object],
     profiles: Sequence[str] = ("B0", "B1"),
@@ -58,14 +58,14 @@ def run_w05_stateful_suite(
     """
 
     if not isinstance(cases, Sequence) or not 1 <= len(cases) <= 32:
-        raise ValueError("W05 replay requires between one and 32 frozen task cases")
-    if any(not isinstance(case, W05StateCase) for case in cases):
-        raise TypeError("all replay cases must be W05StateCase values")
+        raise ValueError("replay requires between one and 32 frozen task cases")
+    if any(not isinstance(case, StateCase) for case in cases):
+        raise TypeError("all replay cases must be StateCase values")
     case_ids = [case.case_id for case in cases]
     if len(case_ids) != len(set(case_ids)):
         raise ValueError("replay case ids must be unique")
     if tuple(profiles) != ("B0", "B1"):
-        raise ValueError("W05 requires B0 followed by B1 for each independently seeded case")
+        raise ValueError("Replay requires B0 followed by B1 for each independently seeded case")
 
     raw_by_profile: dict[str, list[dict[str, object]]] = {"B0": [], "B1": []}
     for case in cases:
@@ -156,7 +156,7 @@ def run_w05_stateful_suite(
             record["judged_status"] = judgment["judged_status"]
             raw_by_profile[profile].append(record)
 
-    report = build_w05_comparison_report(
+    report = build_comparison_report(
         cases,
         raw_by_profile,
         metadata={**dict(metadata), "frozen_case_count": len(cases)},
@@ -227,4 +227,4 @@ def run_w05_stateful_suite(
     }
 
 
-__all__ = ["run_w05_stateful_suite"]
+__all__ = ["run_stateful_suite"]

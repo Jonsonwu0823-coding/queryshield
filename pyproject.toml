@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "queryshield"
 version = "0.1.0"
-description = "A small governed query service used for the W01 practice slice."
+description = "A small governed query service used as a practice project."
 requires-python = ">=3.12,<3.15"
 dependencies = [
     "fastapi>=0.115,<1",

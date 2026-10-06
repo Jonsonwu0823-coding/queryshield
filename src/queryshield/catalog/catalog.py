@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Any
 
 
 CATALOG_VERSION = "catalog-v1"
 CATALOG_V2_VERSION = "catalog-v2"
 CATALOG_V3_VERSION = "catalog-v3"
-# catalog-v4 (B3c-1): the v3 phrase table without the generic ask markers
+# catalog-v4: the v3 phrase table without the generic ask markers
 # "金额"/"总额", plus the business phrase "毛额" for gross_fen.
 CATALOG_V4_VERSION = "catalog-v4"
 # Versions that carry the phrase table (metric names/phrases, rule values).
@@ -48,7 +47,7 @@ class CatalogEntry:
     payload: Mapping[str, object]
 
     def as_search_item(self) -> dict[str, str]:
-        """Return only the public C3 search shape; richer metadata stays server-side."""
+        """Return only the public search shape; richer metadata stays server-side."""
         return {
             "id": self.id,
             "text": self.text,
@@ -190,21 +189,50 @@ def _validate_field_ref(field_ref: str, *, path: str) -> None:
         raise CatalogValidationError(f"{path} points outside the commerce-v1 schema")
 
 
+_ROOT_KEYS = frozenset(
+    {"catalog_version", "fixture_version", "source", "time_window", "access_scope", "entries", "clarifications"}
+)
+
+
+def _validate_source(
+    source: object, *, path: str, identity_message: str, min_files: int
+) -> tuple[str, str]:
+    """The source block (the commerce-v1 fixture) of a catalog or an overlay; returns its id and version."""
+
+    source = _as_mapping(source, path=path)
+    source_id = _as_string(source.get("source_id"), path=f"{path}.source_id")
+    source_version = _as_string(source.get("version"), path=f"{path}.version")
+    if source_id != FIXTURE_VERSION or source_version != FIXTURE_VERSION:
+        raise CatalogValidationError(identity_message)
+    _as_string_list(source.get("files"), path=f"{path}.files", minimum=min_files)
+    return source_id, source_version
+
+
+def _validate_entry_common(entry: Mapping[str, object], path: str, source_id: str, source_version: str) -> None:
+    """What every entry of a catalog or an overlay has: text, traceable to the one source."""
+
+    _as_string(entry.get("text"), path=f"{path}.text")
+    if entry.get("source_id") != source_id or entry.get("version") != source_version:
+        raise CatalogValidationError(f"{path} has an untraceable source/version")
+
+
+def _validate_entry_access(entry: Mapping[str, object], path: str) -> None:
+    if entry.get("access_scope") != "tenant_scoped_readonly":
+        raise CatalogValidationError(f"{path}.access_scope is not tenant scoped")
+    if type(entry.get("requires_approval")) is not bool:
+        raise CatalogValidationError(f"{path}.requires_approval must be boolean")
+
+
+def _validate_field_refs(entry: Mapping[str, object], path: str) -> None:
+    for ref in _as_string_list(entry.get("field_refs"), path=f"{path}.field_refs"):
+        _validate_field_ref(ref, path=f"{path}.field_refs[]")
+
+
 def validate_catalog_document(document: Mapping[str, object]) -> None:
-    """Validate the T01 asset before a later retrieval/tool layer can use it."""
+    """Validate a catalog document before the retrieval or tool layer uses it."""
     if not isinstance(document, Mapping):
         raise CatalogValidationError("catalog root must be an object")
-
-    required_root = {
-        "catalog_version",
-        "fixture_version",
-        "source",
-        "time_window",
-        "access_scope",
-        "entries",
-        "clarifications",
-    }
-    missing = required_root - set(document)
+    missing = _ROOT_KEYS - set(document)
     if missing:
         raise CatalogValidationError(f"catalog root is missing: {sorted(missing)}")
 
@@ -213,21 +241,30 @@ def validate_catalog_document(document: Mapping[str, object]) -> None:
         raise CatalogValidationError("catalog_version must be catalog-v1, catalog-v3 or catalog-v4")
     if _as_string(document["fixture_version"], path="fixture_version") != FIXTURE_VERSION:
         raise CatalogValidationError("fixture_version must be commerce-v1")
+    source_id, source_version = _validate_source(
+        document["source"],
+        path="source",
+        identity_message="source must identify the commerce-v1 fixture",
+        min_files=3,
+    )
+    _validate_time_window(document["time_window"])
+    _validate_access_scope(document["access_scope"])
+    _validate_entries(document["entries"], version, source_id, source_version)
+    _validate_clarifications(document["clarifications"], version)
+    if version in PHRASE_TABLE_VERSIONS:
+        _validate_phrase_table(document["entries"], document["clarifications"])
 
-    source = _as_mapping(document["source"], path="source")
-    source_id = _as_string(source.get("source_id"), path="source.source_id")
-    source_version = _as_string(source.get("version"), path="source.version")
-    if source_id != FIXTURE_VERSION or source_version != FIXTURE_VERSION:
-        raise CatalogValidationError("source must identify the commerce-v1 fixture")
-    source_files = _as_string_list(source.get("files"), path="source.files", minimum=3)
 
-    time_window = _as_mapping(document["time_window"], path="time_window")
+def _validate_time_window(value: object) -> None:
+    time_window = _as_mapping(value, path="time_window")
     for key in ("start", "end", "timezone", "interval"):
         _as_string(time_window.get(key), path=f"time_window.{key}")
     if time_window["timezone"] != "UTC" or time_window["interval"] != "[start,end)":
         raise CatalogValidationError("time_window must use the fixed UTC half-open interval")
 
-    access_scope = _as_mapping(document["access_scope"], path="access_scope")
+
+def _validate_access_scope(value: object) -> None:
+    access_scope = _as_mapping(value, path="access_scope")
     roles = _as_string_list(access_scope.get("roles"), path="access_scope.roles", minimum=1)
     if set(roles) != ALLOWED_ROLES:
         raise CatalogValidationError("access_scope.roles must be requester and approver")
@@ -240,7 +277,8 @@ def validate_catalog_document(document: Mapping[str, object]) -> None:
     if access_scope.get("model_may_supply_identity") is not False:
         raise CatalogValidationError("model identity fields must remain server-owned")
 
-    raw_entries = document["entries"]
+
+def _validate_entries(raw_entries: object, version: str, source_id: str, source_version: str) -> None:
     if type(raw_entries) is not list or len(raw_entries) < 10:
         raise CatalogValidationError("entries must contain at least ten catalog records")
 
@@ -256,32 +294,10 @@ def validate_catalog_document(document: Mapping[str, object]) -> None:
         kind = _as_string(entry.get("kind"), path=f"{path}.kind")
         if kind not in {"table", "field", "metric"}:
             raise CatalogValidationError(f"{path}.kind is unsupported")
-        _as_string(entry.get("text"), path=f"{path}.text")
-        if entry.get("source_id") != source_id or entry.get("version") != source_version:
-            raise CatalogValidationError(f"{path} has an untraceable source/version")
-        if entry.get("access_scope") != "tenant_scoped_readonly":
-            raise CatalogValidationError(f"{path}.access_scope is not tenant scoped")
-        if type(entry.get("requires_approval")) is not bool:
-            raise CatalogValidationError(f"{path}.requires_approval must be boolean")
-
-        table = entry.get("table")
-        column = entry.get("column")
-        if kind in {"table", "field"}:
-            table_name = _as_string(table, path=f"{path}.table")
-            if table_name not in ALLOWED_TABLE_COLUMNS:
-                raise CatalogValidationError(f"{path}.table is not in commerce-v1")
-            if kind == "field":
-                column_name = _as_string(column, path=f"{path}.column")
-                if column_name not in ALLOWED_TABLE_COLUMNS[table_name]:
-                    raise CatalogValidationError(f"{path}.column is not in the real table")
-            elif column is not None:
-                raise CatalogValidationError(f"{path}.column must be null for a table entry")
-        elif table is not None or column is not None:
-            raise CatalogValidationError(f"{path} metric cannot have table/column fields")
-
-        field_refs = _as_string_list(entry.get("field_refs"), path=f"{path}.field_refs")
-        for ref in field_refs:
-            _validate_field_ref(ref, path=f"{path}.field_refs[]")
+        _validate_entry_common(entry, path, source_id, source_version)
+        _validate_entry_access(entry, path)
+        _validate_entry_target(entry, kind, path)
+        _validate_field_refs(entry, path)
         if kind == "metric":
             metric_id = entry_id.removeprefix("metric.")
             if not entry_id.startswith("metric.") or metric_id not in ALLOWED_METRICS:
@@ -295,7 +311,28 @@ def validate_catalog_document(document: Mapping[str, object]) -> None:
             _as_string(entry.get("name"), path=f"{path}.name")
             _as_string_list(entry.get("phrases"), path=f"{path}.phrases")
 
-    raw_clarifications = document["clarifications"]
+
+def _validate_entry_target(entry: Mapping[str, object], kind: str, path: str) -> None:
+    """Table and field entries name a real table (and column); a metric names neither."""
+
+    table = entry.get("table")
+    column = entry.get("column")
+    if kind == "metric":
+        if table is not None or column is not None:
+            raise CatalogValidationError(f"{path} metric cannot have table/column fields")
+        return
+    table_name = _as_string(table, path=f"{path}.table")
+    if table_name not in ALLOWED_TABLE_COLUMNS:
+        raise CatalogValidationError(f"{path}.table is not in commerce-v1")
+    if kind == "field":
+        column_name = _as_string(column, path=f"{path}.column")
+        if column_name not in ALLOWED_TABLE_COLUMNS[table_name]:
+            raise CatalogValidationError(f"{path}.column is not in the real table")
+    elif column is not None:
+        raise CatalogValidationError(f"{path}.column must be null for a table entry")
+
+
+def _validate_clarifications(raw_clarifications: object, version: str) -> None:
     if type(raw_clarifications) is not list or len(raw_clarifications) < 3:
         raise CatalogValidationError("at least three clarification rules are required")
     seen_clarifications: set[str] = set()
@@ -308,14 +345,14 @@ def validate_catalog_document(document: Mapping[str, object]) -> None:
         seen_clarifications.add(rule_id)
         if version == CATALOG_VERSION:
             _as_string_list(rule.get("trigger_terms"), path=f"{path}.trigger_terms")
+            if "values" in rule:
+                raise CatalogValidationError(f"{path}.values needs the catalog-v3 phrase table")
         elif "trigger_terms" in rule:
             raise CatalogValidationError(f"{path}.trigger_terms is replaced by the catalog-v3 phrase table")
         _as_string(rule.get("condition"), path=f"{path}.condition")
         _as_string(rule.get("question"), path=f"{path}.question")
         _as_string_list(rule.get("allowed_values"), path=f"{path}.allowed_values")
         _as_string(rule.get("resolution"), path=f"{path}.resolution")
-    if version in PHRASE_TABLE_VERSIONS:
-        _validate_phrase_table(raw_entries, raw_clarifications)
 
 
 def _validate_phrase_table(raw_entries: list[object], raw_rules: list[object]) -> None:
@@ -409,12 +446,12 @@ def validate_catalog_overlay_document(document: Mapping[str, object]) -> None:
     if document["fixture_version"] != FIXTURE_VERSION:
         raise CatalogValidationError("catalog overlay must use commerce-v1")
 
-    source = _as_mapping(document["source"], path="overlay.source")
-    source_id = _as_string(source.get("source_id"), path="overlay.source.source_id")
-    source_version = _as_string(source.get("version"), path="overlay.source.version")
-    if source_id != FIXTURE_VERSION or source_version != FIXTURE_VERSION:
-        raise CatalogValidationError("catalog-v2 source must identify commerce-v1")
-    _as_string_list(source.get("files"), path="overlay.source.files", minimum=1)
+    source_id, source_version = _validate_source(
+        document["source"],
+        path="overlay.source",
+        identity_message="catalog-v2 source must identify commerce-v1",
+        min_files=1,
+    )
 
     entries = document["entries"]
     if type(entries) is not list or not entries:
@@ -429,13 +466,9 @@ def validate_catalog_overlay_document(document: Mapping[str, object]) -> None:
         seen_ids.add(entry_id)
         if entry_id != "metric.refund_fen" or entry.get("kind") != "metric":
             raise CatalogValidationError("catalog-v2 currently only registers metric.refund_fen")
-        _as_string(entry.get("text"), path=f"{path}.text")
-        if entry.get("source_id") != source_id or entry.get("version") != source_version:
-            raise CatalogValidationError(f"{path} has an untraceable source/version")
+        _validate_entry_common(entry, path, source_id, source_version)
         _as_string(entry.get("source_locator"), path=f"{path}.source_locator")
-        field_refs = _as_string_list(entry.get("field_refs"), path=f"{path}.field_refs")
-        for ref in field_refs:
-            _validate_field_ref(ref, path=f"{path}.field_refs[]")
+        _validate_field_refs(entry, path)
         if entry.get("unit") != "CNY_fen":
             raise CatalogValidationError("catalog-v2 refund_fen must use CNY_fen")
         _as_string(entry.get("definition"), path=f"{path}.definition")
@@ -450,24 +483,23 @@ def validate_catalog_overlay_document(document: Mapping[str, object]) -> None:
             )
         if any(type(value) is not int or value < 0 for value in fixed_values.values()):
             raise CatalogValidationError(f"{path}.fixed_tenant_values must be non-negative integers")
-        if entry.get("access_scope") != "tenant_scoped_readonly":
-            raise CatalogValidationError(f"{path}.access_scope is not tenant scoped")
-        if type(entry.get("requires_approval")) is not bool:
-            raise CatalogValidationError(f"{path}.requires_approval must be boolean")
+        _validate_entry_access(entry, path)
 
 
 def _parse_entry(raw_entry: Mapping[str, object]) -> CatalogEntry:
+    """Build an entry from a validated document; an overlay entry has no table or column to check."""
+
     return CatalogEntry(
-        id=_as_string(raw_entry["id"], path="entry.id"),
-        kind=_as_string(raw_entry["kind"], path="entry.kind"),
-        text=_as_string(raw_entry["text"], path="entry.text"),
-        source_id=_as_string(raw_entry["source_id"], path="entry.source_id"),
-        version=_as_string(raw_entry["version"], path="entry.version"),
+        id=raw_entry["id"],
+        kind=raw_entry["kind"],
+        text=raw_entry["text"],
+        source_id=raw_entry["source_id"],
+        version=raw_entry["version"],
         table=raw_entry.get("table") if isinstance(raw_entry.get("table"), str) else None,
         column=raw_entry.get("column") if isinstance(raw_entry.get("column"), str) else None,
         field_refs=tuple(raw_entry["field_refs"]),
-        access_scope=_as_string(raw_entry["access_scope"], path="entry.access_scope"),
-        requires_approval=raw_entry["requires_approval"] is True,
+        access_scope=raw_entry["access_scope"],
+        requires_approval=raw_entry["requires_approval"],
         payload=raw_entry,
     )
 
@@ -476,19 +508,19 @@ def _parse_clarification(raw_rule: Mapping[str, object]) -> ClarificationRule:
     values = tuple(
         ClarificationValue(
             value=str(item["value"]),
-            metric=item.get("metric") if type(item.get("metric")) is str else None,
+            metric=item.get("metric"),
             phrases=tuple(item.get("phrases", ())),
             definition=item.get("definition") if type(item.get("definition")) is str else None,
-            supported=item.get("supported", True) is True,
-            unsupported_note=item.get("unsupported_note") if type(item.get("unsupported_note")) is str else None,
+            supported=item.get("supported", True),
+            unsupported_note=item.get("unsupported_note"),
         )
         for item in raw_rule.get("values", ())
     )
     return ClarificationRule(
-        id=_as_string(raw_rule["id"], path="clarification.id"),
+        id=raw_rule["id"],
         trigger_terms=tuple(raw_rule.get("trigger_terms", ())),
-        condition=_as_string(raw_rule["condition"], path="clarification.condition"),
-        question=_as_string(raw_rule["question"], path="clarification.question"),
+        condition=raw_rule["condition"],
+        question=raw_rule["question"],
         allowed_values=tuple(raw_rule["allowed_values"]),
         payload=raw_rule,
         ambiguous_phrases=tuple(raw_rule.get("ambiguous_phrases", ())),
@@ -497,17 +529,15 @@ def _parse_clarification(raw_rule: Mapping[str, object]) -> ClarificationRule:
     )
 
 
-def load_catalog(path: str | Path) -> SemanticCatalog:
-    catalog_path = Path(path)
+def _read_catalog_json(path: Path, label: str) -> object:
     try:
-        document = json.loads(
-            catalog_path.read_text(encoding="utf-8"), object_pairs_hook=_duplicate_check
-        )
-    except CatalogValidationError:
-        raise
+        return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_duplicate_check)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise CatalogValidationError(f"cannot load catalog: {catalog_path}") from exc
+        raise CatalogValidationError(f"cannot load {label}: {path}") from exc
 
+
+def load_catalog(path: str | Path) -> SemanticCatalog:
+    document = _read_catalog_json(Path(path), "catalog")
     validate_catalog_document(document)
     source = document["source"]
     entries = tuple(_parse_entry(item) for item in document["entries"])
@@ -525,16 +555,7 @@ def load_catalog(path: str | Path) -> SemanticCatalog:
 
 
 def load_catalog_overlay(path: str | Path) -> CatalogOverlay:
-    overlay_path = Path(path)
-    try:
-        document = json.loads(
-            overlay_path.read_text(encoding="utf-8"), object_pairs_hook=_duplicate_check
-        )
-    except CatalogValidationError:
-        raise
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise CatalogValidationError(f"cannot load catalog overlay: {overlay_path}") from exc
-
+    document = _read_catalog_json(Path(path), "catalog overlay")
     validate_catalog_overlay_document(document)
     source = document["source"]
     entries = tuple(_parse_entry(item) for item in document["entries"])

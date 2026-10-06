@@ -7,15 +7,15 @@ param(
     [switch]$NonInteractive
 )
 
-# B4b: the one check entry shared by the local machine and CI.
+# The one check entry shared by the local machine and CI.
 #
-# Runs, in order: the full test suite; DB-SMOKE, W01, W02 (fake), W03, W04 and W05 (fake)
+# Runs, in order: the full test suite; DB-SMOKE, BASE, PROPOSAL (fake), AGENT, STATE and EVAL (fake)
 # through scripts/check.ps1; then the Fake smokes (HTTP, MCP, demo questions).  The
 # results go into one summary (check-all-summary.json); the exit code is 0 only when every
 # step passed or is recorded as not applicable with its reason.
 #
 # Checks that cannot run everywhere are listed once, below, each with its reason.  The list
-# plus the checks actually invoked must equal what check.ps1 registers (tests/test_b4b_check_all.py
+# plus the checks actually invoked must equal what check.ps1 registers (tests/test_check_all.py
 # reads this file and check.ps1; this script re-checks it against every check.ps1 summary).
 #
 # Database settings: QUERYSHIELD_DATABASE_URL (read-only role, queryshield_test) and
@@ -36,18 +36,18 @@ $hostExecutable = (Get-Process -Id $PID).Path
 #   excluded    never run here
 #   conditional run when the condition holds, otherwise recorded as not_applicable
 $script:ExcludedChecks = @(
-    @{ Id = "W05-R01"; Suite = "W05"; Kind = "excluded"; Reason = "needs the sealed holdout set, which exists only on the local machine and is not in the repository; the local full mode (w05-local-real.ps1) covers it" },
-    @{ Id = "W05-R06"; Suite = "W05"; Kind = "excluded"; Reason = "needs the sealed holdout commitments, which exist only on the local machine; the local full mode (w05-local-real.ps1) covers it" },
-    @{ Id = "W04-X01"; Suite = "W04"; Kind = "conditional"; Reason = "reads the upstream asset register and the acceptance tags the register lists; not applicable when the register or a listed tag is missing (for example in an exported repository without this history); a git that cannot run is a failure, not a missing tag" },
-    @{ Id = "W05-X01"; Suite = "W05"; Kind = "conditional"; Reason = "reads the upstream asset register and the acceptance tags the register lists; not applicable when the register or a listed tag is missing (for example in an exported repository without this history); a git that cannot run is a failure, not a missing tag" }
+    @{ Id = "EVAL-R01"; Suite = "EVAL"; Kind = "excluded"; Reason = "needs the sealed holdout set, which exists only on the local machine and is not in the repository; the local full mode (eval-local-real.ps1) covers it" },
+    @{ Id = "EVAL-R06"; Suite = "EVAL"; Kind = "excluded"; Reason = "needs the sealed holdout commitments, which exist only on the local machine; the local full mode (eval-local-real.ps1) covers it" },
+    @{ Id = "STATE-X01"; Suite = "STATE"; Kind = "conditional"; Reason = "reads the upstream asset register and the acceptance tags the register lists; not applicable when the register or a listed tag is missing (for example in an exported repository without this history); a git that cannot run is a failure, not a missing tag" },
+    @{ Id = "EVAL-X01"; Suite = "EVAL"; Kind = "conditional"; Reason = "reads the upstream asset register and the acceptance tags the register lists; not applicable when the register or a listed tag is missing (for example in an exported repository without this history); a git that cannot run is a failure, not a missing tag" }
 )
 $script:RegisterRelativePath = "control/evidence/upstream/accepted-assets.json"
 # The CI workflow inside the project directory means the project directory is itself the repository root
 # (the standalone layout, as in tests/repo_layout.py); the register belongs to the development repository only.
 $script:StandaloneWorkflowRelativePath = ".github/workflows/queryshield-ci.yml"
-# Suites run through check.ps1, in order.  W04 and W05 get an explicit -CheckIds list
+# Suites run through check.ps1, in order.  STATE and EVAL get an explicit -CheckIds list
 # (registered ids minus the exclusions); the others run in full.
-$script:CheckSuites = @("DB-SMOKE", "W01", "W02", "W03", "W04", "W05")
+$script:CheckSuites = @("DB-SMOKE", "BASE", "PROPOSAL", "AGENT", "STATE", "EVAL")
 
 $script:steps = @()
 $script:consistency = [ordered]@{}
@@ -339,11 +339,11 @@ function Invoke-CheckSuite {
 }
 
 function Test-X02Reasons {
-    # W05-X02 must return 2 for the reasons it tests, not for an evidence path rule.
-    $dir = Join-Path $EvidenceDir "W05"
+    # EVAL-X02 must return 2 for the reasons it tests, not for an evidence path rule.
+    $dir = Join-Path $EvidenceDir "EVAL"
     $expectations = @(
-        @{ Prefix = "unknown_check_id-"; Text = "unknown_CheckIds=W05-UNKNOWN" },
-        @{ Prefix = "missing_mode-"; Text = "W05_Mode_must_be_explicit" }
+        @{ Prefix = "unknown_check_id-"; Text = "unknown_CheckIds=EVAL-UNKNOWN" },
+        @{ Prefix = "missing_mode-"; Text = "EVAL_Mode_must_be_explicit" }
     )
     $problems = @()
     $seen = [ordered]@{}
@@ -376,7 +376,7 @@ function Test-X02Reasons {
     }
     $verdictAll = if ($problems.Count -eq 0) { "pass" } else { "fail" }
     $script:consistency["x02_reason_check"] = [ordered]@{ status = $verdictAll; details = $seen }
-    Add-Step -Name "W05-X02-reasons" -Status $verdictAll -ExitCode $(if ($problems.Count -eq 0) { 0 } else { 1 }) -Reason ($problems -join "; ") -Evidence "W05"
+    Add-Step -Name "EVAL-X02-reasons" -Status $verdictAll -ExitCode $(if ($problems.Count -eq 0) { 0 } else { 1 }) -Reason ($problems -join "; ") -Evidence "EVAL"
 }
 
 function Write-CheckAllSummary {
@@ -426,7 +426,7 @@ New-Item -ItemType Directory -Force -Path $EvidenceDir | Out-Null
 $exitCode = 0
 
 try {
-    # M11: the whole run, tests and smokes included, works without the MCP setting.
+    # The whole run, tests and smokes included, works without the MCP setting.
     Set-ProcessEnvironment -Name "QUERYSHIELD_METADATA_TOOLS" -Value $null
 
     $missingNames = @()
@@ -512,7 +512,7 @@ try {
     if ($skippedMatch.Success) { $skippedCount = [int]$skippedMatch.Groups[1].Value }
     $failedMatch = [regex]::Match($testText, '(\d+) failed')
     if ($failedMatch.Success) { $failedCount = [int]$failedMatch.Groups[1].Value }
-    # Tests that need the demo database must run here, not skip (B4b).
+    # Tests that need the demo database must run here, not skip.
     $demoSkips = 0
     foreach ($line in ($testText -split "`n")) {
         if ($line -match "^SKIPPED \[(\d+)\].*demo database") { $demoSkips += [int]$Matches[1] }
@@ -532,18 +532,19 @@ try {
     foreach ($suite in $script:CheckSuites) {
         Invoke-CheckSuite -Suite $suite -X01Applicable $x01.Applicable -X01Reason $x01.Reason
     }
-    $x02Step = @($script:steps | Where-Object { $_.name -eq "W05" })
+    $x02Step = @($script:steps | Where-Object { $_.name -eq "EVAL" })
     if ($x02Step.Count -gt 0) {
-        $w05Summary = Join-Path (Join-Path $EvidenceDir "W05") "summary.json"
-        if (Test-Path -LiteralPath $w05Summary -PathType Leaf) {
-            $ran = @((Read-JsonFile -Path $w05Summary).checks | Where-Object { $_.check_id -eq "W05-X02" -and $_.status -eq "pass" }).Count -gt 0
+        $evalSummary = Join-Path (Join-Path $EvidenceDir "EVAL") "summary.json"
+        if (Test-Path -LiteralPath $evalSummary -PathType Leaf) {
+            $ran = @((Read-JsonFile -Path $evalSummary).checks | Where-Object { $_.check_id -eq "EVAL-X02" -and $_.status -eq "pass" }).Count -gt 0
             if ($ran) { Test-X02Reasons }
         }
     }
 
     # 3. Fake smokes.
     $smokes = @(
-        @{ Name = "smoke-http"; Dir = "smoke-http"; Script = "b2b_http_smoke.py"; Args = @("--mode", "fake"); Demo = $false },
+        @{ Name = "smoke-http"; Dir = "smoke-http"; Script = "http_smoke.py"; Args = @("--mode", "fake"); Demo = $false },
+        @{ Name = "smoke-http-native"; Dir = "smoke-http-native"; Script = "http_smoke.py"; Args = @("--mode", "fake", "--model-protocol", "native"); Demo = $false },
         @{ Name = "smoke-mcp"; Dir = "smoke-mcp"; Script = "mcp_smoke.py"; Args = @("--mode", "fake", "--part", "all"); Demo = $false },
         @{ Name = "demo-run"; Dir = "demo-run"; Script = "demo_run.py"; Args = @("--mode", "fake"); Demo = $true }
     )

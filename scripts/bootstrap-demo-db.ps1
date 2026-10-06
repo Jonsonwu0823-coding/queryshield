@@ -6,9 +6,9 @@ param(
     [switch]$NonInteractive
 )
 
-# B3d: create the demo tables and rows in an existing *_demo database
+# Create the demo tables and rows in an existing *_demo database
 # (scripts/bootstrap_demo_db.py).  Create the database first, for example:
-#   docker exec queryshield-postgres-w01 psql -U queryshield -d postgres -c "CREATE DATABASE queryshield_demo"
+#   docker exec queryshield-postgres psql -U queryshield -d postgres -c "CREATE DATABASE queryshield_demo"
 # The administrator password is entered hidden (or taken from
 # QUERYSHIELD_DEMO_ADMIN_PASSWORD with -NonInteractive), lives only in this
 # process environment, is never printed, and the previous environment is restored.

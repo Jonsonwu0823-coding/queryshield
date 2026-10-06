@@ -1,11 +1,12 @@
-"""Permission-aware versioned knowledge snapshot repository for W04."""
+"""Permission-aware versioned knowledge snapshot repository."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from queryshield.db.w04_state import StateStore, StateStoreError
+from queryshield.db.state_store import StateStore
+from queryshield.knowledge.acl import tenant_matches
 from queryshield.knowledge.ingest import KnowledgeSnapshot
 
 
@@ -38,21 +39,6 @@ class KnowledgeSnapshotRepository:
     def revoke(self, source_id: str) -> None:
         self.state.set_source_acl(source_id, status="deleted")
 
-    def update_acl(
-        self,
-        source_id: str,
-        *,
-        tenant_scope: str | None = None,
-        allowed_roles: tuple[str, ...] | None = None,
-        status: str | None = None,
-    ) -> None:
-        self.state.set_source_acl(
-            source_id,
-            tenant_scope=tenant_scope,
-            allowed_roles=allowed_roles,
-            status=status,
-        )
-
     def visible_source(
         self,
         *,
@@ -75,7 +61,7 @@ class KnowledgeSnapshotRepository:
             raise KnowledgeAccessError("source_revoked")
         tenant_scope = str(acl["tenant_scope"])
         roles = tuple(str(item) for item in acl["allowed_roles"])
-        if tenant_scope not in {"global", identity.tenant_id} or identity.role not in roles:
+        if not tenant_matches(tenant_scope, identity.tenant_id) or identity.role not in roles:
             raise KnowledgeAccessError("source_not_found")
         return dict(source)
 

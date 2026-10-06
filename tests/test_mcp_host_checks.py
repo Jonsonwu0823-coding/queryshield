@@ -15,7 +15,7 @@ import pytest
 
 from queryshield.agent.proposals import ExecutionContext
 from queryshield.api.main import app, get_model_provider
-from queryshield.approval.service import shared_w04_service
+from queryshield.approval.service import shared_run_service
 from queryshield.catalog import load_default_catalog
 from queryshield.knowledge.runtime import shared_retrieval_runtime
 from queryshield.mcp_metadata import verify
@@ -24,7 +24,7 @@ from queryshield.mcp_metadata.tools import McpMetadataTools, McpToolError
 from queryshield.tools.semantic import ToolError
 
 from mcp_helpers import config, context
-from test_b2b_http_queries import REQUESTER, Scripted, auth, env  # noqa: F401  (env is a fixture)
+from test_http_queries import REQUESTER, Scripted, auth, env  # noqa: F401  (env is a fixture)
 
 
 SEARCH_FAULTS = [
@@ -86,7 +86,7 @@ def test_a_rejected_result_never_reaches_the_run_or_the_model(env, monkeypatch):
     answer = json.dumps({"type": "final_answer", "answer": "x", "source_ids": [], "fact_refs": [], "basis": "knowledge"}, ensure_ascii=False)
     model = Scripted([search, answer])
     app.dependency_overrides[get_model_provider] = lambda: model
-    service = shared_w04_service()
+    service = shared_run_service()
     monkeypatch.setattr(service, "_metadata_tools", config(fixture="text_changed"))
     response = env.post("/queries", headers=auth(REQUESTER), json={"question": "退款后净额是怎么算的？"})
     body = response.json()
@@ -152,7 +152,7 @@ def test_each_visibility_rule_rejects(retriever):
 
 
 def test_the_tenant_rule_is_the_retrievers_own():
-    # The retriever matches tenant "tenant-A" to scope "A" (knowledge.retrieval._tenant_matches).
+    # The retriever matches tenant "tenant-A" to scope "A" (knowledge.acl.tenant_matches).
     ctx = ExecutionContext(run_id="run-x", tenant_id="tenant-A", principal_id="p", role="requester")
     assert _check(_fake_retriever(scope="A"), ctx) == {"items": [ITEM]}
     with pytest.raises(verify.ResultInvalid):
@@ -274,7 +274,7 @@ KNOWLEDGE_ANSWER = json.dumps(
 def _run_with_fixture(env, monkeypatch, fixture):
     model = Scripted([SEARCH_CALL, KNOWLEDGE_ANSWER])
     app.dependency_overrides[get_model_provider] = lambda: model
-    service = shared_w04_service()
+    service = shared_run_service()
     monkeypatch.setattr(service, "_metadata_tools", config(fixture=fixture))
     response = env.post("/queries", headers=auth(REQUESTER), json={"question": "退款后净额是怎么算的？"})
     body = response.json()
@@ -317,6 +317,6 @@ def test_a_healthy_session_record_has_no_failure_source(env, monkeypatch):
     app.dependency_overrides[get_model_provider] = lambda: model
     monkeypatch.setenv("QUERYSHIELD_METADATA_TOOLS", "mcp")
     body = env.post("/queries", headers=auth(REQUESTER), json={"question": "退款后净额是怎么算的？"}).json()
-    events = shared_w04_service().store.events(body["run_id"], after_event_id=0, limit=1000)
+    events = shared_run_service().store.events(body["run_id"], after_event_id=0, limit=1000)
     [session] = [e["payload"] for e in events if e["type"] == "metadata_session"]
     assert session["failure_code"] is None and session["failure_source"] is None

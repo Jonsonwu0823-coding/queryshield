@@ -1,7 +1,7 @@
-"""Server-owned retrieval context construction for the W03 runtime.
+"""Server-owned retrieval context construction for the runtime.
 
 The builder deliberately produces the same small message shape accepted by the
-W02 provider boundary.  It does not call a model, database, or embedding
+Provider boundary.  It does not call a model, database, or embedding
 provider.  Its job is to preserve trusted execution constraints while keeping
 retrieved/tool data outside the system role and inside a byte budget.
 """
@@ -13,9 +13,21 @@ from dataclasses import dataclass
 import json
 
 from queryshield.agent.config import DEFAULT_RUN_CONFIG, RunConfig
-from queryshield.agent.proposals import ExecutionContext
+from queryshield.agent.proposals import ALLOWED_TABLES, ANSWER_BASES, ExecutionContext
 from queryshield.catalog import load_default_catalog
 from queryshield.catalog.catalog import ALLOWED_TABLE_COLUMNS, SemanticCatalog
+from queryshield.mcp_metadata.schemas import DESCRIBE_TABLES_INPUT, SEARCH_CATALOG_INPUT, TOOLS as METADATA_TOOLS
+from queryshield.policy.argument_limits import (
+    ANSWER_MAX_CHARS,
+    CLARIFICATION_ID_MAX_CHARS,
+    LIST_ITEM_MAX_CHARS,
+    MAX_FACT_REFS,
+    MAX_SOURCE_IDS,
+    QUESTION_MAX_CHARS,
+    REASON_MAX_CHARS,
+    SQL_MAX_CHARS,
+)
+from queryshield.providers.contracts import native_call_for
 
 
 CONTEXT_VERSION = "context-v16"
@@ -92,18 +104,18 @@ NON_METRIC_QUERY_EXAMPLE = (
     '{"type":"tool_call","name":"query_readonly","arguments":{"sql":"SELECT c.customer_id, c.name '
     'FROM customers AS c","params":{}}}'
 )
-# final_answer basis (B3c-2), rendered per request: without a server retriever
+# final_answer basis, rendered per request: without a server retriever
 # there is no knowledge source, so the knowledge clause is left out.
 BASIS_RULE_PLACEHOLDER = "<final_answer basis rule rendered per request>"
-# R1 shortened two clauses the contract already states: "business values from
-# this run's query" (fact_refs_rule) and the no_data "no fact_refs" (the
-# no_data example), to fit NO_DATA_ACTION in the server context budget.
+# Short on purpose: the contract already says "business values from this run's
+# query" (fact_refs_rule) and the no_data example shows "no fact_refs", and the
+# server context has a fixed size budget.
 _BASIS_RULE_QUERY = "Optional; default query."
 _BASIS_RULE_KNOWLEDGE = (
     " knowledge: only how a metric is defined, from this run's search_catalog sources; no fact_refs, no values."
 )
 _BASIS_RULE_NO_DATA = " no_data: only when no business data is needed (greeting, what you can do); no query."
-# The no_data action as the model sends it (B3c-2 R1): shown in the
+# The no_data action as the model sends it: shown in the
 # final_answer examples and in the answer send-back hint.  The answer is blank
 # on purpose; the server writes the reply.
 NO_DATA_ACTION = '{"type":"final_answer","answer":"","source_ids":[],"fact_refs":[],"basis":"no_data"}'
@@ -148,10 +160,9 @@ NET_FEN_REFUND_QUERY = (
     "WHERE o.status = %s AND o.created_at >= %s AND o.created_at < %s "
     "AND r.created_at >= %s AND r.created_at < %s"
 )
-# This is deliberately a data-only description of the parser contract.  The
-# old prompt named the schema version but did not tell the model which fields
-# each action required, so a real model could return a JSON object that was
-# syntactically valid but rejected before the first tool call.
+# A data-only description of the parser contract.  It tells the model which
+# fields each action requires, so a JSON object that is syntactically valid
+# is not rejected before the first tool call.
 _ACTION_CONTRACT: dict[str, object] = {
     "output": "Return one strict JSON object only; no Markdown, reasoning, extra or duplicate fields.",
     "actions": {
@@ -241,10 +252,10 @@ _ACTION_CONTRACT: dict[str, object] = {
             "type_value": "deny",
         },
     },
-            "forbidden_extra_fields": [
+    "forbidden_extra_fields": [
         "action", "confidence", "id", "metadata", "reasoning", "thought", "tool",
     ],
-        "workflow": [
+    "workflow": [
         "For business facts, use catalog/tool results and query_readonly before final_answer.",
         (
             "A business question's metrics are queried with one tool_call named query_readonly that declares all of "
@@ -329,6 +340,124 @@ def _action_contract(
     return contract
 
 
+def _native_contract(contract: dict[str, object]) -> dict[str, object]:
+    """The rendered json contract minus its wire format, which the function schemas carry instead.
+
+    Every semantic rule keeps its json-mode text, so the two protocols differ
+    only in how the model returns its decision.
+    """
+
+    actions = contract["actions"]
+    tool_call = actions["tool_call"]
+    query = dict(tool_call["tools"]["query_readonly"])
+    del query["required_arguments"], query["optional_arguments"]
+    # The last valid example is always the declared query_readonly call.
+    query["example_arguments"] = json.loads(tool_call["valid_shape_examples"][-1])["arguments"]
+    rows = query["non_metric_rows"]
+    query["non_metric_rows"] = {**rows, "example": json.loads(rows["example"])["arguments"]}
+    return {
+        "output": "Call exactly one of the provided functions and leave the message text empty: no reasoning, explanation or Markdown.",
+        "functions": {
+            "query_readonly": query,
+            "ask_user": {"clarification_id": actions["ask_user"]["clarification_id"]},
+            "final_answer": {key: actions["final_answer"][key] for key in ("basis", "fact_refs_rule")},
+        },
+        "workflow": [item for item in contract["workflow"] if item != _PARALLEL_WORKFLOW_RULE],
+    }
+
+
+def _text(max_chars: int) -> dict[str, object]:
+    return {"type": "string", "minLength": 1, "maxLength": max_chars}
+
+
+def _object(properties: dict[str, object], required: tuple[str, ...]) -> dict[str, object]:
+    return {"type": "object", "properties": properties, "required": list(required), "additionalProperties": False}
+
+
+# Native function definitions.  The schemas are hints built from the
+# validator's own constants; the server validator stays the only authority.
+# Descriptions are one line: the rules live in the system message.
+_NATIVE_FUNCTIONS: dict[str, tuple[str, dict[str, object]]] = {
+    "search_catalog": (METADATA_TOOLS["search_catalog"]["description"], SEARCH_CATALOG_INPUT),
+    "describe_tables": (
+        METADATA_TOOLS["describe_tables"]["description"],
+        {
+            **DESCRIBE_TABLES_INPUT,
+            "properties": {
+                "tables": {
+                    **DESCRIBE_TABLES_INPUT["properties"]["tables"],
+                    "items": {"type": "string", "enum": sorted(ALLOWED_TABLES)},
+                }
+            },
+        },
+    ),
+    "query_readonly": (
+        "Run one read-only SELECT through the server checks; follow action_contract.functions.query_readonly and metric_declaration.",
+        _object(
+            {
+                "sql": _text(SQL_MAX_CHARS),
+                "params": {"type": "object", "additionalProperties": {"type": ["string", "number", "boolean", "null"]}},
+                "metrics": {"type": "array", "items": {"type": "string"}},
+                "time_window": {"type": "object"},
+            },
+            ("sql", "params"),
+        ),
+    ),
+    "ask_user": (
+        "Ask the user one clarification question, only as metric_declaration.clarifications.apply_rule says; the run waits for the answer.",
+        _object({"question": _text(QUESTION_MAX_CHARS), "clarification_id": _text(CLARIFICATION_ID_MAX_CHARS)}, ("question",)),
+    ),
+    "final_answer": (
+        "Finish with an answer grounded in this run's results; follow action_contract.functions.final_answer.",
+        _object(
+            {
+                "answer": {"type": "string", "maxLength": ANSWER_MAX_CHARS},
+                "source_ids": {"type": "array", "items": _text(LIST_ITEM_MAX_CHARS), "maxItems": MAX_SOURCE_IDS, "uniqueItems": True},
+                "fact_refs": {
+                    "type": "array",
+                    "maxItems": MAX_FACT_REFS,
+                    "items": _object({"result_id": {"type": "string", "minLength": 1}, "metric_id": {"type": "string", "minLength": 1}}, ("result_id", "metric_id")),
+                },
+                "basis": {"type": "string", "enum": list(ANSWER_BASES)},
+            },
+            ("answer", "source_ids", "fact_refs"),
+        ),
+    ),
+    "deny": ("Refuse the request with a brief reason.", _object({"reason": _text(REASON_MAX_CHARS)}, ("reason",))),
+}
+
+
+def native_tools(*, retrieval_available: bool) -> list[dict[str, object]]:
+    """The functions sent with a native call; without a server retriever there is no search_catalog."""
+
+    return [
+        {"type": "function", "function": {"name": name, "description": description, "parameters": parameters}}
+        for name, (description, parameters) in _NATIVE_FUNCTIONS.items()
+        if retrieval_available or name != "search_catalog"
+    ]
+
+
+def _native_hint_record(result: Mapping[str, object]) -> dict[str, object]:
+    """A repair hint's quoted json actions, rewritten as the function calls a native model makes.
+
+    Only the rendered message changes; tool_results and checkpoints keep the stored hint.
+    """
+
+    from queryshield.agent.metric_intent import DEFINITION_ANSWER_SHAPE, DEFINITION_SEARCH_ACTION
+
+    hint = result.get("repair_hint")
+    if hint is None:
+        return dict(result)
+    examples = {NO_DATA_ACTION, DEFINITION_SEARCH_ACTION, DEFINITION_ANSWER_SHAPE}
+    rewritten = {}
+    for key, value in hint.items():
+        if type(value) is str and value in examples:
+            name, arguments = native_call_for(json.loads(value))
+            value = f"{name} {json.dumps(arguments, ensure_ascii=False, separators=(',', ':'))}"
+        rewritten[key] = value
+    return {**result, "repair_hint": rewritten}
+
+
 class ContextBuildError(ValueError):
     """The server could not construct a safe provider context."""
 
@@ -368,14 +497,14 @@ def _canonical_json(value: object, *, field: str) -> str:
 def _validate_time_window(value: Mapping[str, object] | None) -> dict[str, str] | None:
     if value is None:
         return None
-    required = {"start", "end", "timezone"}
-    if not isinstance(value, Mapping) or not required <= set(value):
+    required = ("start", "end", "timezone")
+    if not isinstance(value, Mapping) or not set(required) <= set(value):
         raise ContextBuildError(
             "invalid_context_input",
             "time_window must contain start, end and timezone",
         )
     normalized: dict[str, str] = {}
-    for key in required | ({"interval"} & set(value)):
+    for key in required + (("interval",) if "interval" in value else ()):
         normalized[key] = _require_string(value[key], field=f"time_window.{key}", maximum=200)
     return normalized
 
@@ -462,13 +591,17 @@ def _system_content(
     request_time_window: dict[str, str] | None,
     retrieval_available: bool = True,
 ) -> str:
-    if not isinstance(context, ExecutionContext):
-        raise ContextBuildError("unauthorized", "context must be server-created")
     # metric_intent imports NET_FEN_PLAN_ID from this module; import it lazily.
     from queryshield.agent.metric_intent import metric_declaration_contract
 
     if confirmed_metric is not None:
         confirmed_metric = _require_string(confirmed_metric, field="confirmed_metric", maximum=200)
+    contract = _action_contract(
+        request_time_window,
+        parallel_available=parallel_available,
+        retrieval_available=retrieval_available,
+        catalog=metric_catalog,
+    )
     payload = {
         "context_version": CONTEXT_VERSION,
         "instructions": [
@@ -477,12 +610,7 @@ def _system_content(
             "SQL must use listed bare schema and supported_sql_shape; it is narrower than PostgreSQL.",
             f"Return only server-owned action schema {run_config.action_schema_version}.",
         ],
-        "action_contract": _action_contract(
-            request_time_window,
-            parallel_available=parallel_available,
-            retrieval_available=retrieval_available,
-            catalog=metric_catalog,
-        ),
+        "action_contract": contract if run_config.model_protocol == "json" else _native_contract(contract),
         # Generated from the server catalog at runtime; no hand-written metric list.
         "metric_declaration": metric_declaration_contract(metric_catalog, request_time_window),
         "authenticated_execution_context": {
@@ -507,8 +635,100 @@ def _data_content(kind: str, payload: object) -> str:
     )
 
 
-def _fits(messages: Sequence[ContextMessage], *, max_context_bytes: int) -> bool:
-    return len(messages) <= MAX_MESSAGES and _serialized_size(messages) <= max_context_bytes
+def _fits(messages: Sequence[ContextMessage]) -> bool:
+    return len(messages) <= MAX_MESSAGES and _serialized_size(messages) <= MAX_CONTEXT_BYTES
+
+
+def _normalize_bindings(metric_bindings: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    if isinstance(metric_bindings, (str, bytes)) or not isinstance(metric_bindings, Sequence):
+        raise ContextBuildError("invalid_context_input", "metric_bindings must be a sequence")
+    normalized: list[dict[str, object]] = []
+    seen_metric_ids: set[str] = set()
+    for index, binding in enumerate(metric_bindings):
+        if not isinstance(binding, Mapping):
+            raise ContextBuildError("invalid_context_input", f"metric_bindings[{index}] must be a server binding")
+        metric_id = _require_string(binding.get("metric_id"), field=f"metric_bindings[{index}].metric_id", maximum=200)
+        result_position = _require_string(binding.get("result_position"), field=f"metric_bindings[{index}].result_position", maximum=200)
+        unit = _require_string(binding.get("unit"), field=f"metric_bindings[{index}].unit", maximum=80)
+        binding_window = _validate_time_window(binding.get("time_window"))
+        if metric_id in seen_metric_ids:
+            raise ContextBuildError("invalid_context_input", "metric_bindings must not repeat metric IDs")
+        seen_metric_ids.add(metric_id)
+        normalized.append({
+            "metric_id": metric_id,
+            "result_position": result_position,
+            "unit": unit,
+            "time_window": binding_window,
+        })
+    return normalized
+
+
+def _question_messages(question: str, clarifications: Sequence[str]) -> list[ContextMessage]:
+    messages = [ContextMessage(message_id="user-question", role="user", content=question, hard=True, source="user")]
+    for index, clarification in enumerate(clarifications):
+        messages.append(
+            ContextMessage(message_id=f"user-clarification-{index}", role="user", content=clarification, hard=True, source="user")
+        )
+    return messages
+
+
+def _retrieval_messages(retrieval_items: Sequence[Mapping[str, object]]) -> list[ContextMessage]:
+    items = tuple(_validate_retrieval_item(item, index=index) for index, item in enumerate(retrieval_items))
+    if not items:
+        content = _data_content("retrieval_source", {"items": []})
+        return [ContextMessage(message_id="retrieval-empty", role="user", content=content, hard=True, source="retrieval")]
+    return [
+        ContextMessage(
+            message_id=f"retrieval-{index}",
+            role="user",
+            content=_data_content("retrieval_source", {"item": item}),
+            hard=True,
+            source="retrieval",
+        )
+        for index, item in enumerate(items)
+    ]
+
+
+def _optional_messages(
+    optional_summaries: Sequence[str], tool_results: Sequence[Mapping[str, object]], *, native: bool
+) -> list[ContextMessage]:
+    messages: list[ContextMessage] = []
+    for index, summary in enumerate(optional_summaries):
+        summary_text = _require_string(summary, field=f"optional_summaries[{index}]")
+        messages.append(
+            ContextMessage(
+                message_id=f"summary-{index}",
+                role="assistant",
+                content=_data_content("optional_old_summary", {"text": summary_text}),
+                hard=False,
+                source="optional_summary",
+            )
+        )
+    for index, result in enumerate(tool_results):
+        if not isinstance(result, Mapping):
+            raise ContextBuildError("invalid_context_input", f"tool_results[{index}] must be an object")
+        messages.append(
+            ContextMessage(
+                message_id=f"tool-result-{index}",
+                role="user",
+                content=_data_content("untrusted_tool_result", _native_hint_record(result) if native else dict(result)),
+                hard=False,
+                source="tool_result",
+            )
+        )
+    return messages
+
+
+def _trim_to_budget(messages: list[ContextMessage]) -> tuple[list[ContextMessage], list[str]]:
+    """Drop whole optional messages, oldest first, until the context fits; hard messages never go."""
+
+    dropped: list[str] = []
+    while not _fits(messages):
+        optional_index = next((index for index, message in enumerate(messages) if not message.hard), None)
+        if optional_index is None:
+            raise ContextBudgetError()
+        dropped.append(messages.pop(optional_index).message_id)
+    return messages, dropped
 
 
 def build_context(
@@ -522,7 +742,6 @@ def build_context(
     retrieval_items: Sequence[Mapping[str, object]] = (),
     tool_results: Sequence[Mapping[str, object]] = (),
     optional_summaries: Sequence[str] = (),
-    max_context_bytes: int = MAX_CONTEXT_BYTES,
     run_config: RunConfig | None = None,
     metric_catalog: SemanticCatalog | None = None,
     request_time_window: Mapping[str, object] | None = None,
@@ -542,10 +761,6 @@ def build_context(
         run_config = DEFAULT_RUN_CONFIG
     if not isinstance(run_config, RunConfig):
         raise ContextBuildError("invalid_context_input", "run_config must be server-created")
-    if type(max_context_bytes) is not int or max_context_bytes <= 0:
-        raise ContextBuildError("invalid_context_input", "max_context_bytes must be a positive integer")
-    if max_context_bytes > MAX_CONTEXT_BYTES:
-        raise ContextBuildError("invalid_context_input", "max_context_bytes cannot exceed 24000 bytes")
     question = _require_string(question, field="question")
     normalized_clarifications = tuple(
         _require_string(answer, field=f"clarifications[{index}]")
@@ -557,141 +772,38 @@ def build_context(
     if not isinstance(metric_catalog, SemanticCatalog):
         raise ContextBuildError("invalid_context_input", "metric_catalog must be the server catalog")
     normalized_request_window = _validate_time_window(request_time_window)
-    if type(parallel_available) is not bool:
-        raise ContextBuildError("invalid_context_input", "parallel_available must be a boolean")
-    if type(retrieval_available) is not bool:
-        raise ContextBuildError("invalid_context_input", "retrieval_available must be a boolean")
-    if isinstance(metric_bindings, (str, bytes)) or not isinstance(metric_bindings, Sequence):
-        raise ContextBuildError("invalid_context_input", "metric_bindings must be a sequence")
-    normalized_bindings: list[dict[str, object]] = []
-    seen_metric_ids: set[str] = set()
-    for index, binding in enumerate(metric_bindings):
-        if not isinstance(binding, Mapping):
-            raise ContextBuildError("invalid_context_input", f"metric_bindings[{index}] must be a server binding")
-        metric_id = _require_string(binding.get("metric_id"), field=f"metric_bindings[{index}].metric_id", maximum=200)
-        result_position = _require_string(binding.get("result_position"), field=f"metric_bindings[{index}].result_position", maximum=200)
-        unit = _require_string(binding.get("unit"), field=f"metric_bindings[{index}].unit", maximum=80)
-        binding_window = _validate_time_window(binding.get("time_window"))
-        if metric_id in seen_metric_ids:
-            raise ContextBuildError("invalid_context_input", "metric_bindings must not repeat metric IDs")
-        seen_metric_ids.add(metric_id)
-        normalized_bindings.append({
-            "metric_id": metric_id,
-            "result_position": result_position,
-            "unit": unit,
-            "time_window": binding_window,
-        })
+    normalized_bindings = _normalize_bindings(metric_bindings)
     if len(retrieval_items) > MAX_RETRIEVAL_ITEMS:
         raise ContextBuildError("invalid_context_input", "at most three retrieval items are allowed")
 
-    hard_messages: list[ContextMessage] = [
-        ContextMessage(
-            message_id="server-context",
-            role="system",
-            content=_system_content(
-                context,
-                confirmed_metric=confirmed_metric,
-                time_window=normalized_window,
-                confirmed_metrics=normalized_bindings,
-                run_config=run_config,
-                metric_catalog=metric_catalog,
-                request_time_window=normalized_request_window,
-                parallel_available=parallel_available,
-                retrieval_available=retrieval_available,
-            ),
-            hard=True,
-            source="server",
+    server_message = ContextMessage(
+        message_id="server-context",
+        role="system",
+        content=_system_content(
+            context,
+            confirmed_metric=confirmed_metric,
+            time_window=normalized_window,
+            confirmed_metrics=normalized_bindings,
+            run_config=run_config,
+            metric_catalog=metric_catalog,
+            request_time_window=normalized_request_window,
+            parallel_available=parallel_available,
+            retrieval_available=retrieval_available,
         ),
-        ContextMessage(
-            message_id="user-question",
-            role="user",
-            content=question,
-            hard=True,
-            source="user",
-        ),
-    ]
-
-    for index, clarification in enumerate(normalized_clarifications):
-        hard_messages.append(
-            ContextMessage(
-                message_id=f"user-clarification-{index}",
-                role="user",
-                content=clarification,
-                hard=True,
-                source="user",
-            )
-        )
-
-    normalized_items = tuple(
-        _validate_retrieval_item(item, index=index) for index, item in enumerate(retrieval_items)
+        hard=True,
+        source="server",
     )
-    if normalized_items:
-        for index, item in enumerate(normalized_items):
-            hard_messages.append(
-                ContextMessage(
-                    message_id=f"retrieval-{index}",
-                    role="user",
-                    content=_data_content("retrieval_source", {"item": item}),
-                    hard=True,
-                    source="retrieval",
-                )
-            )
-    else:
-        hard_messages.append(
-            ContextMessage(
-                message_id="retrieval-empty",
-                role="user",
-                content=_data_content("retrieval_source", {"items": []}),
-                hard=True,
-                source="retrieval",
-            )
-        )
-
-    optional_messages: list[ContextMessage] = []
-    for index, summary in enumerate(optional_summaries):
-        summary_text = _require_string(summary, field=f"optional_summaries[{index}]")
-        optional_messages.append(
-            ContextMessage(
-                message_id=f"summary-{index}",
-                role="assistant",
-                content=_data_content("optional_old_summary", {"text": summary_text}),
-                hard=False,
-                source="optional_summary",
-            )
-        )
-    for index, result in enumerate(tool_results):
-        if not isinstance(result, Mapping):
-            raise ContextBuildError("invalid_context_input", f"tool_results[{index}] must be an object")
-        optional_messages.append(
-            ContextMessage(
-                message_id=f"tool-result-{index}",
-                role="user",
-                content=_data_content("untrusted_tool_result", dict(result)),
-                hard=False,
-                source="tool_result",
-            )
-        )
-
-    messages = list(hard_messages) + optional_messages
-    dropped: list[str] = []
-    while not _fits(messages, max_context_bytes=max_context_bytes):
-        optional_index = next(
-            (index for index, message in enumerate(messages) if not message.hard),
-            None,
-        )
-        if optional_index is None:
-            raise ContextBudgetError()
-        dropped.append(messages.pop(optional_index).message_id)
-
-    included_optional = tuple(message.message_id for message in messages if not message.hard)
+    hard_messages = [server_message, *_question_messages(question, normalized_clarifications), *_retrieval_messages(retrieval_items)]
+    optional_messages = _optional_messages(optional_summaries, tool_results, native=run_config.model_protocol == "native")
+    messages, dropped = _trim_to_budget(hard_messages + optional_messages)
     return ContextBuildResult(
         context_version=CONTEXT_VERSION,
         messages=tuple(message.provider_message() for message in messages),
         hard_message_ids=tuple(message.message_id for message in messages if message.hard),
-        included_optional_ids=included_optional,
+        included_optional_ids=tuple(message.message_id for message in messages if not message.hard),
         dropped_optional_ids=tuple(dropped),
         serialized_bytes=_serialized_size(messages),
-        max_context_bytes=max_context_bytes,
+        max_context_bytes=MAX_CONTEXT_BYTES,
     )
 
 
@@ -717,4 +829,5 @@ __all__ = [
     "ContextBuildResult",
     "ContextMessage",
     "build_context",
+    "native_tools",
 ]

@@ -1,4 +1,4 @@
-# QueryShield W01 verified environment: Python 3.14.3 / Windows x64
+# QueryShield verified environment: Python 3.14.3 / Windows x64
 # Install these exact third-party versions first, then install this project
 # with: python -m pip install --no-deps -e .
 annotated-doc==0.0.5

@@ -11,9 +11,9 @@ and a number is marked `verified` only when it is a single aggregate whose row r
 Sensitive fields (customer names) need a same-tenant approver; approvals are bound to the permission source and its version.
 Two read-only metadata tools can optionally run over a real MCP stdio session; the host re-checks every item and does not trust the server's error codes.
 Run it with one command: `python scripts/new_env.py && docker compose up -d --build` (deterministic Fake model, no keys), then `docker compose exec app python scripts/demo_walkthrough.py`.
-Evaluation status: on the W05 development set (20 frozen questions, seen during development; not a blind test), two real-model runs on 2026-10-03 gave B1 19/20 (one model-call timeout) and 20/20, with 0 safety violations in both.
+Evaluation status: on the development set (20 frozen questions, seen during development; not a blind test), two real-model runs on 2026-10-03 gave B1 19/20 (one model-call timeout) and 20/20, with 0 safety violations in both.
 A blind test exists only for an older version (2026-09); a blind test of the current version has not been done yet.
-Docs: [architecture](docs/architecture.md), [evidence](docs/evidence.md), [retrospective](docs/retrospective.md), [operations](docs/operations.md), [MCP](docs/mcp.md), [demo data](docs/b3d-demo-data.md). The docs are in Chinese.
+Docs: [architecture](docs/architecture.md), [evidence](docs/evidence.md), [retrospective](docs/retrospective.md), [operations](docs/operations.md), [MCP](docs/mcp.md), [demo data](docs/demo-data.md). The docs are in Chinese.
 
 ## 它做什么
 
@@ -76,6 +76,8 @@ docker compose exec app python scripts/demo_walkthrough.py
 
 按 OpenAI 兼容协议接入（只在阿里云百炼上验证过），步骤见[运维说明](docs/operations.md)第 3 节：密钥只在当前 shell 里设置，不写进文件。Windows 上可以一条命令跑完：`scripts/compose-real-demo.ps1 -BailianBaseUrl '<地址>'`（隐藏输入密钥、起 Compose、跑整套演示题和演示脚本、拷出摘要、最后 `docker compose down`）。缺配置时服务以 503 结束（检查脚本记为 blocked），不会退回 Fake。
 
+模型给出动作有两种协议，由 `QUERYSHIELD_MODEL_PROTOCOL` 选择：`json`（默认）是模型在回复正文里写一个 JSON 动作；`native` 是模型原生的 function calling（请求带 `tools`，回复在 `tool_calls` 里）。两种协议走同一个服务端校验器，对比方法见[架构说明](docs/architecture.md)的“两种动作协议”。`scripts/eval-local-real.ps1`、`scripts/http-local-smoke.ps1`、`scripts/demo-local.ps1`、`scripts/compose-real-demo.ps1` 这四个本机脚本有 `-ModelProtocol json|native` 参数。
+
 ## 架构概览
 
 ```mermaid
@@ -98,7 +100,7 @@ flowchart LR
 ## 安全与信任边界
 
 - **租户来自认证，模型写不了身份。** 令牌到身份的映射在服务端（`src/queryshield/auth/identity.py` 的 `resolve_identity`）；模型提议里带 `tenant_id`、`role` 等字段直接拒绝（`src/queryshield/agent/proposals.py` 的 `RESERVED_IDENTITY_PARAMS`）。
-- **SQL 有三层限制。** 项目自己的 SQL 子集解析器只接受 SELECT、三张表、`SUM`/`COUNT`/`COALESCE` 和内连接（`src/queryshield/policy/sql.py`）；执行时只按解析结果重新渲染，每张表替换成带租户条件的子查询（`src/queryshield/db/guarded.py` 的 `_scoped_table`）；连接用只读角色、默认只读事务、2 秒语句超时，并设置行级安全用的租户（`src/queryshield/db/readonly.py`，`migrations/002_w04_rls.sql`）。结果超过 100 行时 run 以 422 `result_row_limit` 结束。
+- **SQL 有三层限制。** 项目自己的 SQL 子集解析器只接受 SELECT、三张表、`SUM`/`COUNT`/`COALESCE` 和内连接（`src/queryshield/policy/sql.py`）；执行时只按解析结果重新渲染，每张表替换成带租户条件的子查询（`src/queryshield/db/guarded.py` 的 `_scoped_table`）；连接用只读角色、默认只读事务、2 秒语句超时，并设置行级安全用的租户（`src/queryshield/db/readonly.py`，`migrations/002_rls.sql`）。结果超过 100 行时 run 以 422 `result_row_limit` 结束。
 - **已核实事实的规则。** 一个结果要成为已核实事实，必须是声明了指标的单行聚合，没有分组，WHERE 里只有服务端绑定的口径和时间窗条件，连接只能是客户表、且条件恰好是两个主键等式（`src/queryshield/facts/facts.py` 的 `is_scalar_metric_result`，`src/queryshield/agent/tool_execution.py` 的 `_metric_scope_filters_match`、`_has_trusted_customer_join`）。分组、明细、审批后的查询结果都只是行集，标 `unverified`。
 - **回答契约。** 模型在回答里声明依据（查询、知识、不需要数据），服务端按依据核对；没有依据时退回一次，再犯就终止，不返回模型写的文字（`src/queryshield/agent/graph.py` 的 `_verified_answer`）。
 - **敏感字段要审批，审批绑定权限。** 请求人查客户姓名会进入等待审批；审批人自己查不需要审批（`src/queryshield/tools/semantic.py` 的 `check_sensitive_access`）。单次提案入口 `POST /query-proposals` 用同一个检查，请求人查姓名直接返回 403 `approval_required`。只有同租户的审批人能批准：另一租户的审批人看不到这条任务（404），请求人不能批准自己的请求（403）。审批动作绑定 SQL、参数、指标、权限来源和权限版本；批准时权限被撤销或版本变了就拒绝；找不到权限来源就不建审批（503）（`src/queryshield/approval/service.py` 的 `build_pending_action`、`_approve_locked`）。
@@ -106,9 +108,9 @@ flowchart LR
 
 ## 评测与验证
 
-### 开发集（W05）
+### 开发集
 
-W05 是一组冻结的评测：20 道题，其中 8 道是关键题，另有 3 道补充题。每道题由同一个模型跑两种配置：B0 是对照基线（一次模型生成、一次受控执行，不检索、不追问、不修复），B1 是产品的有界 Agent。安全违规按每道安全题的禁止副作用计数。
+开发集是一组冻结的评测：20 道题，其中 8 道是关键题，另有 3 道补充题。每道题由同一个模型跑两种配置：B0 是对照基线（一次模型生成、一次受控执行，不检索、不追问、不修复），B1 是产品的有界 Agent。安全违规按每道安全题的禁止副作用计数。
 
 发布候选的结果（2026-10-03，真实模型 qwen-plus，同一份评测代码连跑两次）：
 
@@ -117,7 +119,7 @@ W05 是一组冻结的评测：20 道题，其中 8 道是关键题，另有 3 �
 | 第 1 次 | 0 | 19/20 | 7/8 | 16/20 | 3/3 / 3/3 |
 | 第 2 次 | 0 | 20/20 | 8/8 | 17/20 | 3/3 / 3/3 |
 
-第 1 次 B1、B0 多出的失败都是同一道题调用模型超时（504 `upstream_timeout`）。**这是开发集：题目在开发过程中反复看过，结果不代表泛化能力。** 两次运行所在的代码版本之后，只改了演示脚本（`scripts/compose-real-demo.ps1`、`scripts/demo_walkthrough.py`）和它们的测试（W05 不加载），以及单次提案入口的敏感字段检查（W05 里只有一道写操作题经过这个入口，它不经过模型，修改前后的 Fake 逐题记录相同），所以结果适用于发布候选。
+第 1 次 B1、B0 多出的失败都是同一道题调用模型超时（504 `upstream_timeout`）。**这是开发集：题目在开发过程中反复看过，结果不代表泛化能力。** 两次运行所在的代码版本之后，只改了演示脚本（`scripts/compose-real-demo.ps1`、`scripts/demo_walkthrough.py`）和它们的测试（评测不加载），以及单次提案入口的敏感字段检查（开发集里只有一道写操作题经过这个入口，它不经过模型，修改前后的 Fake 逐题记录相同），所以结果适用于发布候选。
 
 ### 盲测现状
 
@@ -129,7 +131,7 @@ W05 是一组冻结的评测：20 道题，其中 8 道是关键题，另有 3 �
 
 ### 自动化检查与 CI
 
-`scripts/check-all.ps1` 是本机和 CI 的同一个入口：全量测试、历史检查（DB-SMOKE、W01–W05 的 Fake 模式）、三个 Fake 冒烟（HTTP、MCP、演示题）。CI 有两个任务：`checks` 跑上面这些，`compose` 从空环境起 Compose 跑两遍演示脚本（默认设置、MCP 设置），并检查停止和重启。2026-10-03 的 CI（GitHub Actions，Linux）上：全量测试 1652 过、1 跳过。
+`scripts/check-all.ps1` 是本机和 CI 的同一个入口：全量测试、历史检查（DB-SMOKE 和 BASE、PROPOSAL、AGENT、STATE、EVAL 五个套件的 Fake 模式）、三个 Fake 冒烟（HTTP、MCP、演示题）。CI 有两个任务：`checks` 跑上面这些，`compose` 从空环境起 Compose 跑两遍演示脚本（默认设置、MCP 设置），并检查停止和重启。2026-10-03 的 CI（GitHub Actions，Linux）上：全量测试 1652 过、1 跳过。
 
 各项能力的代码、测试和验证命令见 [docs/evidence.md](docs/evidence.md)。
 
@@ -165,10 +167,10 @@ queryshield/
 │   ├── providers/      # 模型、嵌入、重排适配器
 │   ├── memory/         # 用户偏好
 │   ├── models/         # 请求模型
-│   └── evaluation/     # W05 评测（B0 / B1 对照、判定）
+│   └── evaluation/     # 开发集评测（B0 / B1 对照、判定）
 ├── migrations/         # 建表与行级安全
 ├── fixtures/           # 业务种子、演示数据、catalog、知识库
-├── evals/w05/          # W05 开发集
+├── evals/development/  # 开发集
 ├── scripts/            # 建库、演示、冒烟、检查入口
 ├── tests/              # pytest
 ├── deploy/             # CI 用的 Compose 覆盖配置
@@ -191,10 +193,10 @@ python -m pip install --no-deps -e .
 
 ### 准备数据库
 
-下面用一个本机 Docker 容器 `queryshield-postgres-w01`、端口 5433 举例（[演示数据说明](docs/b3d-demo-data.md)沿用同一个容器名和端口）。这个容器的超级用户叫 `queryshield`：
+下面用一个本机 Docker 容器 `queryshield-postgres`、端口 5433 举例（[演示数据说明](docs/demo-data.md)沿用同一个容器名和端口）。这个容器的超级用户叫 `queryshield`：
 
 ```bash
-docker run --name queryshield-postgres-w01 -e POSTGRES_USER=queryshield -e POSTGRES_PASSWORD='<管理员密码>' -e POSTGRES_DB=queryshield_test -p 5433:5432 -d postgres:16
+docker run --name queryshield-postgres -e POSTGRES_USER=queryshield -e POSTGRES_PASSWORD='<管理员密码>' -e POSTGRES_DB=queryshield_test -p 5433:5432 -d postgres:16
 export QUERYSHIELD_BOOTSTRAP_DATABASE_URL='postgresql://queryshield:<管理员密码>@127.0.0.1:5433/queryshield_test'
 python scripts/bootstrap_db.py      # 建表、载入小样例数据、开行级安全；库名必须以 _test 结尾
 ```
@@ -206,8 +208,8 @@ python scripts/bootstrap_db.py      # 建表、载入小样例数据、开行级
 服务连库只用只读角色 `queryshield_ro`。在建好表之后，用管理员连接建角色并授权；角色已存在时跳过 `CREATE ROLE`：
 
 ```bash
-docker exec queryshield-postgres-w01 psql -v ON_ERROR_STOP=1 -U queryshield -d queryshield_test -c "CREATE ROLE queryshield_ro LOGIN PASSWORD '<只读角色密码>' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;"
-docker exec queryshield-postgres-w01 psql -v ON_ERROR_STOP=1 -U queryshield -d queryshield_test -c "GRANT CONNECT ON DATABASE queryshield_test TO queryshield_ro; GRANT USAGE ON SCHEMA public TO queryshield_ro; GRANT SELECT ON TABLE customers, orders, refunds TO queryshield_ro; ALTER ROLE queryshield_ro SET default_transaction_read_only = on;"
+docker exec queryshield-postgres psql -v ON_ERROR_STOP=1 -U queryshield -d queryshield_test -c "CREATE ROLE queryshield_ro LOGIN PASSWORD '<只读角色密码>' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;"
+docker exec queryshield-postgres psql -v ON_ERROR_STOP=1 -U queryshield -d queryshield_test -c "GRANT CONNECT ON DATABASE queryshield_test TO queryshield_ro; GRANT USAGE ON SCHEMA public TO queryshield_ro; GRANT SELECT ON TABLE customers, orders, refunds TO queryshield_ro; ALTER ROLE queryshield_ro SET default_transaction_read_only = on;"
 ```
 
 表不存在时 `GRANT SELECT` 会报 `UndefinedTable`；换一个新库要重新授权。
@@ -217,12 +219,12 @@ docker exec queryshield-postgres-w01 psql -v ON_ERROR_STOP=1 -U queryshield -d q
 演示库的授权由 `scripts/bootstrap_demo_db.py` 自己做，但只读角色要先建好：
 
 ```bash
-docker exec queryshield-postgres-w01 psql -U queryshield -d postgres -c "CREATE DATABASE queryshield_demo"
+docker exec queryshield-postgres psql -U queryshield -d postgres -c "CREATE DATABASE queryshield_demo"
 export QUERYSHIELD_DEMO_BOOTSTRAP_DATABASE_URL='postgresql://queryshield:<管理员密码>@127.0.0.1:5433/queryshield_demo'
 python scripts/bootstrap_demo_db.py   # 建表、载入演示数据、开行级安全、授权；库名必须以 _demo 结尾
 ```
 
-用只读连接再算一遍预期答案（`scripts/verify_demo_expected.py`）等更多步骤见[演示数据说明](docs/b3d-demo-data.md)第 2 节。
+用只读连接再算一遍预期答案（`scripts/verify_demo_expected.py`）等更多步骤见[演示数据说明](docs/demo-data.md)第 2 节。
 
 ### 另一种做法：`setup_databases.py`
 
@@ -248,7 +250,7 @@ mkdir -p state && python -m uvicorn queryshield.api.main:app --host 127.0.0.1 --
 - [docs/retrospective.md](docs/retrospective.md)：问题复盘
 - [docs/operations.md](docs/operations.md)：Compose、环境变量、接真实模型、检查与 CI、常见问题、部署限制
 - [docs/mcp.md](docs/mcp.md)：MCP 只读元数据工具
-- [docs/b3d-demo-data.md](docs/b3d-demo-data.md)：演示数据、演示知识库、演示题与判定规则
+- [docs/demo-data.md](docs/demo-data.md)：演示数据、演示知识库、演示题与判定规则
 
 ## 许可证
 

@@ -4,10 +4,11 @@ param(
     [string]$EvidenceDir,
     [ValidateRange(30, 900)][int]$StartupTimeoutSeconds = 240,
     [switch]$FakeDryRun,
+    [ValidateSet('json', 'native')][string]$ModelProtocol = 'json',
     [switch]$NonInteractive
 )
 
-# B4b: the demo questions and the walkthrough against the Docker Compose stack with the REAL model.
+# The demo questions and the walkthrough against the Docker Compose stack with the REAL model.
 #
 # Needs Docker Desktop. Enter the Bailian workspace address and key the same way as demo-local.ps1:
 # they live only in this process environment (docker compose passes them to the app container),
@@ -20,13 +21,14 @@ param(
 # (volumes are kept; "docker compose down -v" resets everything).
 #
 # The summaries hold ids, status codes, terminal states and numbers only. The raw demo file
-# (b3d-demo-raw.json, answers and customer names) stays inside the container and is not copied.
+# (demo-raw.json, answers and customer names) stays inside the container and is not copied.
 
 $ErrorActionPreference = "Stop"
 $previousLocation = Get-Location
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $touchedNames = @(
     "QUERYSHIELD_PROVIDER_MODE",
+    "QUERYSHIELD_MODEL_PROTOCOL",
     "QUERYSHIELD_MODEL_BASE_URL",
     "QUERYSHIELD_MODEL_API_KEY",
     "QUERYSHIELD_MODEL_NAME",
@@ -108,6 +110,7 @@ try {
 
     $mode = if ($FakeDryRun) { 'fake' } else { 'real' }
     [Environment]::SetEnvironmentVariable("QUERYSHIELD_PROVIDER_MODE", $mode, "Process")
+    [Environment]::SetEnvironmentVariable("QUERYSHIELD_MODEL_PROTOCOL", $ModelProtocol, "Process")
     # The demo run is judged against the local metadata tools unless you set the MCP setting yourself.
     if ($mode -eq 'real') {
         $serviceUri = $null
@@ -170,7 +173,7 @@ try {
 
     $stamp = [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmss-fff", [Globalization.CultureInfo]::InvariantCulture)
     if ([string]::IsNullOrWhiteSpace($EvidenceDir)) {
-        $EvidenceDir = Join-Path (Join-Path $projectRoot "evidence") "B4b-compose-$mode-$stamp"
+        $EvidenceDir = Join-Path (Join-Path $projectRoot "evidence") "compose-$mode-$stamp"
     }
     New-Item -ItemType Directory -Path $EvidenceDir -Force | Out-Null
 
@@ -202,14 +205,14 @@ try {
     }
 
     Write-Output "Running the demo questions ($mode) inside the app container; output is question ids, verdicts and known gaps only."
-    $demoExit = Invoke-Docker @("compose", "exec", "-T", "app", "python", "scripts/demo_run.py", "--mode", $mode, "--base-url", "http://127.0.0.1:8000", "--evidence-dir", "/tmp/b4b-demo-run")
+    $demoExit = Invoke-Docker @("compose", "exec", "-T", "app", "python", "scripts/demo_run.py", "--mode", $mode, "--base-url", "http://127.0.0.1:8000", "--model-protocol", $ModelProtocol, "--evidence-dir", "/tmp/demo-run")
     Write-Output "Running the walkthrough ($mode)."
-    $walkExit = Invoke-Docker @("compose", "exec", "-T", "app", "python", "scripts/demo_walkthrough.py", "--mode", $mode, "--evidence-dir", "/tmp/b4b-walkthrough")
+    $walkExit = Invoke-Docker @("compose", "exec", "-T", "app", "python", "scripts/demo_walkthrough.py", "--mode", $mode, "--evidence-dir", "/tmp/walkthrough")
 
     $utf8 = [System.Text.UTF8Encoding]::new($false)
     $copies = @(
-        @{ From = "/tmp/b4b-demo-run/b3d-demo-summary.json"; To = "b3d-demo-summary.json" },
-        @{ From = "/tmp/b4b-walkthrough/b4b-walkthrough-summary.json"; To = "b4b-walkthrough-summary.json" }
+        @{ From = "/tmp/demo-run/demo-summary.json"; To = "demo-summary.json" },
+        @{ From = "/tmp/walkthrough/walkthrough-summary.json"; To = "walkthrough-summary.json" }
     )
     foreach ($copy in $copies) {
         $result = Get-DockerText @("compose", "exec", "-T", "app", "cat", $copy.From)

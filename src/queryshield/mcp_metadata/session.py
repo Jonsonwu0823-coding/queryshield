@@ -154,9 +154,10 @@ class McpMetadataSession:
         self._thread.start()
         self._serve_future = asyncio.run_coroutine_threadsafe(self._serve(params), self._loop)
         try:
-            listed_names, protocol_version = self._ready.result(timeout=self.start_timeout)
+            self._ready.result(timeout=self.start_timeout)
         except concurrent.futures.TimeoutError:
-            self._record["initialize"] = "timeout" if self._record["initialize"] == "not_run" else self._record["initialize"]
+            if self._record["initialize"] == "not_run":
+                self._record["initialize"] = "timeout"
             self._fail(MCP_UNAVAILABLE)
         except McpSessionError as exc:
             self._fail(exc.code)
@@ -167,7 +168,6 @@ class McpMetadataSession:
             self._read_pid()
             if self.server_pid is None:
                 self._fail(MCP_UNAVAILABLE)
-            del listed_names, protocol_version
 
     def mark_failed(self, code: str, source: str | None = None) -> None:
         """The host rejected what this session returned; it serves nothing more.
@@ -183,9 +183,7 @@ class McpMetadataSession:
     def _fail(self, code: str):
         """A start that failed: record it, close (no process or loop is left), raise."""
 
-        self._broken = True
-        if self._record["failure_code"] is None:
-            self._record["failure_code"] = code
+        self.mark_failed(code)
         self._read_pid()
         self.close()
         raise McpSessionError(code)
@@ -236,7 +234,7 @@ class McpMetadataSession:
             raise McpSessionError(MCP_PROTOCOL_ERROR)
         self._record["list"] = "ok"
         self._client = client
-        self._ready.set_result((names, initialized.protocol_version))
+        self._ready.set_result(None)
 
     def _request_stop(self) -> None:
         """On the loop: a ready session leaves its contexts; a starting one is cancelled (anyio)."""
@@ -281,16 +279,13 @@ class McpMetadataSession:
             return future.result(timeout=self.call_timeout + 1.0)
         except concurrent.futures.TimeoutError:
             future.cancel()
-            self._broken = True
-            self._record["failure_code"] = self._record["failure_code"] or MCP_TIMEOUT
+            self.mark_failed(MCP_TIMEOUT)
             raise McpSessionError(MCP_TIMEOUT) from None
         except McpSessionError as exc:
-            self._broken = True
-            self._record["failure_code"] = self._record["failure_code"] or exc.code
+            self.mark_failed(exc.code)
             raise
         except BaseException:  # noqa: BLE001 - a cancelled or broken call
-            self._broken = True
-            self._record["failure_code"] = self._record["failure_code"] or MCP_UNAVAILABLE
+            self.mark_failed(MCP_UNAVAILABLE)
             raise McpSessionError(MCP_UNAVAILABLE) from None
 
     async def _call(self, name: str, arguments: dict[str, object]) -> Any:
@@ -326,6 +321,20 @@ class McpMetadataSession:
             if self._closed:
                 return dict(self._record)
             self._closed = True
+        cleanup_error = self._stop_loop()
+        self._read_pid()
+        exited, cleanup_error = self._confirm_exit(cleanup_error)
+        self._record["server_exited"] = exited
+        self._record["cleanup"] = self._cleanup_status(exited, cleanup_error)
+        self._record["cleanup_error"] = cleanup_error
+        self._release()
+        if cleanup_error is not None:
+            sys.stderr.write(f"queryshield-mcp-metadata cleanup_failed reason={cleanup_error}\n")
+        return dict(self._record)
+
+    def _stop_loop(self) -> str | None:
+        """Leave the SDK contexts and stop the loop thread; ``close_timeout`` if the SDK did not finish."""
+
         cleanup_error: str | None = None
         loop, future = self._loop, self._serve_future
         if loop is not None and future is not None and not loop.is_closed():
@@ -341,24 +350,29 @@ class McpMetadataSession:
                 self._thread.join(timeout=2.0)
             if self._thread is None or not self._thread.is_alive():
                 loop.close()
-        self._read_pid()
+        return cleanup_error
+
+    def _confirm_exit(self, cleanup_error: str | None) -> tuple[bool | None, str | None]:
+        """Whether the reported server pid is gone, and the first cleanup error."""
+
         pid = self.server_pid
         if pid is None:
-            exited = None
             if self._record["initialize"] == "ok":
                 cleanup_error = cleanup_error or "pid_unknown"
-        else:
-            exited = wait_until_gone(pid, _EXIT_CONFIRM_SECONDS)
-            if exited is False:
-                cleanup_error = cleanup_error or "process_still_alive"
-        self._record["server_exited"] = exited
+            return None, cleanup_error
+        exited = wait_until_gone(pid, _EXIT_CONFIRM_SECONDS)
+        if exited is False:
+            cleanup_error = cleanup_error or "process_still_alive"
+        return exited, cleanup_error
+
+    def _cleanup_status(self, exited: bool | None, cleanup_error: str | None) -> str:
         if cleanup_error is not None:
-            self._record["cleanup"] = "failed"
-        elif pid is not None and exited is None:
-            self._record["cleanup"] = "unverified"
-        else:
-            self._record["cleanup"] = "ok"
-        self._record["cleanup_error"] = cleanup_error
+            return "failed"
+        if self.server_pid is not None and exited is None:
+            return "unverified"
+        return "ok"
+
+    def _release(self) -> None:
         if self._errlog is not None:
             try:
                 self._errlog.close()
@@ -368,9 +382,6 @@ class McpMetadataSession:
             self._record["duration_ms"] = int((time.monotonic() - self._started_at) * 1000)
         with _OPEN_LOCK:
             _OPEN_SESSIONS.discard(self)
-        if cleanup_error is not None:
-            sys.stderr.write(f"queryshield-mcp-metadata cleanup_failed reason={cleanup_error}\n")
-        return dict(self._record)
 
 
 def _session_error(exc: BaseException) -> McpSessionError | None:

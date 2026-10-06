@@ -1,9 +1,9 @@
-"""B3d demo run: start a real uvicorn process on the demo database and drive the demo questions over HTTP.
+"""Demo run: start a real uvicorn process on the demo database and drive the demo questions over HTTP.
 
 Fake mode (free): the Fake model answers the questions it knows; the others are
 ``not_applicable``.  Verified values are still compared with the expected answers,
 so this is the product's own verification path computing the answers again.
-Every question also gets one rule (B3e): each verified fact must equal the value the
+Every question also gets one rule: each verified fact must equal the value the
 generator computes for the question's tenant and the fact's metric and window.
 Real mode (the user runs it locally, scripts/demo-local.ps1): the real model.
 
@@ -11,11 +11,11 @@ The server process gets ``QUERYSHIELD_DEMO_DATASET`` from this script, never fro
 the caller's environment; the database name must end with ``_demo``.
 
 Evidence (two files in --evidence-dir):
-  b3d-demo-summary.json  fixed fields and numbers only: question id, identity, HTTP
+  demo-summary.json  fixed fields and numbers only: question id, identity, HTTP
                          status, terminal state, answer_status, action trace, expected
                          and actual values, verdict.  No question text, answer text,
                          customer name, URL or credential.
-  b3d-demo-raw.json      question text, answer text and row values (customer names).
+  demo-raw.json      question text, answer text and row values (customer names).
                          Local use only; the controller does not open it.
 
 Exit codes: 0 pass, 1 a hard failure, 2 blocked (configuration, database, server).
@@ -44,9 +44,9 @@ for _path in (str(PROJECT_ROOT), str(SRC_ROOT)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
-from scripts import b2b_http_smoke as smoke  # noqa: E402  (reuses its HTTP helpers and judgements)
+from scripts import http_smoke as smoke  # noqa: E402  (reuses its HTTP helpers and judgements)
 # Standard library only and imports nothing from queryshield: the independent values every
-# verified fact is compared with (B3e) never come from the product's SQL building.
+# verified fact is compared with never come from the product's SQL building.
 from scripts import generate_demo_data as gen  # noqa: E402
 
 QUESTIONS_PATH = PROJECT_ROOT / "fixtures" / "demo" / "demo-questions-v1.json"
@@ -61,7 +61,7 @@ TOKEN_ENVIRONMENT = {
 STATE_PATH_ENV = "QUERYSHIELD_STATE_STORE_PATH"
 APPROVER_OF = {"a-requester": "a-approver", "b-requester": "b-approver"}
 TENANT_OF = {"a-requester": "A", "b-requester": "B"}
-# A model that answers without querying is a documented model-behaviour gap (B2b), not a server bug.
+# A model that answers without querying is a documented model-behaviour gap, not a server bug.
 MODEL_BEHAVIOUR_ERROR_CODES = frozenset({"answer_not_grounded"})
 _CUSTOMER_ID = re.compile(r"c\d{2,}")
 
@@ -132,7 +132,7 @@ def _utc_seconds(value: object) -> int | None:
 
 
 def verified_fact_counts(question: Mapping[str, object], obs: Mapping[str, object], data=None) -> tuple[int, int]:
-    """(checked, mismatched) for every verified fact of one question (B3e, all questions).
+    """(checked, mismatched) for every verified fact of one question (all questions).
 
     Each fact's value must equal the generator's own value for the question's tenant,
     the fact's metric and the fact's own time window.  A fact that cannot be recomputed
@@ -229,7 +229,7 @@ def judge_metric(question: Mapping[str, object], obs: Mapping[str, object]) -> d
         gaps.append(f"no_verified_fact:{obs.get('status')}")
     outcome["bounced"] = any(item.startswith("answer_bounce(") for item in obs.get("trace") or [])
     if question["kind"] == "empty_window" and outcome["bounced"] and not hard:
-        gaps.append("empty_window_answered_after_bounce")  # B3c-2 acceptance B8: the "query first" bounce
+        gaps.append("empty_window_answered_after_bounce")  # The "query first" bounce
     outcome["hard_failures"], outcome["known_gaps"] = hard, gaps
     return outcome
 
@@ -319,7 +319,7 @@ def judge_top_customer(question: Mapping[str, object], obs: Mapping[str, object]
     be among them (whether it is the first row is only observed).  No rows: hard failure.
     Names are compared here and never written to the summary.
 
-    B3e: the top customer's amount is a grouped value, never a verified tenant metric,
+    The top customer's amount is a grouped value, never a verified tenant metric,
     so the answer is expected unverified with no fact.  A fact that is there anyway is
     checked by the rule every question gets (verified_fact_mismatch); a verified answer
     whose facts all equal the independent values (e.g. an earlier tenant total kept as a
@@ -458,7 +458,7 @@ def judge_observe_refund(question: Mapping[str, object], obs: Mapping[str, objec
 
 
 def judge_question(question: Mapping[str, object], obs: Mapping[str, object], demo_source_ids: frozenset[str]) -> dict:
-    """The kind's own judgement, then the rule every question gets (B3e): each verified
+    """The kind's own judgement, then the rule every question gets: each verified
     fact equals the independently computed value for its tenant, metric and window."""
 
     outcome = _judge_kind(question, obs, demo_source_ids)
@@ -548,7 +548,7 @@ def _error_code(body: Mapping[str, object]) -> object:
 def _completion_tokens(state_path: Path, run_id: str) -> list:
     """Completion tokens of every model call of the run, from the run's stored events (None = unknown)."""
 
-    from queryshield.db.w04_state import StateStore
+    from queryshield.db.state_store import StateStore
 
     tokens: list = []
     with StateStore(state_path) as store:
@@ -714,6 +714,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--evidence-dir", type=Path, required=True)
     parser.add_argument("--mode", choices=("real", "fake"), default="real")
     parser.add_argument(
+        "--model-protocol",
+        choices=("json", "native"),
+        default="json",
+        help="how the model returns its decision; with --base-url, the running service's setting",
+    )
+    parser.add_argument(
         "--base-url",
         default=None,
         help="drive a service that is already running instead of starting one (for example "
@@ -743,7 +749,7 @@ def main(argv: list[str] | None = None) -> int:
     if not names or not all(name.endswith(DEMO_DATABASE_SUFFIX) for name in names):
         return _blocked("database_name_must_end_with_demo")
     if not smoke._database_reachable():
-        return _blocked("database_unreachable", hint="create the demo database first (docs/b3d-demo-data.md)")
+        return _blocked("database_unreachable", hint="create the demo database first (docs/demo-data.md)")
     args.evidence_dir.mkdir(parents=True, exist_ok=True)
 
     document = json.loads(QUESTIONS_PATH.read_text(encoding="utf-8"))
@@ -766,16 +772,17 @@ def main(argv: list[str] | None = None) -> int:
     if external is not None:
         tokens, state_path, base = external
     else:
-        workdir = Path(tempfile.mkdtemp(prefix="b3d-demo-run-"))
+        workdir = Path(tempfile.mkdtemp(prefix="demo-run-"))
         state_path = workdir / "state.sqlite3"
         tokens = {name: uuid4().hex for name in ("a-requester", "a-approver", "b-requester", "b-approver")}
         env = os.environ.copy()
-        for name in ("QUERYSHIELD_W04_FAKE_DB", "QUERYSHIELD_AGENT_PROFILE", "QUERYSHIELD_RETRIEVAL", "QUERYSHIELD_METADATA_TOOLS"):
+        for name in ("QUERYSHIELD_FAKE_DB", "QUERYSHIELD_AGENT_PROFILE", "QUERYSHIELD_RETRIEVAL", "QUERYSHIELD_METADATA_TOOLS"):
             env.pop(name, None)
         env.update(
             {
                 "QUERYSHIELD_DEMO_DATASET": DEMO_DATASET,
                 "QUERYSHIELD_PROVIDER_MODE": args.mode,
+                "QUERYSHIELD_MODEL_PROTOCOL": args.model_protocol,
                 "QUERYSHIELD_STATE_STORE_PATH": str(state_path),
                 "QUERYSHIELD_CALL_STORE_PATH": str(workdir / "calls.sqlite3"),
                 "QUERYSHIELD_TOKEN_A_REQUESTER": tokens["a-requester"],
@@ -841,7 +848,7 @@ def main(argv: list[str] | None = None) -> int:
     # Versions as recorded by the server for these runs (never the URL): the knowledge snapshot
     # label (catalog-v2 for the frozen knowledge base, catalog-v4 for the demo one) next to the
     # catalog version of the facts and run configuration (O8).
-    from queryshield.db.w04_state import StateStore
+    from queryshield.db.state_store import StateStore
 
     snapshot_ids: set[str] = set()
     with StateStore(state_path) as store:
@@ -853,6 +860,7 @@ def main(argv: list[str] | None = None) -> int:
     hard_failures += [f"setup:{item['check']}" for item in setup if not item.get("ok")]
     summary = {
         "mode": args.mode,
+        "model_protocol": args.model_protocol,
         "data_version": document["data_version"],
         "questions_version": document["version"],
         "status": "pass" if not hard_failures else "fail",
@@ -873,8 +881,8 @@ def main(argv: list[str] | None = None) -> int:
         },
         "note": "ids, status codes, terminal states, counts and numbers only; no question or answer text, customer names, URLs or credentials",
     }
-    (args.evidence_dir / "b3d-demo-summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (args.evidence_dir / "b3d-demo-raw.json").write_text(json.dumps(raw_records, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    (args.evidence_dir / "demo-summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (args.evidence_dir / "demo-raw.json").write_text(json.dumps(raw_records, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({key: summary[key] for key in ("status", "hard_failures", "known_gaps")}, ensure_ascii=False))
     return 0 if not hard_failures else 1
 

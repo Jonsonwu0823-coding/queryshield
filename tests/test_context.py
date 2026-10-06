@@ -75,21 +75,21 @@ def test_context_carries_multiple_server_metric_bindings_and_exact_ask_user_cont
     ]
     assert ask_user["optional_fields"] == ["clarification_id"]
     assert "duplicate member names" in ask_user["wire_format"]
-    # B3c-1 removed the instructions line repeating this (and the tool-fields
-    # rule); both stay stated once in the action contract.
+    # The instructions line repeating this (and the tool-fields
+    # rule) was removed; both stay stated once in the action contract.
     assert "never repeat JSON member names" not in " ".join(server["instructions"])
     assert "Tool fields go only inside arguments" in server["action_contract"]["actions"]["tool_call"]["wire_format"]
     final_answer = server["action_contract"]["actions"]["final_answer"]
     assert final_answer["valid_shape_examples"] == [
         '{"type":"final_answer","answer":"...","source_ids":["<source_id from this run\'s results>"],"fact_refs":[{"result_id":"<result_id returned by query_readonly in this run>","metric_id":"<verified metric_id>"}]}',
-        # B3c-2 R1: the no_data action, copyable as is; basis stays optional.
+        # The no_data action, copyable as is; basis stays optional.
         '{"type":"final_answer","answer":"","source_ids":[],"fact_refs":[],"basis":"no_data"}',
     ]
     assert "basis" not in final_answer["required_fields"]
     assert "arrays, even for one item" in final_answer["wire_format"]
     assert "not bare objects" in final_answer["wire_format"]
     assert "replace example placeholders" in final_answer["fact_refs_rule"]
-    # B3c-2: values still need this run's query, even when no data is expected.
+    # Values still need this run's query, even when no data is expected.
     assert "Business values need this run's query first, even when no data is expected" in final_answer["fact_refs_rule"]
     assert "never state one without it" in final_answer["fact_refs_rule"]
     with pytest.raises(ProposalParseError, match="fact_refs must be a list"):
@@ -116,7 +116,7 @@ def test_context_carries_multiple_server_metric_bindings_and_exact_ask_user_cont
     assert "net_fen" not in net_server["action_contract"]["actions"]["tool_call"]["tools"]["query_readonly"]["metric_query_guidance"]
     assert "valid_net_fen_template" not in net_server["action_contract"]["actions"]["tool_call"]["tools"]["query_readonly"]
     assert "net_fen is declared alone" in net_server["metric_declaration"]["rule"]
-    # B3c-1 removed the instructions line that repeated metric_declaration.rule.
+    # The instructions line that repeated metric_declaration.rule was removed.
     assert "MUST declare it in arguments.metrics" in net_server["metric_declaration"]["rule"]
     assert "metric_declaration" in " ".join(net_server["action_contract"]["workflow"])
     assert net_server["action_contract"]["actions"]["parallel_readonly"]["metric_count_range"] == [2, 3]

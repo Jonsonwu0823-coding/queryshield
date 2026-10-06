@@ -1,13 +1,15 @@
 """The one definition of the two MCP tools: names, input and output schemas.
 
 The server publishes exactly these definitions and the host compares the
-server's tools/list against them.  The input schemas are the C3 shapes of the
+server's tools/list against them.  The input schemas have the shapes of the
 local tools: no identity field, no extra field.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+from queryshield.policy.argument_limits import DESCRIBE_TABLES_RANGE, SEARCH_QUERY_MAX_CHARS, TOP_K_DEFAULT, TOP_K_RANGE
 
 
 SERVER_NAME = "queryshield-metadata"
@@ -21,8 +23,8 @@ _STRING = {"type": "string"}
 SEARCH_CATALOG_INPUT: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "query": {"type": "string", "minLength": 1, "maxLength": 200},
-        "top_k": {"type": "integer", "minimum": 1, "maximum": 5, "default": 3},
+        "query": {"type": "string", "minLength": 1, "maxLength": SEARCH_QUERY_MAX_CHARS},
+        "top_k": {"type": "integer", "minimum": TOP_K_RANGE[0], "maximum": TOP_K_RANGE[1], "default": TOP_K_DEFAULT},
     },
     "required": ["query"],
     "additionalProperties": False,
@@ -34,8 +36,8 @@ DESCRIBE_TABLES_INPUT: dict[str, Any] = {
         "tables": {
             "type": "array",
             "items": {"type": "string", "minLength": 1},
-            "minItems": 1,
-            "maxItems": 3,
+            "minItems": DESCRIBE_TABLES_RANGE[0],
+            "maxItems": DESCRIBE_TABLES_RANGE[1],
             "uniqueItems": True,
         },
     },
@@ -48,7 +50,7 @@ SEARCH_CATALOG_OUTPUT: dict[str, Any] = {
     "properties": {
         "items": {
             "type": "array",
-            "maxItems": 5,
+            "maxItems": TOP_K_RANGE[1],
             "items": {
                 "type": "object",
                 "properties": {"id": _STRING, "text": _STRING, "source_id": _STRING, "version": _STRING},
@@ -66,8 +68,8 @@ DESCRIBE_TABLES_OUTPUT: dict[str, Any] = {
     "properties": {
         "tables": {
             "type": "array",
-            "minItems": 1,
-            "maxItems": 3,
+            "minItems": DESCRIBE_TABLES_RANGE[0],
+            "maxItems": DESCRIBE_TABLES_RANGE[1],
             "items": {
                 "type": "object",
                 "properties": {

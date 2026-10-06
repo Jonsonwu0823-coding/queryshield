@@ -61,7 +61,7 @@ MCP 返回的内容都不可信。宿主在下面几个环节核对：
 ## 打开设置与冒烟
 
 ```powershell
-$env:QUERYSHIELD_METADATA_TOOLS = 'mcp'      # 只影响 HTTP 产品服务（shared_w04_service）
+$env:QUERYSHIELD_METADATA_TOOLS = 'mcp'      # 只影响 HTTP 产品服务（shared_run_service）
 .\scripts\mcp-local-smoke.ps1 -FakeDryRun                     # 协议部分 + 产品部分，Fake 模型
 .\scripts\mcp-local-smoke.ps1 -BailianBaseUrl '<百炼地址>'      # Real，凭据提示输入
 ```
@@ -70,8 +70,8 @@ Linux / macOS 上也可以直接运行：`python scripts/mcp_smoke.py --mode fak
 
 ## 边界与限制
 
-- 只有 `shared_w04_service()` 读这个设置。直接构造的 `W04RunService`（W05 有状态评测、各项检查、测试）一律走本地。
-- 经 HTTP 应用运行的 W04 和历史检查（`check_w04.py` 的 TestClient、`check_api`、`check_faults`、`check_runtime`、`check_fs02`）会跟随这个设置，运行这些检查时不要设它。
+- 只有 `shared_run_service()` 读这个设置。直接构造的 `RunService`（开发集的有状态评测、各项检查、测试）一律走本地。
+- 经 HTTP 应用运行的 STATE 套件和历史检查（`check_state.py` 的 TestClient、`check_api`、`check_faults`、`check_runtime`、`check_api_facts`）会跟随这个设置，运行这些检查时不要设它。
 - 只支持 stdio 和本机进程：不做远程 MCP、OAuth、多用户共用进程或进程池。
 - 状态库里的会话记录（server_pid、SDK 版本、协议版本、清理结果、`failure_code`、`failure_source`）对 run 的所有者可见，都是固定字段。
 - 索引文件写在宿主进程自己的临时目录（`queryshield-mcp-index-*`），里面有 approver 专属和各租户的分块文字，权限 0700。宿主在应用关闭阶段删除它，并在解释器退出时再删一次兜底。

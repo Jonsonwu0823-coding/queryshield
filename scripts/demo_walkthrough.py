@@ -14,7 +14,7 @@ and approval details:
      (the other tenant's approver: 404, the requester approving their own request: 403).
 
 Every verified fact is compared with the value the demo-data generator computes on its own
-for the same tenant, metric and time window (B3e rule, ``demo_run.verified_fact_counts``);
+for the same tenant, metric and time window (``demo_run.verified_fact_counts``);
 a difference is a hard failure.  Whatever path a scenario takes, every verified fact in the answer
 it ends with must have been compared: a scenario that closes with more facts than it compared
 fails with ``verified_fact_unchecked``.  The judgements are the ones of the HTTP smoke and of the
@@ -30,7 +30,7 @@ Fake mode: every scenario ends in a fixed state, and any deviation fails.  Real 
 behaviour that the smoke records as a known gap is recorded as a known gap here, hard failures
 stay hard failures.
 
---evidence-dir writes b4b-walkthrough-summary.json: fixed fields and numbers only (scenario
+--evidence-dir writes walkthrough-summary.json: fixed fields and numbers only (scenario
 ids, HTTP codes, terminal states, answer_status, check counts, which runs used MCP).  It holds
 no question, answer text, customer name, URL or credential.
 
@@ -55,7 +55,7 @@ for _path in (str(PROJECT_ROOT), str(SRC_ROOT)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
-from scripts import b2b_http_smoke as smoke  # noqa: E402
+from scripts import http_smoke as smoke  # noqa: E402
 from scripts import demo_run  # noqa: E402
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
@@ -585,7 +585,7 @@ def main(argv: list[str] | None = None) -> int:
         }
     if args.evidence_dir:
         args.evidence_dir.mkdir(parents=True, exist_ok=True)
-        (args.evidence_dir / "b4b-walkthrough-summary.json").write_text(
+        (args.evidence_dir / "walkthrough-summary.json").write_text(
             json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
     print(json.dumps({key: summary[key] for key in ("status", "hard_failures", "known_gaps")}, ensure_ascii=False))

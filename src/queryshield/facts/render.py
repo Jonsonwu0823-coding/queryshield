@@ -46,7 +46,7 @@ def render_verified_answer(
 
 
 def render_no_data_answer(metric_names: Sequence[str]) -> str:
-    """The fixed reply for a question that needs no data (B3c-2 basis no_data).
+    """The fixed reply for a question that needs no data (basis no_data).
 
     Server text plus the catalog names of the declarable metrics, passed in by
     the caller; no model text and no user text.

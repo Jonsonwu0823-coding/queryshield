@@ -1,7 +1,7 @@
 """Create (or reload) the QueryShield demo database tables and rows.
 
 Only databases whose name ends with ``_demo`` are accepted; ``_test`` is refused.
-The database itself must already exist (see docs/b3d-demo-data.md for who runs
+The database itself must already exist (see docs/demo-data.md for who runs
 CREATE DATABASE).  In ONE transaction this script
 
   1. applies migrations/001_commerce_v1.sql (idempotent),
@@ -9,7 +9,7 @@ CREATE DATABASE).  In ONE transaction this script
   3. TRUNCATEs refunds, orders and customers and loads fixtures/demo/commerce-demo-v1.sql,
   4. counts the rows and fails (rolling everything back) if they differ from the
      generator's counts in fixtures/demo/demo-questions-v1.json,
-  5. applies migrations/002_w04_rls.sql (ENABLE and FORCE RLS plus policies),
+  5. applies migrations/002_rls.sql (ENABLE and FORCE RLS plus policies),
   6. grants CONNECT, USAGE and SELECT to the existing read-only role queryshield_ro.
 
 It never creates a role and never sets a password.  The reload is exact, so a
@@ -28,7 +28,7 @@ from urllib.parse import unquote, urlsplit
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MIGRATION_PATHS = (
     PROJECT_ROOT / "migrations" / "001_commerce_v1.sql",
-    PROJECT_ROOT / "migrations" / "002_w04_rls.sql",
+    PROJECT_ROOT / "migrations" / "002_rls.sql",
 )
 DEMO_SQL_PATH = PROJECT_ROOT / "fixtures" / "demo" / "commerce-demo-v1.sql"
 QUESTIONS_PATH = PROJECT_ROOT / "fixtures" / "demo" / "demo-questions-v1.json"

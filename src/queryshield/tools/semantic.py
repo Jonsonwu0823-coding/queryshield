@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
-import re
 from typing import Any
 from uuid import uuid4
 
@@ -12,10 +11,18 @@ from queryshield.agent.context import (
     NET_FEN_PLAN_ID,
     NET_FEN_REFUND_QUERY,
 )
-from queryshield.agent.proposals import ExecutionContext, MetricBinding, ResultEvidence
+from queryshield.agent.proposals import (
+    RESERVED_IDENTITY_PARAMS,
+    ExecutionContext,
+    MetricBinding,
+    ResultEvidence,
+)
 from queryshield.catalog import SemanticCatalog, load_default_catalog
-from queryshield.catalog.catalog import ALLOWED_TABLE_COLUMNS
+from queryshield.catalog.catalog import ALLOWED_ROLES, ALLOWED_TABLE_COLUMNS
+from queryshield.catalog.search_terms import expanded_query_terms
 from queryshield.db.guarded import GuardedQueryError, GuardedQueryExecutor, render_scoped_select
+from queryshield.knowledge.acl import catalog_entry_visible, tenant_matches
+from queryshield.policy.params import ordered_param_values
 from queryshield.policy.sql import (
     BinaryExpression,
     BooleanExpression,
@@ -24,32 +31,14 @@ from queryshield.policy.sql import (
     Condition,
     FunctionCall,
     NotExpression,
-    ParameterRef,
     SQLPolicyError,
     SelectStatement,
     Star,
-    UnaryExpression,
     parse_readonly_select,
 )
 
 
-_ALLOWED_ROLES = frozenset({"requester", "approver"})
-_RESERVED_PARAMS = frozenset(
-    {"tenant_id", "principal_id", "role", "authorization", "token"}
-)
 _SCALAR_TYPES = (str, int, float, bool)
-_TOKEN_RE = re.compile(r"[a-z0-9_]+|[\u4e00-\u9fff]+")
-_SYNONYMS: dict[str, tuple[str, ...]] = {
-    "已支付订单数": ("paid_count", "paid"),
-    "订单数量": ("paid_count",),
-    "营业额": ("gross_fen",),
-    "支付订单总额": ("gross_fen",),
-    "销售额": ("gross_fen", "net_fen"),
-    "退款": ("refund_fen",),
-    "退款金额": ("refund_fen",),
-    "净额": ("net_fen",),
-    "退款后": ("net_fen",),
-}
 
 
 class ToolError(ValueError):
@@ -61,21 +50,19 @@ class ToolError(ValueError):
         super().__init__(f"{code}: {message}")
 
 
-def _controlled_error_detail(error: ValueError, code: str) -> str:
-    """Expose only the fixed server error detail, never SQL or parameter values."""
+def _as_tool_error(error: SQLPolicyError | GuardedQueryError) -> ToolError:
+    """Expose only the fixed server error code and detail, never SQL or parameter values."""
 
-    prefix = f"{code}: "
+    prefix = f"{error.code}: "
     text = str(error)
-    return text[len(prefix) :] if text.startswith(prefix) else text
+    return ToolError(error.code, text[len(prefix) :] if text.startswith(prefix) else text)
 
 
 def _require_context(context: ExecutionContext) -> None:
     if not isinstance(context, ExecutionContext):
         raise ToolError("unauthorized", "tool calls require a server-created execution context")
-    if context.role not in _ALLOWED_ROLES:
+    if context.role not in ALLOWED_ROLES:
         raise ToolError("forbidden", "the current role cannot use semantic tools")
-    if not context.tenant_id.strip() or not context.principal_id.strip():
-        raise ToolError("unauthorized", "execution context is incomplete")
 
 
 def _arguments_object(arguments: Mapping[str, object], *, required: set[str], optional: set[str]) -> None:
@@ -138,30 +125,26 @@ def _params(value: object) -> tuple[object, ...]:
     keys = list(value)
     if any(type(key) is not str for key in keys):
         raise ToolError("invalid_argument", "params keys must be strings")
-    if any(key in _RESERVED_PARAMS for key in keys):
+    if any(key in RESERVED_IDENTITY_PARAMS for key in keys):
         raise ToolError("reserved_parameter", "identity parameters are server-owned")
-    if any(not key.isdecimal() or str(int(key)) != key for key in keys):
+    if any(not (key.isascii() and key.isdecimal() and (key == "0" or key[0] != "0")) for key in keys):
         raise ToolError("invalid_argument", "params keys must be consecutive indexes")
-    indexes = sorted(int(key) for key in keys)
-    if indexes != list(range(len(indexes))):
+    values = ordered_param_values(value)
+    if values is None:
         raise ToolError("invalid_argument", "params keys must start at zero without gaps")
-    values = tuple(value[str(index)] for index in indexes)
     if any(item is not None and type(item) not in _SCALAR_TYPES for item in values):
         raise ToolError("invalid_argument", "params values must be scalar")
     return values
 
 
-def _tokens(value: str) -> set[str]:
-    return set(_TOKEN_RE.findall(value.lower()))
+def _validated_select(sql: str, raw_params: object) -> tuple[tuple[object, ...], SelectStatement]:
+    """The parameter object, then the parser: the checks a query has to pass wherever it came from."""
 
-
-def _expanded_query_terms(query: str) -> set[str]:
-    terms = _tokens(query)
-    for phrase, replacements in _SYNONYMS.items():
-        if phrase in query:
-            for replacement in replacements:
-                terms.update(_tokens(replacement))
-    return terms
+    params = _params(raw_params)
+    try:
+        return params, parse_readonly_select(sql)
+    except SQLPolicyError as exc:
+        raise _as_tool_error(exc) from exc
 
 
 def _walk_expression(expression: object) -> tuple[ColumnRef, ...]:
@@ -169,8 +152,6 @@ def _walk_expression(expression: object) -> tuple[ColumnRef, ...]:
         return (expression,)
     if isinstance(expression, FunctionCall):
         return tuple(item for arg in expression.arguments for item in _walk_expression(arg))
-    if isinstance(expression, UnaryExpression):
-        return _walk_expression(expression.operand)
     if isinstance(expression, BinaryExpression):
         return _walk_expression(expression.left) + _walk_expression(expression.right)
     return ()
@@ -211,10 +192,7 @@ def _has_customer_star(statement: SelectStatement) -> bool:
 def check_sensitive_access(context: ExecutionContext, statement: SelectStatement) -> None:
     if context.role == "approver":
         return
-    aliases = {
-        statement.from_table.alias or statement.from_table.name: statement.from_table.name
-    }
-    aliases.update({join.table.alias or join.table.name: join.table.name for join in statement.joins})
+    aliases = statement.table_aliases
     if _has_customer_star(statement):
         raise ToolError("approval_required", "customers.name values require the approval path")
     for column in _statement_columns(statement):
@@ -225,7 +203,7 @@ def check_sensitive_access(context: ExecutionContext, statement: SelectStatement
 
 @dataclass
 class ControlledTools:
-    """Small, server-bound semantic tool facade used by the W03 runtime."""
+    """Small, server-bound semantic tool facade used by the runtime."""
 
     catalog: SemanticCatalog | None = None
     executor: GuardedQueryExecutor | None = None
@@ -238,7 +216,7 @@ class ControlledTools:
             self.executor = GuardedQueryExecutor(catalog_version=self.catalog.catalog_version)
         self._evidence: dict[tuple[str, str], ResultEvidence] = {}
         self._retrieval_evidence: dict[tuple[str, str], Any] = {}
-        # W05 internal sidecar: retain the exact returned candidate metadata so
+        # Internal sidecar: retain the exact returned candidate metadata so
         # the evaluator can prove that this run's selected items reached a later
         # model request. The public tool result remains unchanged.
         self._retrieval_return_records: dict[tuple[str, str], dict[str, object]] = {}
@@ -251,7 +229,6 @@ class ControlledTools:
         context: ExecutionContext,
         metric_bindings: Sequence[MetricBinding] = (),
     ) -> dict[str, object]:
-        _require_context(context)
         if name == "search_catalog":
             return self.search_catalog(arguments, context=context)
         if name == "describe_tables":
@@ -268,79 +245,95 @@ class ControlledTools:
     ) -> dict[str, object]:
         _require_context(context)
         query, top_k = _search_catalog_arguments(arguments)
-        assert self.catalog is not None
-
         if self.retriever is not None:
-            search = getattr(self.retriever, "search", None)
-            if not callable(search):
-                raise ToolError("retrieval_unavailable", "the configured retrieval strategy is invalid")
-            result = search(query, context=context, top_k=top_k)
-            retrieval_evidence = getattr(result, "evidence", None)
-            items = getattr(result, "items", None)
-            if retrieval_evidence is None or not isinstance(items, Sequence):
-                raise ToolError("retrieval_unavailable", "the retrieval strategy returned an invalid result")
-            key = (context.run_id, retrieval_evidence.retrieval_id)
-            returned_items = [dict(item) for item in items]
-            self._retrieval_evidence[key] = retrieval_evidence
-            index = getattr(self.retriever, "index", None)
-            chunk_by_id = {
-                str(getattr(chunk, "chunk_id", "")): chunk
-                for chunk in getattr(index, "chunks", ())
-                if getattr(chunk, "chunk_id", None)
-            }
-            source_by_id = {
-                str(getattr(source, "source_id", "")): source
-                for source in getattr(getattr(self.retriever, "snapshot", None), "source_records", ())
-                if getattr(source, "source_id", None)
-            }
-            catalog_by_id = {
-                str(getattr(entry, "id", "")): entry
-                for entry in getattr(self.catalog, "entries", ())
-                if getattr(entry, "id", None)
-            }
-            self._retrieval_return_records[key] = {
-                "run_id": context.run_id,
-                "tenant_id": context.tenant_id,
-                "principal_id": context.principal_id,
-                "role": context.role,
-                "retrieval_id": retrieval_evidence.retrieval_id,
-                "snapshot_id": retrieval_evidence.snapshot_id,
-                "query_sha256": retrieval_evidence.query_sha256,
-                "strategy_version": retrieval_evidence.strategy_version,
-                "selected_ids": list(retrieval_evidence.selected_ids),
-                "items": [
-                    {
-                        "id": item.get("id"),
-                        "source_id": item.get("source_id"),
-                        "version": item.get("version"),
-                        "text_sha256": hashlib.sha256(str(item.get("text", "")).encode("utf-8")).hexdigest(),
-                        "source_kind": (
-                            "knowledge_document"
-                            if item.get("id") in chunk_by_id
-                            else (
-                                "catalog_retrieval_candidate"
-                                if item.get("id") in catalog_by_id
-                                else "retriever_candidate"
-                            )
-                        ),
-                        "visibility_check": self._retrieval_item_visibility(
-                            item,
-                            context=context,
-                            chunk=chunk_by_id.get(str(item.get("id"))),
-                            source=source_by_id.get(str(item.get("source_id"))),
-                            catalog_entry=catalog_by_id.get(str(item.get("id"))),
-                        ),
-                    }
-                    for item in returned_items
-                ],
-                "acl_basis": "returned by HybridRetriever after server identity, role, tenant, source-status, and version filtering",
-            }
-            return {"items": returned_items}
+            return self._search_with_retriever(query, top_k, context)
+        return self._rank_catalog_entries(query, top_k, context)
 
-        query_terms = _expanded_query_terms(query)
+    def _search_with_retriever(self, query: str, top_k: int, context: ExecutionContext) -> dict[str, object]:
+        search = getattr(self.retriever, "search", None)
+        if not callable(search):
+            raise ToolError("retrieval_unavailable", "the configured retrieval strategy is invalid")
+        result = search(query, context=context, top_k=top_k)
+        retrieval_evidence = getattr(result, "evidence", None)
+        items = getattr(result, "items", None)
+        if retrieval_evidence is None or not isinstance(items, Sequence):
+            raise ToolError("retrieval_unavailable", "the retrieval strategy returned an invalid result")
+        key = (context.run_id, retrieval_evidence.retrieval_id)
+        returned_items = [dict(item) for item in items]
+        self._retrieval_evidence[key] = retrieval_evidence
+        self._retrieval_return_records[key] = self._retrieval_return_record(retrieval_evidence, returned_items, context)
+        return {"items": returned_items}
+
+    def _retrieval_return_record(
+        self,
+        retrieval_evidence: Any,
+        returned_items: Sequence[Mapping[str, object]],
+        context: ExecutionContext,
+    ) -> dict[str, object]:
+        """The evaluation sidecar record of one retrieval: what was returned and why it was visible."""
+
+        index = getattr(self.retriever, "index", None)
+        chunk_by_id = {
+            str(getattr(chunk, "chunk_id", "")): chunk
+            for chunk in getattr(index, "chunks", ())
+            if getattr(chunk, "chunk_id", None)
+        }
+        source_by_id = {
+            str(getattr(source, "source_id", "")): source
+            for source in getattr(getattr(self.retriever, "snapshot", None), "source_records", ())
+            if getattr(source, "source_id", None)
+        }
+        catalog_by_id = {
+            str(getattr(entry, "id", "")): entry
+            for entry in getattr(self.catalog, "entries", ())
+            if getattr(entry, "id", None)
+        }
+        return {
+            "run_id": context.run_id,
+            "tenant_id": context.tenant_id,
+            "principal_id": context.principal_id,
+            "role": context.role,
+            "retrieval_id": retrieval_evidence.retrieval_id,
+            "snapshot_id": retrieval_evidence.snapshot_id,
+            "query_sha256": retrieval_evidence.query_sha256,
+            "strategy_version": retrieval_evidence.strategy_version,
+            "selected_ids": list(retrieval_evidence.selected_ids),
+            "items": [
+                {
+                    "id": item.get("id"),
+                    "source_id": item.get("source_id"),
+                    "version": item.get("version"),
+                    "text_sha256": hashlib.sha256(str(item.get("text", "")).encode("utf-8")).hexdigest(),
+                    "source_kind": (
+                        "knowledge_document"
+                        if item.get("id") in chunk_by_id
+                        else (
+                            "catalog_retrieval_candidate"
+                            if item.get("id") in catalog_by_id
+                            else "retriever_candidate"
+                        )
+                    ),
+                    "visibility_check": self._retrieval_item_visibility(
+                        item,
+                        context=context,
+                        chunk=chunk_by_id.get(str(item.get("id"))),
+                        source=source_by_id.get(str(item.get("source_id"))),
+                        catalog_entry=catalog_by_id.get(str(item.get("id"))),
+                    ),
+                }
+                for item in returned_items
+            ],
+            "acl_basis": "returned by HybridRetriever after server identity, role, tenant, source-status, and version filtering",
+        }
+
+    def _rank_catalog_entries(self, query: str, top_k: int, context: ExecutionContext) -> dict[str, object]:
+        """The keyword fallback when no retriever is configured: visible catalog entries by word score."""
+
+        assert self.catalog is not None
+        query_terms = expanded_query_terms(query)
         ranked: list[tuple[int, str, dict[str, str]]] = []
         for entry in self.catalog.entries:
-            if entry.requires_approval and context.role != "approver":
+            if not catalog_entry_visible(entry, context.role):
                 continue
             item = entry.as_search_item()
             item_text = f"{entry.id} {entry.text}".lower()
@@ -356,11 +349,9 @@ class ControlledTools:
     @staticmethod
     def _retrieval_item_visibility(item, *, context, chunk, source, catalog_entry) -> dict[str, object]:
         if chunk is not None:
-            from queryshield.knowledge.retrieval import _tenant_matches
-
             # The retriever's own tenant rule, not a second copy of it.
             tenant_scope = getattr(source, "tenant_scope", None)
-            tenant_visible = isinstance(tenant_scope, str) and _tenant_matches(tenant_scope, context.tenant_id)
+            tenant_visible = isinstance(tenant_scope, str) and tenant_matches(tenant_scope, context.tenant_id)
             version_matches = (
                 getattr(chunk, "source_id", None) == item.get("source_id")
                 and getattr(chunk, "source_version", None) == item.get("version")
@@ -381,7 +372,7 @@ class ControlledTools:
                 getattr(catalog_entry, "source_id", None) == item.get("source_id")
                 and getattr(catalog_entry, "version", None) == item.get("version")
             )
-            role_visible = not bool(getattr(catalog_entry, "requires_approval", False)) or context.role == "approver"
+            role_visible = catalog_entry_visible(catalog_entry, context.role)
             return {
                 "candidate_type": "catalog_retrieval_candidate",
                 "source_active": True,
@@ -437,27 +428,9 @@ class ControlledTools:
         _require_context(context)
         _arguments_object(arguments, required={"sql", "params"}, optional=set())
         sql = _string(arguments["sql"], field="sql", maximum=4000)
-        params = _params(arguments["params"])
-        try:
-            statement = parse_readonly_select(sql)
-        except SQLPolicyError as exc:
-            raise ToolError(exc.code, _controlled_error_detail(exc, exc.code)) from exc
+        params, statement = _validated_select(sql, arguments["params"])
         check_sensitive_access(context, statement)
-        if any(table not in ALLOWED_TABLE_COLUMNS for table in statement.referenced_tables):
-            raise ToolError("table_not_allowed", "query references a table outside the server allowlist")
-        if any(not isinstance(binding, MetricBinding) for binding in metric_bindings):
-            raise ToolError("invalid_binding", "metric bindings are server-owned")
-        net_bindings = tuple(
-            binding
-            for binding in metric_bindings
-            if binding.metric_id.removeprefix("metric.") == "net_fen"
-        )
-        if len(net_bindings) > 1:
-            raise ToolError("invalid_binding", "net_fen must have one metric binding")
-        net_binding = net_bindings[0] if net_bindings else None
-        controlled_net_binding = (
-            net_binding if net_binding is not None and self._is_valid_net_binding(net_binding) else None
-        )
+        controlled_net_binding = self._controlled_net_binding(metric_bindings)
         assert self.executor is not None
         try:
             # Validate the model-selected SQL with the same AST/tenant renderer
@@ -479,10 +452,8 @@ class ControlledTools:
                     metric_bindings=metric_bindings,
                 )
                 evidence = result.evidence
-        except SQLPolicyError as exc:
-            raise ToolError(exc.code, _controlled_error_detail(exc, exc.code)) from exc
-        except GuardedQueryError as exc:
-            raise ToolError(exc.code, _controlled_error_detail(exc, exc.code)) from exc
+        except (SQLPolicyError, GuardedQueryError) as exc:
+            raise _as_tool_error(exc) from exc
 
         self._evidence[(context.run_id, evidence.result_id)] = evidence
         response = {
@@ -491,9 +462,23 @@ class ControlledTools:
             "result_id": evidence.result_id,
             "policy_version": evidence.policy_version,
         }
-        if controlled_net_binding is not None and evidence.metric_bindings == (controlled_net_binding,):
+        if controlled_net_binding is not None:
             response.update({"metric_plan_id": NET_FEN_PLAN_ID, "plan_query_count": 2})
         return response
+
+    def _controlled_net_binding(self, metric_bindings: Sequence[MetricBinding]) -> MetricBinding | None:
+        """The net_fen binding the server's own plan runs for; None when there is none or it is not valid."""
+
+        if any(not isinstance(binding, MetricBinding) for binding in metric_bindings):
+            raise ToolError("invalid_binding", "metric bindings are server-owned")
+        net_bindings = tuple(
+            binding for binding in metric_bindings if binding.metric_id.removeprefix("metric.") == "net_fen"
+        )
+        if len(net_bindings) > 1:
+            raise ToolError("invalid_binding", "net_fen must have one metric binding")
+        if net_bindings and self._is_valid_net_binding(net_bindings[0]):
+            return net_bindings[0]
+        return None
 
     def _is_valid_net_binding(self, binding: MetricBinding) -> bool:
         assert self.catalog is not None

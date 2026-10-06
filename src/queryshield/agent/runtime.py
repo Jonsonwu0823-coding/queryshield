@@ -1,6 +1,6 @@
 """The single product runtime: profile assembly, result shaping and outcome mapping.
 
-HTTP ``/queries`` (sync and async), ``/runs/{run_id}/resume`` and the W05
+HTTP ``/queries`` (sync and async), ``/runs/{run_id}/resume`` and the
 evaluation all assemble B0/B1 through the functions in this module.  The
 evaluation wrapper may only add its own arguments to ``BoundedAgent.run``.
 """
@@ -8,13 +8,13 @@ evaluation wrapper may only add its own arguments to ``BoundedAgent.run``.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from time import perf_counter
 from typing import Any
 
-from queryshield.agent.config import RunConfig
+from queryshield.agent.config import NATIVE_VERSIONS, RunConfig
 from queryshield.agent.context import build_context
 from queryshield.agent.graph import CLARIFICATION_NOT_NEEDED_CODE, AgentRunResult, BoundedAgent, GraphLimits
 from queryshield.agent.proposals import (
@@ -25,6 +25,7 @@ from queryshield.agent.proposals import (
     FinalAnswerAction,
     ModelCallStore,
     ProposalParseError,
+    ResultEvidence,
     ToolCallAction,
     parse_query_proposal,
 )
@@ -36,16 +37,18 @@ from queryshield.agent.tool_execution import (
     ClarificationValueUnsupportedError,
     call_tool,
 )
+from queryshield.catalog.catalog import SemanticCatalog
 from queryshield.catalog.phrases import ClarificationReading, read_clarifications, review_ask
 from queryshield.facts import FactResolutionError, FactResolver
 from queryshield.facts.facts import is_scalar_metric_result
-from queryshield.agent.metric_intent import declarable_metric_ids
+from queryshield.agent.metric_intent import no_data_metric_names
 from queryshield.facts.render import render_no_data_answer, render_verified_answer
 from queryshield.providers.contracts import (
     ModelAdapter,
     ModelProviderError,
     new_local_call_id,
     new_request_id,
+    usage_is_consistent,
 )
 from queryshield.tools.semantic import ControlledTools, ToolError
 
@@ -69,8 +72,8 @@ Declare every metric you will report in arguments.metrics with its time_window; 
 
 
 # ---------------------------------------------------------------------------
-# Shared outcome mapping: runtime status -> run status, public status, W05
-# oracle terminal state and HTTP code.  HTTP entrypoints and the W05
+# Shared outcome mapping: runtime status -> run status, public status,
+# oracle terminal state and HTTP code.  HTTP entrypoints and the evaluation
 # normalizer both read this table; nothing else maps statuses.
 #
 # Two different "limits" share a name and must not be confused:
@@ -114,7 +117,7 @@ FAILED_ERROR_HTTP: Mapping[str, int] = {
     "invalid_embedding_configuration": 503,
     "database_unavailable": 503,
     "invalid_database_configuration": 503,
-    # B3e: the product found no active permission source to bind an approval to.
+    # The product found no active permission source to bind an approval to.
     "approval_permission_unavailable": 503,
     # The product knowledge base could not be loaded (not a permission problem).
     "knowledge_unavailable": 503,
@@ -183,7 +186,7 @@ def usage_record(call: object) -> dict[str, object]:
     prompt = getattr(usage, "prompt_tokens", None)
     completion = getattr(usage, "completion_tokens", None)
     total = getattr(usage, "total_tokens", None)
-    if any(type(value) is not int or value < 0 for value in (prompt, completion, total)) or prompt + completion != total:
+    if not usage_is_consistent(prompt, completion, total):
         return {
             "usage_status": "unknown",
             "prompt_tokens": None,
@@ -198,18 +201,8 @@ def usage_record(call: object) -> dict[str, object]:
     }
 
 
-def render_fact_records(
-    facts: Sequence[Mapping[str, object]],
-    *,
-    clarifications: ClarificationReading | None = None,
-) -> str:
-    """Render the serialized, independently resolved fact records returned by FactResolver.
-
-    The same renderer as the B1 graph; with a phrase-table reading it adds the
-    catalog basis of each metric.
-    """
-
-    return render_verified_answer(facts, clarifications=clarifications)
+# The renderer of the B1 graph; with a phrase-table reading it adds the catalog basis of each metric.
+render_fact_records = render_verified_answer
 
 
 def bind_facts_to_context(
@@ -255,6 +248,154 @@ def _b0_record(
     }
 
 
+def _b0_side_effects(*, readonly_queries: int = 0, fact_count: int = 0) -> dict[str, int]:
+    return {
+        "model_calls": 1,
+        "readonly_queries": readonly_queries,
+        "fact_count": fact_count,
+        "write_statements": 0,
+        "cross_tenant_rows": 0,
+        "unauthorized_facts": 0,
+    }
+
+
+def _b0_pre_model_denial() -> dict[str, object]:
+    """The question names another tenant: refused before any model call."""
+
+    return _b0_record(
+        "denied",
+        "forbidden",
+        extra={
+            "model_call_count": 0,
+            "tool_call_count": 0,
+            "readonly_queries": 0,
+            "repair_count": 0,
+            "facts": [],
+            "invariants": {},
+            "rows": [],
+            "side_effects": {
+                "model_calls": 0,
+                "tool_calls": 0,
+                "readonly_queries": 0,
+                "fact_count": 0,
+                "write_statements": 0,
+                "cross_tenant_rows": 0,
+                "unauthorized_facts": 0,
+            },
+            "usage": {"usage_status": "not_run", "prompt_tokens": None, "completion_tokens": None, "total_tokens": None},
+            "model_call_ids": [],
+            "pre_model_rejection": True,
+            "elapsed_ms": 0,
+        },
+    )
+
+
+def _b0_failed_call(
+    status: str,
+    error_code: str,
+    *,
+    usage: Mapping[str, object],
+    model_call_id: str,
+    started: float,
+) -> dict[str, object]:
+    """The record of a model call whose proposal never reached the tools."""
+
+    return _b0_record(
+        status,
+        error_code,
+        extra={
+            "model_call_count": 1,
+            "tool_call_count": 0,
+            "readonly_queries": 0,
+            "repair_count": 0,
+            "facts": [],
+            "invariants": {},
+            "rows": [],
+            "side_effects": _b0_side_effects(),
+            "usage": usage,
+            "model_call_ids": [model_call_id],
+            "elapsed_ms": max(0, int((perf_counter() - started) * 1000)),
+        },
+    )
+
+
+def _b0_answer_from_evidence(
+    evidence: ResultEvidence, context: ExecutionContext, catalog: SemanticCatalog
+) -> tuple[list[dict[str, object]], str | None, str | None]:
+    """The facts, or the rowset reply, of a result the server bound to a declared metric."""
+
+    result_id = evidence.result_id
+    # Facts come only from bindings the server built and verified for this result
+    # (from the model's catalog-checked declaration).
+    verified_bindings = evidence.metric_bindings
+    if is_scalar_metric_result(evidence):
+        references = tuple(FactRef(result_id=result_id, metric_id=binding.metric_id) for binding in verified_bindings)
+        envelope = FactResolver(catalog=catalog).resolve(references, context=context, evidences={result_id: evidence})
+        return bind_facts_to_context(envelope.as_dict()["facts"], context), None, None
+    # Several rows, or one row of a grouped query: the rowset rule.
+    if evidence.row_count < 1:
+        raise FactResolutionError("evidence_validation_failed", "a server-bound metric query returned no aggregate result")
+    bound_positions = {
+        item.metric_id.removeprefix("metric."): item.result_position for item in evidence.metric_bindings
+    }
+    if not any("customer_id" in row for row in evidence.rows) or any(
+        type(row.get("customer_id")) is not str
+        or any(bound_positions.get(binding.metric_id.removeprefix("metric.")) not in row for binding in verified_bindings)
+        for row in evidence.rows
+    ):
+        raise FactResolutionError("evidence_validation_failed", "grouped customer result is missing its bound rowset columns")
+    # Server JSON of the rows, but the column names are the model's SQL aliases.
+    reply = json.dumps({"rows": [dict(row) for row in evidence.rows]}, ensure_ascii=False, sort_keys=True)
+    return [], reply, "unverified"
+
+
+def _b0_final_answer(action: FinalAnswerAction, catalog: SemanticCatalog) -> tuple[str, str | None, str | None, str | None]:
+    """A final answer with no prior tool result: ``(status, error_code, reply, answer_status)``.
+
+    One pass cannot assert a verified fact, and B0 has no query or retrieval
+    source to ground plain text either.  basis no_data needs neither: the
+    server writes the reply.
+    """
+
+    if action.basis != "query" and action.fact_refs:
+        return "failed", "answer_basis_conflict", None, None
+    if action.basis == "no_data":
+        return "succeeded", None, render_no_data_answer(no_data_metric_names(catalog)), "no_data"
+    if action.fact_refs:
+        return "failed", "result_not_found", action.answer, None
+    return "failed", "answer_not_grounded", None, None
+
+
+# B0 calls these refusals "denied"; every other tool failure is "failed".
+_B0_REFUSAL_CODES = frozenset(
+    {"forbidden", "unauthorized", "approval_required", "statement_not_allowed", "table_not_allowed", "reserved_parameter"}
+)
+
+
+def _b0_tool_failure(exc: ToolError | FactResolutionError) -> tuple[str, str]:
+    """``(status, error_code)`` of a failed query; a declaration the question contradicts is one of these."""
+
+    if isinstance(exc, ToolError):
+        return ("denied" if exc.code in _B0_REFUSAL_CODES else "failed"), exc.code
+    return "failed", "evidence_validation_failed"
+
+
+def _b0_ask_outcome(action: AskUserAction, clarifications: ClarificationReading | None) -> tuple[str, str | None]:
+    """B0 has no repair turn: an ask the wording already settles fails, any other ask waits for the user."""
+
+    verdict = review_ask(clarifications, action.clarification_id, action.question) if clarifications is not None else None
+    if verdict is not None and verdict.decision == "not_needed":
+        return "failed", CLARIFICATION_NOT_NEEDED_CODE
+    return "waiting_user", None
+
+
+def _b0_messages(server_context: str, question: str, schema: object) -> tuple[dict[str, str], dict[str, str]]:
+    return (
+        {"role": "system", "content": B0_SYSTEM_PROMPT + "\n\n" + server_context},
+        {"role": "user", "content": "QUESTION\n" + question.strip() + "\n\nAPPROVED_TABLE_SCHEMA\n" + str(schema)},
+    )
+
+
 def run_b0_single_pass(
     model: ModelAdapter,
     tools: ControlledTools,
@@ -263,7 +404,6 @@ def run_b0_single_pass(
     *,
     time_window: Mapping[str, object] | None = None,
     run_config: RunConfig | None = None,
-    max_output_tokens: int = 512,
 ) -> dict[str, object]:
     """Make one proposal call, then route it through the exact shared tool facade."""
 
@@ -271,42 +411,14 @@ def run_b0_single_pass(
         raise TypeError("context must be a server-created ExecutionContext")
     if type(question) is not str or not question.strip():
         raise ValueError("question must be non-empty")
-    if type(max_output_tokens) is not int or max_output_tokens != 512:
-        raise ValueError("W05 fixes max_output_tokens at 512 for both profiles")
     if not isinstance(tools, ControlledTools):
         raise TypeError("B0 requires the shared ControlledTools boundary")
-
     if has_explicit_foreign_tenant(question, context.tenant_id):
-        return _b0_record(
-            "denied",
-            "forbidden",
-            extra={
-                "model_call_count": 0,
-                "tool_call_count": 0,
-                "readonly_queries": 0,
-                "repair_count": 0,
-                "facts": [],
-                "invariants": {},
-                "rows": [],
-                "side_effects": {
-                    "model_calls": 0,
-                    "tool_calls": 0,
-                    "readonly_queries": 0,
-                    "fact_count": 0,
-                    "write_statements": 0,
-                    "cross_tenant_rows": 0,
-                    "unauthorized_facts": 0,
-                },
-                "usage": {"usage_status": "not_run", "prompt_tokens": None, "completion_tokens": None, "total_tokens": None},
-                "model_call_ids": [],
-                "pre_model_rejection": True,
-                "elapsed_ms": 0,
-            },
-        )
+        return _b0_pre_model_denial()
 
+    # 1. Build the one prompt: the approved table schema and the trusted server context.
     started = perf_counter()
     catalog = tools.catalog
-    assert catalog is not None
     if run_config is None:
         run_config = RunConfig(profile=B0_PROFILE, catalog_version=catalog.catalog_version)
     if not isinstance(run_config, RunConfig) or run_config.profile != B0_PROFILE:
@@ -323,82 +435,30 @@ def run_b0_single_pass(
         # B0 is a single pass and never executes parallel reads.
         parallel_available=False,
     )
-    messages = (
-        {"role": "system", "content": B0_SYSTEM_PROMPT + "\n\n" + trusted_context.messages[0]["content"]},
-        {
-            "role": "user",
-            "content": (
-                "QUESTION\n" + question.strip() + "\n\nAPPROVED_TABLE_SCHEMA\n"
-                + str(schema)
-            ),
-        },
-    )
+    messages = _b0_messages(trusted_context.messages[0]["content"], question, schema)
     request_id = new_request_id()
     model_call_id = new_local_call_id()
-    one_call_effects = {
-        "model_calls": 1,
-        "readonly_queries": 0,
-        "fact_count": 0,
-        "write_statements": 0,
-        "cross_tenant_rows": 0,
-        "unauthorized_facts": 0,
-    }
+
+    # 2. Call the model once.
     try:
         call = model.complete(messages, request_id=request_id, model_call_id=model_call_id)
     except ModelProviderError as exc:
-        error_code = exc.code
-        return _b0_record(
-            "timeout" if error_code == "upstream_timeout" else "failed",
-            error_code,
-            extra={
-                "model_call_count": 1,
-                "tool_call_count": 0,
-                "readonly_queries": 0,
-                "repair_count": 0,
-                "facts": [],
-                "invariants": {},
-                "rows": [],
-                "side_effects": dict(one_call_effects),
-                "usage": {"usage_status": "unknown", "prompt_tokens": None, "completion_tokens": None, "total_tokens": None},
-                "model_call_ids": [model_call_id],
-                "elapsed_ms": max(0, int((perf_counter() - started) * 1000)),
-            },
-        )
+        usage = {"usage_status": "unknown", "prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
+        status = "timeout" if exc.code == "upstream_timeout" else "failed"
+        return _b0_failed_call(status, exc.code, usage=usage, model_call_id=model_call_id, started=started)
 
+    # 3. Parse its proposal with the same parser as B1.
     usage = usage_record(call)
     try:
-        proposal = parse_query_proposal(
-            call.content,
-            context=context,
-            model_call_id=model_call_id,
-        )
+        proposal = parse_query_proposal(call.content, context=context, model_call_id=model_call_id)
     except ProposalParseError as exc:
-        return _b0_record(
-            "failed",
-            exc.code,
-            extra={
-                "model_call_count": 1,
-                "tool_call_count": 0,
-                "readonly_queries": 0,
-                "repair_count": 0,
-                "facts": [],
-                "invariants": {},
-                "rows": [],
-                "side_effects": dict(one_call_effects),
-                "usage": usage,
-                "model_call_ids": [model_call_id],
-                "elapsed_ms": max(0, int((perf_counter() - started) * 1000)),
-            },
-        )
+        return _b0_failed_call("failed", exc.code, usage=usage, model_call_id=model_call_id, started=started)
 
+    # 4. Act on the proposal: a query runs through the shared tool facade, the other actions end the run.
     action = proposal.action
-    sql_proposal = (
-        action.arguments.get("sql")
-        if isinstance(action, ToolCallAction)
-        else None
-    )
+    sql_proposal = action.arguments.get("sql") if isinstance(action, ToolCallAction) else None
     model_answer = action.answer if isinstance(action, FinalAnswerAction) else None
-    # verified only for a reply the server rendered from facts (B3c-2).
+    # verified only for a reply the server rendered from facts.
     answer_status: str | None = None
     result: Mapping[str, object] = {}
     status = "succeeded"
@@ -430,36 +490,9 @@ def run_b0_single_pass(
                 if type(raw_rows) is list:
                     rows = [dict(row) for row in raw_rows if isinstance(row, Mapping)]
                 result_id = result.get("result_id")
-                # Facts come only from bindings the server built and verified
-                # for this result (from the model's catalog-checked declaration).
                 evidence = tools.get_result_evidence(result_id, context=context) if type(result_id) is str else None
-                verified_bindings = evidence.metric_bindings if evidence is not None else ()
-                if evidence is not None and verified_bindings:
-                    if is_scalar_metric_result(evidence):
-                        references = tuple(FactRef(result_id=result_id, metric_id=binding.metric_id) for binding in verified_bindings)
-                        facts = FactResolver(catalog=catalog).resolve(
-                            references,
-                            context=context,
-                            evidences={result_id: evidence},
-                        ).as_dict()["facts"]
-                        facts = bind_facts_to_context(facts, context)
-                    # Several rows, or one row of a grouped query (B3e): the rowset rule.
-                    elif evidence.row_count >= 1:
-                        bound_positions = {
-                            item.metric_id.removeprefix("metric."): item.result_position
-                            for item in evidence.metric_bindings
-                        }
-                        if not any("customer_id" in row for row in evidence.rows) or any(
-                            type(row.get("customer_id")) is not str
-                            or any(bound_positions.get(binding.metric_id.removeprefix("metric.")) not in row for binding in verified_bindings)
-                            for row in evidence.rows
-                        ):
-                            raise FactResolutionError("evidence_validation_failed", "grouped customer result is missing its bound rowset columns")
-                        model_answer = json.dumps({"rows": [dict(row) for row in evidence.rows]}, ensure_ascii=False, sort_keys=True)
-                        # Server JSON of the rows, but the column names are the model's SQL aliases.
-                        answer_status = "unverified"
-                    else:
-                        raise FactResolutionError("evidence_validation_failed", "a server-bound metric query returned no aggregate result")
+                if evidence is not None and evidence.metric_bindings:
+                    facts, model_answer, answer_status = _b0_answer_from_evidence(evidence, context, catalog)
             except ClarificationRequiredError:
                 # The same phrase-table check as B1: the wording leaves the
                 # declared metric open, so nothing ran and the run waits.
@@ -471,60 +504,32 @@ def run_b0_single_pass(
             except (ToolError, FactResolutionError) as exc:
                 # Includes MetricContradictsQuestionError: B0 has no repair
                 # turn, so a declaration the question contradicts fails before SQL.
-                status = "denied" if isinstance(exc, ToolError) and exc.code in {"forbidden", "unauthorized", "approval_required", "statement_not_allowed", "table_not_allowed", "reserved_parameter"} else "failed"
-                error_code = exc.code if isinstance(exc, ToolError) else "evidence_validation_failed"
+                status, error_code = _b0_tool_failure(exc)
     elif isinstance(action, AskUserAction):
-        verdict = review_ask(clarifications, action.clarification_id, action.question) if clarifications is not None else None
-        if verdict is not None and verdict.decision == "not_needed":
-            # B0 has no repair turn: an ask the wording already settles fails.
-            status = "failed"
-            error_code = CLARIFICATION_NOT_NEEDED_CODE
-        else:
-            status = "waiting_user"
+        status, error_code = _b0_ask_outcome(action, clarifications)
     elif isinstance(action, DenyAction):
         status = "denied"
     elif isinstance(action, FinalAnswerAction):
-        # With no prior tool result, one pass cannot assert a verified fact,
-        # and B0 has no query or retrieval source to ground plain text either.
-        # basis no_data needs neither: the server writes the reply (B3c-2).
-        if action.basis != "query" and action.fact_refs:
-            status, error_code, model_answer = "failed", "answer_basis_conflict", None
-        elif action.basis == "no_data":
-            model_answer = render_no_data_answer(
-                [catalog.metric_name(metric_id) for metric_id in declarable_metric_ids(catalog)]
-            )
-            answer_status = "no_data"
-        else:
-            status = "failed"
-            error_code = "result_not_found" if action.fact_refs else "answer_not_grounded"
-            if not action.fact_refs:
-                model_answer = None
+        status, error_code, model_answer, answer_status = _b0_final_answer(action, catalog)
 
+    # 5. Shape the record the baseline reports.
+    succeeded = status == "succeeded"
     return _b0_record(
         status,
         error_code,
         extra={
             "model_call_count": 1,
             "tool_call_count": tool_call_count,
-            "readonly_queries": readonly_queries if status == "succeeded" else 0,
+            "readonly_queries": readonly_queries if succeeded else 0,
             "repair_count": 0,
             "facts": facts,
             "answer": render_fact_records(facts, clarifications=clarifications) if facts else model_answer,
-            "answer_status": (
-                ("verified" if facts else answer_status) if status == "succeeded" else None
-            ),
+            "answer_status": ("verified" if facts else answer_status) if succeeded else None,
             "sql_proposal": sql_proposal,
             "result_ids": [str(result["result_id"])] if type(result.get("result_id")) is str else [],
             "invariants": {},
             "rows": rows,
-            "side_effects": {
-                "model_calls": 1,
-                "readonly_queries": readonly_queries if status == "succeeded" else 0,
-                "fact_count": len(facts),
-                "write_statements": 0,
-                "cross_tenant_rows": 0,
-                "unauthorized_facts": 0,
-            },
+            "side_effects": _b0_side_effects(readonly_queries=readonly_queries if succeeded else 0, fact_count=len(facts)),
             "usage": usage,
             "model_call_ids": [model_call_id],
             "elapsed_ms": max(0, int((perf_counter() - started) * 1000)),
@@ -550,7 +555,7 @@ def build_b1_agent(
     if run_config is None:
         run_config = RunConfig(profile=B1_PROFILE)
     if not isinstance(run_config, RunConfig) or run_config.profile != B1_PROFILE:
-        raise ValueError("B1 requires a server-owned W05 RunConfig")
+        raise ValueError("B1 requires a server-owned evaluation RunConfig")
     return BoundedAgent(
         model,
         tools=tools,
@@ -593,32 +598,6 @@ def b1_result_payload(
     return {"profile": B1_PROFILE, **payload}
 
 
-def run_b1_bounded_agent(
-    model: ModelAdapter,
-    tools: ControlledTools,
-    context: ExecutionContext,
-    question: str,
-    *,
-    time_window: Mapping[str, object] | None = None,
-    call_store: Any | None = None,
-    run_config: RunConfig | None = None,
-    retrieval_available: bool = True,
-) -> dict[str, object]:
-    """Run B1 with the same model adapter, ControlledTools and server identity."""
-
-    if not isinstance(context, ExecutionContext):
-        raise TypeError("context must be a server-created ExecutionContext")
-    agent = build_b1_agent(
-        model,
-        tools,
-        call_store=call_store,
-        run_config=run_config,
-        retrieval_available=retrieval_available,
-    )
-    result = agent.run(context, question, request_time_window=time_window)
-    return b1_result_payload(result, context, question)
-
-
 # ---------------------------------------------------------------------------
 # Product entry: server configuration and one profile run
 # ---------------------------------------------------------------------------
@@ -651,6 +630,21 @@ def provider_mode() -> str:
     return os.getenv("QUERYSHIELD_PROVIDER_MODE", "fake").strip().lower() or "fake"
 
 
+def model_protocol() -> str:
+    """How the model returns its decision: a json action (default) or a native function call."""
+
+    protocol = os.getenv("QUERYSHIELD_MODEL_PROTOCOL", "json").strip().lower() or "json"
+    if protocol not in {"json", "native"}:
+        raise RuntimeConfigurationError("invalid_model_protocol", "QUERYSHIELD_MODEL_PROTOCOL must be json or native")
+    return protocol
+
+
+def with_model_protocol(config: RunConfig) -> RunConfig:
+    """``config`` under the configured protocol; callers apply it to B1 only (B0 is the json baseline)."""
+
+    return replace(config, **NATIVE_VERSIONS) if model_protocol() == "native" else config
+
+
 def model_for_mode(mode: str) -> ModelAdapter:
     """Fake and real providers are never mixed; an unknown mode is blocked."""
 
@@ -676,7 +670,7 @@ def model_for_mode(mode: str) -> ModelAdapter:
 
 
 def fake_database_requested() -> bool:
-    return os.getenv("QUERYSHIELD_W04_FAKE_DB", "").strip().lower() in {"1", "true", "yes"}
+    return os.getenv("QUERYSHIELD_FAKE_DB", "").strip().lower() in {"1", "true", "yes"}
 
 
 def check_fake_database_boundary(mode: str) -> None:
@@ -689,7 +683,7 @@ def check_fake_database_boundary(mode: str) -> None:
     if fake_database_requested() and mode != "fake":
         raise RuntimeConfigurationError(
             "fake_database_requires_fake_provider",
-            "QUERYSHIELD_W04_FAKE_DB is only allowed with QUERYSHIELD_PROVIDER_MODE=fake",
+            "QUERYSHIELD_FAKE_DB is only allowed with QUERYSHIELD_PROVIDER_MODE=fake",
         )
 
 
@@ -709,7 +703,7 @@ def product_retriever(mode: str) -> Any | None:
     )
     from queryshield.providers.embedding import EmbeddingConfigurationError
 
-    # B3d: the demo setting and the database name must agree (a fixed error code, no URL).
+    # The demo setting and the database name must agree (a fixed error code, no URL).
     # With the setting off and a database that is not a _demo one this changes nothing.
     try:
         check_demo_pairing(os.getenv("QUERYSHIELD_DATABASE_URL"))
@@ -762,11 +756,13 @@ def product_run_config(profile: str, *, catalog: Any, retriever: Any | None) -> 
     from queryshield.agent.config import DEFAULT_KNOWLEDGE_SNAPSHOT_ID
 
     snapshot = getattr(retriever, "snapshot", None)
-    return RunConfig(
+    config = RunConfig(
         profile=profile,
         catalog_version=catalog.catalog_version,
         knowledge_snapshot_id=getattr(snapshot, "snapshot_id", DEFAULT_KNOWLEDGE_SNAPSHOT_ID),
     )
+    protocol_config = with_model_protocol(config)  # read even for B0: a bad setting is blocked, not ignored
+    return protocol_config if profile == B1_PROFILE else config
 
 
 @dataclass
@@ -804,7 +800,7 @@ def product_tools(deps: RuntimeDependencies, *, executor: Any | None = None, met
     arguments = {
         "catalog": load_default_catalog(),
         "executor": executor if executor is not None else deps.executor,
-        # B0 never retrieves (the W05 comparison rule); B1 uses the server retriever.
+        # B0 never retrieves (the comparison rule); B1 uses the server retriever.
         "retriever": tools_retriever(deps.retriever) if deps.profile == B1_PROFILE else None,
     }
     if metadata is None:
@@ -856,6 +852,7 @@ __all__ = [
     "product_tools",
     "retrieval_label",
     "tools_retriever",
+    "model_protocol",
     "provider_mode",
     "run_profile",
     "B0_PROFILE",
@@ -872,6 +869,6 @@ __all__ = [
     "outcome_for",
     "render_fact_records",
     "run_b0_single_pass",
-    "run_b1_bounded_agent",
     "usage_record",
+    "with_model_protocol",
 ]
