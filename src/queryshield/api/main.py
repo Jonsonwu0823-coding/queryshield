@@ -14,6 +14,7 @@ from queryshield.agent.tenant_scope import has_explicit_foreign_tenant
 from queryshield.providers.contracts import (
     ModelAdapter,
     ModelProviderError,
+    usage_is_consistent,
 )
 from queryshield.agent.runtime import (
     B1_PROFILE,
@@ -274,6 +275,7 @@ def _public_run(run: Mapping[str, object], *, include_result: bool = False, incl
         "model_call_count": run["model_call_count"],
         "tool_call_count": run["tool_call_count"],
         "sql_exec_count": run["sql_exec_count"],
+        "usage_total": _usage_total(run),
     }
     if run.get("approval_id") is not None:
         payload["approval_id"] = run["approval_id"]
@@ -285,6 +287,27 @@ def _public_run(run: Mapping[str, object], *, include_result: bool = False, incl
     if include_approval and run.get("approval_id"):
         payload["approval"] = run.get("approval")
     return payload
+
+
+_TOKEN_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
+
+
+def _usage_total(run: Mapping[str, object]) -> dict[str, object]:
+    """The run's chat-call token total, read back from the stored run.
+
+    known: every chat call reported its usage; not_run: no chat call, so zeros;
+    unknown: a call without usage, a total that does not add up, or none stored
+    yet -- nulls, never zeros.  The agent stores ``status``, B0 ``usage_status``.
+    """
+
+    stored = run.get("usage") if isinstance(run.get("usage"), Mapping) else {}
+    status = stored.get("status", stored.get("usage_status"))
+    tokens = {name: stored.get(name) for name in _TOKEN_FIELDS}
+    if status == "not_run":
+        return {"status": "not_run", **dict.fromkeys(_TOKEN_FIELDS, 0)}
+    if status == "known" and usage_is_consistent(*tokens.values()):
+        return {"status": "known", **tokens}
+    return {"status": "unknown", **dict.fromkeys(_TOKEN_FIELDS)}
 
 
 def _answer_fields(run: Mapping[str, object]) -> dict[str, object]:

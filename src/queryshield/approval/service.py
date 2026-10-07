@@ -671,9 +671,11 @@ class RunService:
         consumed).  Cancellation wins, as it does before a commit.
         """
 
+        # The calls made before the error are not recorded, so the run's total is not known.
+        update = {"sql_exec_count": sql_exec_count, "usage_json": _json(_USAGE_LOST)}
         if _cancel_requested(self.store.get_run(run_id) or {}):
-            return self._finish_cancelled(run_id, sql_exec_count=sql_exec_count)
-        return self._finish_failed(run_id, _error_code(exc), sql_exec_count=sql_exec_count)
+            return self._finish_cancelled(run_id, **update)
+        return self._finish_failed(run_id, _error_code(exc), **update)
 
     def _succeeded_result_json(
         self,
@@ -1451,6 +1453,10 @@ def _json(value: object) -> str:
 
 def _error_code(exc: Exception) -> str:
     return str(getattr(exc, "code", "execution_failed"))
+
+
+# The stored usage of a run that ended on an exception (the agent's summary shape).
+_USAGE_LOST = {"status": "unknown", "prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
 
 
 def shared_run_service() -> RunService:

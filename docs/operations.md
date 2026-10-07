@@ -192,6 +192,8 @@ docker compose -f compose.yaml -f compose.fake-upstream.yaml -f compose.model-ga
 
 **每次调用带上 run 编号。** run 里的每次聊天调用（B0；B1 的 JSON 和原生协议；追问后恢复；评测的运行）和查询嵌入，都带请求头 `X-Run-Id: <run 编号>`，值就是 run 编号本身（产品里是 `run-` 加 UUID），网关可以按 run 汇总用量。run 之外的调用（启动后第一次检索时建知识索引、`scripts/model_probe.py` 这类探针）不带。审批后继续只执行被批准的 SQL，不调模型。`X-Client-Request-Id` 照旧是每次调用一个新值。
 
+**按 run 对账。** 网关按 `X-Run-Id` 汇总的数，和 `GET /runs/{id}` 返回的 run 对：聊天调用的条数对 `model_call_count`，聊天调用的用量对 `usage_total`（`status` 是 `known` 时三个数是合计；`unknown` 时三个数是 `null`，表示合计不完整，不能当 0 对；`not_run` 时是 0）。嵌入不按 run 计：run 里的查询嵌入带 `X-Run-Id`，但不进这两个数；建知识索引的嵌入调用不带 `X-Run-Id`。
+
 **额度用完、被限流。** 网关返回 HTTP 429、错误码（`error.code`，没有时读顶层 `code`）是 `quota_exhausted` 或 `rate_limited` 时，run 以 FAILED 结束，错误码分别是 `model_quota_exhausted`、`model_rate_limited`，HTTP 码都是 503：这是本服务在网关那边的账户状态，不是最终用户请求太多。别的 429（别的提供方自己的错误码）和其它状态码照旧是 `upstream_http_error`（502）。同步 `/queries`、追问后恢复、B0、B1 都按这张表。失败的调用记录保留 `http_status` 和 `provider_error_code`，不记错误消息原文。开了 MCP 元数据工具（`QUERYSHIELD_METADATA_TOOLS=mcp`）时，查询嵌入在子进程里做，它的上游失败照旧是 `mcp_unavailable`（同样是 503）。
 
 ## 4. 检查与 CI

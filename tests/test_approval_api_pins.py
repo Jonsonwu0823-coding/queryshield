@@ -426,7 +426,7 @@ def test_the_resume_and_sync_responses_share_the_outcome_table(status, error_cod
 
 RUN_KEYS = [
     "run_id", "status", "tenant_id", "principal_id", "role", "question", "created_at", "updated_at", "mode",
-    "model_call_count", "tool_call_count", "sql_exec_count",
+    "model_call_count", "tool_call_count", "sql_exec_count", "usage_total",
 ]
 
 

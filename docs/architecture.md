@@ -64,6 +64,11 @@ HTTP 接口都在 `src/queryshield/api/main.py`：
 | `GET`/`PUT`/`DELETE /preferences/{key}` | 用户偏好 |
 | `GET /health` | 健康检查 |
 
+**run 的公开字段。** 返回 run 的响应（同步 `POST /queries`、`GET /runs/{id}`、`GET /runs/{id}/result`、resume、审批、取消）都经 `src/queryshield/api/main.py` 的 `_public_run`，带上 run 编号、状态、租户、请求人、调用次数等字段。其中有两个用量字段，不要混用：
+
+- `usage_total`：这个 run 的聊天调用用量合计，所有返回 run 的响应都有，形如 `{"status": "known", "prompt_tokens": 1234, "completion_tokens": 56, "total_tokens": 1290}`。`known`：每次聊天调用都报了用量，三个数是合计；`unknown`：至少一次聊天调用没有用量（例如 Fake 模型）、存下的合计对不上、run 还没存下用量，或者 run 执行中途抛异常结束（出错前的调用还没记下），三个数都是 `null`，不按 0 算；`not_run`：这个 run 没有聊天调用，三个数都是 0。口径和 `model_call_count` 一样只算聊天调用，嵌入不算；追问后恢复的 run 是暂停前和恢复后的合计，审批后执行不调模型，合计不变。
+- `usage`：只有同步 `POST /queries` 的响应有，是逐次聊天调用的明细列表（调用编号、上游的调用编号和请求编号、三个用量、`usage_status`）。
+
 身份：`src/queryshield/auth/identity.py` 的 `resolve_identity` 把 `Authorization: Bearer <令牌>` 映射到四个固定身份之一（租户 A、B 各一个请求人、一个审批人），令牌来自环境变量；有两个令牌相同时整张映射作废。服务端用认证结果构造 `ExecutionContext`，之后所有工具调用都用它。用哪种配置（B1 有界 Agent 或 B0 基线）由服务端设置 `QUERYSHIELD_AGENT_PROFILE` 决定，客户端选不了。
 
 ### 运行服务与状态库
