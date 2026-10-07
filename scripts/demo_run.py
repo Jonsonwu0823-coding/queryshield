@@ -501,6 +501,8 @@ def summary_record(question: Mapping[str, object], obs: Mapping[str, object], ju
         "id": question["id"],
         "identity": question["identity"],
         "kind": question["kind"],
+        # To match the gateway's per-run record (X-Run-Id): a random run id, and fixed states and numbers.
+        "run_id": obs.get("run_id"),
         "http_status": obs.get("http_status"),
         "terminal": obs.get("status"),
         "error_code": obs.get("error_code"),
@@ -509,6 +511,7 @@ def summary_record(question: Mapping[str, object], obs: Mapping[str, object], ju
         "verified_metrics": sorted({str(item.get("metric_id")) for item in facts}),
         "sql_exec_count": obs.get("sql_exec_count"),
         "model_call_count": obs.get("model_call_count"),
+        "usage_total": obs.get("usage_total"),
         "action_trace": list(obs.get("trace") or []),
         # Numbers only: completion tokens of each model call (null when the provider gave none) and the cap.
         "completion_tokens": list(obs.get("completion_tokens") or []),
@@ -589,6 +592,7 @@ def _observe(code: int, body: Mapping[str, object], state_path: Path, fixed_no_d
         "completion_tokens": _completion_tokens(state_path, run_id) if isinstance(run_id, str) else [],
         "max_output_tokens": max_output_tokens(),
         "run_id": run_id,
+        "usage_total": body.get("usage_total"),
     }
 
 

@@ -66,7 +66,7 @@ HTTP 接口都在 `src/queryshield/api/main.py`：
 
 **run 的公开字段。** 返回 run 的响应（同步 `POST /queries`、`GET /runs/{id}`、`GET /runs/{id}/result`、resume、审批、取消）都经 `src/queryshield/api/main.py` 的 `_public_run`，带上 run 编号、状态、租户、请求人、调用次数等字段。其中有两个用量字段，不要混用：
 
-- `usage_total`：这个 run 的聊天调用用量合计，所有返回 run 的响应都有，形如 `{"status": "known", "prompt_tokens": 1234, "completion_tokens": 56, "total_tokens": 1290}`。`known`：每次聊天调用都报了用量，三个数是合计；`unknown`：至少一次聊天调用没有用量（例如 Fake 模型）、存下的合计对不上、run 还没存下用量，或者 run 执行中途抛异常结束（出错前的调用还没记下），三个数都是 `null`，不按 0 算；`not_run`：这个 run 没有聊天调用，三个数都是 0。口径和 `model_call_count` 一样只算聊天调用，嵌入不算；追问后恢复的 run 是暂停前和恢复后的合计，审批后执行不调模型，合计不变。
+- `usage_total`：这个 run 的聊天调用用量合计，所有返回 run 的响应都有，形如 `{"status": "known", "prompt_tokens": 1234, "completion_tokens": 56, "total_tokens": 1290}`。`known`：每次聊天调用都报了用量，三个数是合计；`unknown`：至少一次聊天调用没有用量（例如 Fake 模型）、存下的合计对不上、run 还没存下用量，或者 run 执行中途抛异常结束时有一次已经发出的聊天调用没来得及记下，三个数都是 `null`，不按 0 算；`not_run`：这个 run 没有聊天调用，三个数都是 0。口径和 `model_call_count` 一样只算聊天调用，嵌入不算；追问后恢复的 run 是暂停前和恢复后的合计，审批后执行不调模型，合计不变。执行中途抛异常结束的 run，计数和合计按最后一个已写进事件表的步骤算，出错前已记下的调用都在里面；第一次调模型之前就出错的 run（B0 也一样）是 `not_run`。合计只在 run 停下时更新：首次执行中还没有存下用量，是 `unknown`；追问后恢复的执行期间，run 记录仍是 `WAITING_USER`，显示暂停时的合计，提交后才更新。
 - `usage`：只有同步 `POST /queries` 的响应有，是逐次聊天调用的明细列表（调用编号、上游的调用编号和请求编号、三个用量、`usage_status`）。
 
 身份：`src/queryshield/auth/identity.py` 的 `resolve_identity` 把 `Authorization: Bearer <令牌>` 映射到四个固定身份之一（租户 A、B 各一个请求人、一个审批人），令牌来自环境变量；有两个令牌相同时整张映射作废。服务端用认证结果构造 `ExecutionContext`，之后所有工具调用都用它。用哪种配置（B1 有界 Agent 或 B0 基线）由服务端设置 `QUERYSHIELD_AGENT_PROFILE` 决定，客户端选不了。
@@ -78,6 +78,8 @@ HTTP 接口都在 `src/queryshield/api/main.py`：
 - **可见性。** run 只对同租户的发起人可见；同租户的审批人只在 `WAITING_APPROVAL` 时能看到去掉结果的版本。其他人一律 404。
 - **审批。** 进入审批时，`build_pending_action` 把要执行的动作（SQL、参数、指标、时间窗、租户、请求人、SQL 策略版本、catalog 版本）连同权限来源 id 和权限版本一起存下，并记动作的哈希。`approve` 在 `_approval_lock` 里完成“检查再执行”：同租户、审批人角色、不是请求人本人、没过期（10 分钟）、权限来源仍然有效且版本不变，然后只执行被批准的那一条。找不到有效的权限来源时，`_approval_permission` 让这次查询以 503 `approval_permission_unavailable` 结束，不建审批。
 - **容量与取消。** 同时活跃的 run 最多 2 个（`MAX_ACTIVE_RUNS`）。取消运行中的 run 只记“请求取消”，等执行真正退出后再落终态；等待中的 run 直接变成 `CANCELLED`。
+- **步骤随执行写入。** 有界 Agent 用 LangGraph 的 `stream` 跑图，每个节点完成后，运行服务把这一步新产生的事件写进事件表（类型 `agent_step`，payload 是整个事件），每条只写一次；提交时只写还没写的（不经过图的结果，例如点名外租户的拒绝）。事件表里的顺序是 `accepted`、`step_started`、各步骤、（MCP 设置下的 `metadata_session`）、`waiting` 或终止事件。执行中途抛异常时，已写入的步骤留在表里，计数和用量取最后一个已写完的步骤的 Agent 状态；运行服务给模型包一层计数，这次执行调模型的次数多于写进去的 `model_call` 条数时（调用发出了，但它所在的节点没完成），用量记 `unknown`。
+- **事件流（SSE）。** `GET /runs/{id}/events` 推事件表里的事件，每帧 `id`、`event` 和一行 `data`：`event_id`、`run_id`、`type`、`status`、`occurred_at`，有结果时加 `result_id`。`agent_step` 帧另带 `step`，只从事件里挑这些字段（有才带）：`kind`、`status`、`error_code`、`tool_name`、`elapsed_ms`（工具调用的耗时）、`model`、`usage_status`、`prompt_tokens`、`completion_tokens`、`total_tokens`；不带模型原文、提示词、SQL、参数、检索词、行数据和各种编号、哈希、版本。模型调用的事件没有耗时字段，耗时可以看相邻帧的 `occurred_at`。其它类型的帧不带 `step`。同租户的审批人在 `WAITING_APPROVAL` 时也能连这个流，看到的是同样的摘要。
 - **恢复。** 应用启动时，`recover_parallel_groups` 扫描状态库里的并行分支组：全部已提交的复用结果，状态不确定的标 `FAILED/recovery_required`，不重跑 SQL（`src/queryshield/agent/parallel_durable.py` 的 `recover_on_startup`）。
 
 ### 有界 Agent

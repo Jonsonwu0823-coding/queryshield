@@ -481,6 +481,20 @@ def _event_cursor(
     return cursor
 
 
+# What a client sees of one agent step: no text, ids, hashes or versions.
+_STEP_FIELDS = ("kind", "status", "error_code", "tool_name", "elapsed_ms", "model", "usage_status")
+
+
+def _step_summary(payload: Mapping[str, object]) -> dict[str, object]:
+    """The allow-listed fields of an agent step, with a model call's token counts."""
+
+    summary = {name: payload[name] for name in _STEP_FIELDS if name in payload}
+    usage = payload.get("usage")
+    if isinstance(usage, Mapping):
+        summary.update({name: usage[name] for name in _TOKEN_FIELDS if name in usage})
+    return summary
+
+
 def _sse_frame(event: Mapping[str, object]) -> str:
     data = {
         "event_id": event["event_id"],
@@ -491,6 +505,8 @@ def _sse_frame(event: Mapping[str, object]) -> str:
     }
     if event.get("result_id") is not None:
         data["result_id"] = event["result_id"]
+    if event["type"] == "agent_step":
+        data["step"] = _step_summary(event["payload"])
     return (
         f"id: {event['event_id']}\nevent: {event['type']}\n"
         f"data: {json.dumps(data, ensure_ascii=False, separators=(',', ':'))}\n\n"

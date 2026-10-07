@@ -1575,6 +1575,18 @@ def _read_sse_bounded(
     raise AssertionError(f"SSE bounded reader timed out or exceeded {max_bytes} bytes")
 
 
+# The check's own list of what an agent_step frame may show (the product keeps its own).
+_SSE_STEP_KEYS = frozenset({
+    "kind", "status", "error_code", "tool_name", "elapsed_ms", "model", "usage_status",
+    "prompt_tokens", "completion_tokens", "total_tokens",
+})
+
+
+def _expected_step(payload: Mapping[str, object]) -> dict[str, object]:
+    usage = payload.get("usage") if isinstance(payload.get("usage"), Mapping) else {}
+    return {key: value for key, value in {**payload, **usage}.items() if key in _SSE_STEP_KEYS}
+
+
 def _parse_sse_records(body: bytes) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     text = body.decode("utf-8", errors="replace")
@@ -1658,6 +1670,13 @@ def check_en04(output_dir: Path) -> dict[str, object]:
                 f"SSE event schema incomplete: {event}",
             )
         require([item["event_id"] for item in initial_events] == sorted(item["event_id"] for item in initial_events), "SSE IDs did not increase")
+        # Agent steps carry an allow-listed summary; no other frame does.
+        agent_step_kinds = [event["step"].get("kind") for event in initial_events if event["type"] == "agent_step"]
+        require(
+            all(set(event.get("step", {})) <= _SSE_STEP_KEYS and ("step" in event) == (event["type"] == "agent_step") for event in initial_events)
+            and {"model_call", "tool_call"} <= set(agent_step_kinds) <= {"model_call", "tool_call"},
+            f"SSE step summaries={agent_step_kinds}",
+        )
         pending_code, pending_body = _http_request(base + f"/runs/{run_id}", headers=_auth("w04-check-a-requester"))
         pending = json.loads(pending_body)
         approval_id = pending.get("approval_id")
@@ -1682,6 +1701,8 @@ def check_en04(output_dir: Path) -> dict[str, object]:
             expected_payload = {key: expected_event[key] for key in ("event_id", "run_id", "type", "status", "occurred_at")}
             if expected_event.get("result_id") is not None:
                 expected_payload["result_id"] = expected_event["result_id"]
+            if expected_event["type"] == "agent_step":
+                expected_payload["step"] = _expected_step(expected_event["payload"])
         require(replay_events[0] == expected_payload, f"Last-Event-ID replay content mismatch: {replay_events[:1]}/{expected_payload}")
 
         # Leave the response unread while 40 durable events arrive. The live
@@ -1761,6 +1782,7 @@ def check_en04(output_dir: Path) -> dict[str, object]:
         "transport": "local_http",
         "sse": "persistent_event_stream",
         "progress_types": [event["type"] for event in ordered_events],
+        "agent_step_kinds": agent_step_kinds,
         "event_ids": [event["event_id"] for event in ordered_events],
         "last_event_id_actual_payload_match": replay_events[0] == expected_payload,
         "slow_consumer": {"persisted_backlog": 40, "delivered_before_disconnect": len(slow_events), "disconnected": slow_closed, "reconnected_remainder": len(backlog_replay)},

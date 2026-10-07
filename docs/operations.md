@@ -42,6 +42,16 @@ docker run --rm -v "${PWD}:/w" -w /w python:3.14.3-slim-bookworm python scripts/
 | 只重启或重建 app（不重跑 `setup`） | `docker compose up -d --no-deps app` |
 | 打开 MCP 设置 | `QUERYSHIELD_METADATA_TOOLS=mcp docker compose up -d --no-deps app`（PowerShell：`$env:QUERYSHIELD_METADATA_TOOLS='mcp'` 之后同一命令） |
 
+### 实时看一个 run 的步骤
+
+异步提交之后，用 run 编号连事件流，Agent 每完成一步就推一帧（`-N` 关掉 curl 的缓冲，令牌换成你自己的）：
+
+```bash
+curl -N -H 'Accept: text/event-stream' -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8000/runs/<run 编号>/events
+```
+
+`agent_step` 帧的 `step` 写着这一步是什么：调模型（`kind` 为 `model_call`，带模型名和 token 数）、调工具（`tool_call`，带 `tool_name` 和耗时；`status` 为 `approval_required` 表示在等审批）、回答（`answer`）等。run 到终止状态后流自己结束；断线后带 `Last-Event-ID: <最后收到的编号>` 重连，从下一条接着推。
+
 ### 看核心能力：演示脚本
 
 脚本连正在运行的服务，按顺序演示：已核实的数据回答、含糊说法追问并恢复、没给时间的追问、不需要数据的回答、带来源的知识回答、异步、敏感查询的审批（含被拒的尝试）。每条已核实事实都与演示数据生成器独立算出的值比对，不一致就是硬失败。
@@ -192,7 +202,7 @@ docker compose -f compose.yaml -f compose.fake-upstream.yaml -f compose.model-ga
 
 **每次调用带上 run 编号。** run 里的每次聊天调用（B0；B1 的 JSON 和原生协议；追问后恢复；评测的运行）和查询嵌入，都带请求头 `X-Run-Id: <run 编号>`，值就是 run 编号本身（产品里是 `run-` 加 UUID），网关可以按 run 汇总用量。run 之外的调用（启动后第一次检索时建知识索引、`scripts/model_probe.py` 这类探针）不带。审批后继续只执行被批准的 SQL，不调模型。`X-Client-Request-Id` 照旧是每次调用一个新值。
 
-**按 run 对账。** 网关按 `X-Run-Id` 汇总的数，和 `GET /runs/{id}` 返回的 run 对：聊天调用的条数对 `model_call_count`，聊天调用的用量对 `usage_total`（`status` 是 `known` 时三个数是合计；`unknown` 时三个数是 `null`，表示合计不完整，不能当 0 对；`not_run` 时是 0）。嵌入不按 run 计：run 里的查询嵌入带 `X-Run-Id`，但不进这两个数；建知识索引的嵌入调用不带 `X-Run-Id`。
+**按 run 对账。** 网关按 `X-Run-Id` 汇总的数，和 `GET /runs/{id}` 返回的 run 对：聊天调用的条数对 `model_call_count`，聊天调用的用量对 `usage_total`（`status` 是 `known` 时三个数是合计；`unknown` 时三个数是 `null`，表示合计不完整，不能当 0 对；`not_run` 时是 0）。嵌入不按 run 计：run 里的查询嵌入带 `X-Run-Id`，但不进这两个数；建知识索引的嵌入调用不带 `X-Run-Id`。只对已经停下（等待中或已结束）的 run 对账。执行中途抛异常结束的 run，出错前已经记下的调用都在这两个数里；只有一次调用发出了、它所在的步骤却没完成时，网关会比 `model_call_count` 多这一次，这时 `usage_total` 是 `unknown`。
 
 **额度用完、被限流。** 网关返回 HTTP 429、错误码（`error.code`，没有时读顶层 `code`）是 `quota_exhausted` 或 `rate_limited` 时，run 以 FAILED 结束，错误码分别是 `model_quota_exhausted`、`model_rate_limited`，HTTP 码都是 503：这是本服务在网关那边的账户状态，不是最终用户请求太多。别的 429（别的提供方自己的错误码）和其它状态码照旧是 `upstream_http_error`（502）。同步 `/queries`、追问后恢复、B0、B1 都按这张表。失败的调用记录保留 `http_status` 和 `provider_error_code`，不记错误消息原文。开了 MCP 元数据工具（`QUERYSHIELD_METADATA_TOOLS=mcp`）时，查询嵌入在子进程里做，它的上游失败照旧是 `mcp_unavailable`（同样是 503）。
 

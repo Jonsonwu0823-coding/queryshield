@@ -7,7 +7,7 @@ evaluation wrapper may only add its own arguments to ``BoundedAgent.run``.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 import json
 import os
@@ -553,6 +553,7 @@ def build_b1_agent(
     call_store: Any | None = None,
     run_config: RunConfig | None = None,
     retrieval_available: bool = True,
+    on_step: Callable[[Mapping[str, object]], None] | None = None,
 ) -> BoundedAgent:
     """Assemble B1 with the server-owned budgets; the only B1 assembly."""
 
@@ -571,6 +572,7 @@ def build_b1_agent(
         ),
         run_config=run_config,
         retrieval_available=retrieval_available,
+        on_step=on_step,
     )
 
 
@@ -745,6 +747,21 @@ class CountingExecutor:
         return getattr(self.delegate, name)
 
 
+class CountingModel:
+    """Count the chat calls one execution started, counted before the call so one that raises counts too."""
+
+    def __init__(self, delegate: Any) -> None:
+        self.delegate = delegate
+        self.calls = 0
+
+    def complete(self, messages, **kwargs):
+        self.calls += 1
+        return self.delegate.complete(messages, **kwargs)
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.delegate, name)
+
+
 @dataclass
 class RuntimeDependencies:
     """Everything one run needs; HTTP gets these through FastAPI dependencies."""
@@ -821,8 +838,12 @@ def run_profile(
     *,
     time_window: Mapping[str, object] | None = None,
     tools: ControlledTools | None = None,
+    on_step: Callable[[Mapping[str, object]], None] | None = None,
 ) -> ProfileRun:
-    """Run the server-configured profile once; the product's only run entry."""
+    """Run the server-configured profile once; the product's only run entry.
+
+    ``on_step`` sees the agent state after every graph step (B1 only; B0 has no steps).
+    """
 
     if deps.profile not in PROFILES:
         raise RuntimeConfigurationError("invalid_agent_profile", "the configured profile is not registered")
@@ -837,6 +858,7 @@ def run_profile(
         call_store=deps.call_store,
         run_config=run_config,
         retrieval_available=deps.retriever is not None,
+        on_step=on_step,
     )
     result = agent.run(context, question, request_time_window=time_window)
     return ProfileRun(b1_result_payload(result, context, question), agent, tools, run_config)
@@ -844,6 +866,7 @@ def run_profile(
 
 __all__ = [
     "CountingExecutor",
+    "CountingModel",
     "ProfileRun",
     "RuntimeConfigurationError",
     "RuntimeDependencies",

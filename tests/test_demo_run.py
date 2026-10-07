@@ -446,3 +446,61 @@ def test_the_top_customer_question_asks_for_the_highest_paid_amount_not_for_spen
     q = QUESTIONS["Q07"]
     assert "已支付金额最高" in q["question"] and "消费" not in q["question"]
     assert "姓名" in q["question"]  # the Fake model routes a names question to the approval path by this word
+
+
+# --- matching a summary line with the gateway's per-run record ---------------------------------------------------
+
+RUN_ID = "run-6f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f"
+PAUSED = {"status": "known", "prompt_tokens": 400, "completion_tokens": 20, "total_tokens": 420}
+FINAL = {"status": "known", "prompt_tokens": 900, "completion_tokens": 45, "total_tokens": 945}
+
+
+def _drive(monkeypatch, question, responses):
+    """Run one question against scripted HTTP responses, in order; the last body is the one the summary reads."""
+
+    replies = iter(responses)
+    calls = []
+
+    def http(base, path, *, token, method="GET", body=None, **kwargs):
+        calls.append((method, path))
+        return next(replies)
+
+    monkeypatch.setattr(run.smoke, "_http", http)
+    monkeypatch.setattr(run.smoke, "_action_trace", lambda state_path, run_id: [])
+    monkeypatch.setattr(run, "_completion_tokens", lambda state_path, run_id: [])
+    tokens = {name: f"token-{name}" for name in ("a-requester", "a-approver", "b-requester", "b-approver")}
+    obs, _ = run._run_question("http://local", tokens, question, None, "fixed", "catalog question")
+    return obs, calls
+
+
+def test_the_summary_names_the_run_and_its_total_from_the_last_response(monkeypatch) -> None:
+    q = QUESTIONS["Q07"]
+    obs, calls = _drive(monkeypatch, q, [
+        (202, {"run_id": RUN_ID, "status": "WAITING_APPROVAL", "approval_id": "approval-1", "usage_total": PAUSED}),
+        (200, {"run_id": RUN_ID, "status": "SUCCEEDED", "usage_total": PAUSED}),
+        (200, {"run_id": RUN_ID, "status": "SUCCEEDED", "usage_total": FINAL, "result": {"rows": []}}),
+    ])
+    assert [path for _, path in calls] == ["/queries", f"/runs/{RUN_ID}/approval", f"/runs/{RUN_ID}/result"]
+    record = run.summary_record(q, obs, run.judge_top_customer(q, obs))
+    assert record["run_id"] == RUN_ID
+    assert record["usage_total"] == FINAL
+
+
+def test_a_resumed_question_keeps_the_total_of_its_resume_response(monkeypatch) -> None:
+    q = QUESTIONS["Q08"]
+    obs, calls = _drive(monkeypatch, q, [
+        (200, {"run_id": RUN_ID, "status": "WAITING_USER", "usage_total": PAUSED}),
+        (200, {"run_id": RUN_ID, "status": "SUCCEEDED", "usage_total": FINAL}),
+    ])
+    assert [path for _, path in calls] == ["/queries", f"/runs/{RUN_ID}/resume"]
+    record = run.summary_record(q, obs, run.judge_clarify_resume(q, obs))
+    assert (record["run_id"], record["usage_total"]) == (RUN_ID, FINAL)
+
+
+def test_a_question_refused_before_any_run_has_no_run_id_and_no_total(monkeypatch) -> None:
+    q = QUESTIONS["Q12"]
+    obs, _ = _drive(monkeypatch, q, [
+        (403, {"error": {"code": "forbidden", "message": "x", "request_id": "r"}}),
+    ])
+    record = run.summary_record(q, obs, run.judge_isolation(q, obs))
+    assert (record["run_id"], record["usage_total"]) == (None, None)

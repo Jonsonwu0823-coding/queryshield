@@ -85,7 +85,7 @@ QUERYSHIELD_DATABASE_URL="$QUERYSHIELD_DEMO_DATABASE_URL" \
 
 退出码：0 全部通过，1 有硬失败，2 blocked。证据默认写在项目目录下的 `evidence\demo-<fake|real>-<时间戳>\`（`-EvidenceRoot <目录>` 可换到别处；脚本结束时打印 `Evidence root:` 和完整路径），两个文件：
 
-- `demo-summary.json`：只有固定字段和数值（题号、身份、HTTP 码、终态、answer_status、动作轨迹、预期值与实际值、判定、已知缺口、版本信息），没有问题原文、回答、客户姓名、URL 和凭据；每道题还记下每次模型调用的 completion_tokens（来自响应里的 usage，没有就是 null，不会补成 0）、本次运行的输出上限（读 `QUERYSHIELD_MODEL_MAX_TOKENS`，缺省 512，只读不改）和用满输出上限的调用次数，只有数字，没有文字。
+- `demo-summary.json`：只有固定字段和数值（题号、身份、HTTP 码、终态、answer_status、动作轨迹、预期值与实际值、判定、已知缺口、版本信息），没有问题原文、回答、客户姓名、URL 和凭据；每道题还记下每次模型调用的 completion_tokens（来自响应里的 usage，没有就是 null，不会补成 0）、本次运行的输出上限（读 `QUERYSHIELD_MODEL_MAX_TOKENS`，缺省 512，只读不改）和用满输出上限的调用次数，只有数字，没有文字。每条记录还有 `run_id`（`run-` 加随机 UUID，不含租户和用户信息）和 `usage_total`（这道题最后一个响应里的聊天用量合计：固定的状态和三个数），用来和模型网关按 `X-Run-Id` 记的调用、用量逐 run 对上；没有建 run 的题（例如在入口被拒绝的隔离题）两个都是 `null`。
 - `demo-raw.json`：问题、回答文字、客户姓名。只在本机看，不要分享，也不要提交。
 
 ### 判定规则

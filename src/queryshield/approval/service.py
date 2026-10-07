@@ -21,13 +21,14 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from queryshield.agent.context import NET_FEN_TIME_WINDOW
-from queryshield.agent.graph import RunResumeError
+from queryshield.agent.graph import RunResumeError, _usage_summary
 from queryshield.agent.metric_intent import build_metric_binding
 from queryshield.agent.proposals import ExecutionContext, FactRef, MetricBinding, ResultEvidence
 from queryshield.agent.config import RunConfig
 from queryshield.agent.runtime import (
     B1_PROFILE,
     CountingExecutor,
+    CountingModel,
     RuntimeConfigurationError,
     RuntimeDependencies,
     b1_result_payload,
@@ -528,6 +529,8 @@ class RunService:
         opened_store = None
         tools: object | None = None
         counter: CountingExecutor | None = None
+        model: CountingModel | None = None
+        writer = _StepWriter(self.store, run_id)
         metadata_written = [False]
         try:
             self.store.append_event(run_id, "step_started", "RUNNING", payload={"step": "agent_run", "profile": deps.profile})
@@ -538,7 +541,8 @@ class RunService:
                 opened_store = DurableModelCallStore(call_store_path_from_env())
                 call_store = opened_store
             counter = CountingExecutor(deps.executor)
-            run_deps = replace(deps, call_store=call_store)
+            model = CountingModel(deps.model)
+            run_deps = replace(deps, call_store=call_store, model=model)
             tools = product_tools(run_deps, executor=counter, metadata=metadata)
             context = ExecutionContext(
                 run_id=run_id,
@@ -546,7 +550,7 @@ class RunService:
                 principal_id=subject.principal_id,
                 role=subject.role,
             )
-            profile_run = run_profile(run_deps, context, question, time_window=time_window, tools=tools)
+            profile_run = run_profile(run_deps, context, question, time_window=time_window, tools=tools, on_step=writer)
             # The run's MCP session ends with this execution, before the result commits.
             metadata_record = self._close_metadata(tools, metadata_written)
             return self._commit(
@@ -556,13 +560,16 @@ class RunService:
                 tools=tools,
                 context=context,
                 sql_executions=counter.executions,
+                writer=writer,
                 metadata_record=metadata_record,
             )
         except Exception as exc:  # noqa: BLE001 - durable terminal state is the boundary
             metadata_record = self._close_metadata(tools, metadata_written)
             if metadata_record is not None:
                 self.store.append_event(run_id, "metadata_session", "RUNNING", payload=metadata_record)
-            return self._end_on_error(run_id, exc, sql_exec_count=counter.executions if counter is not None else 0)
+            return self._end_on_error(
+                run_id, exc, sql_exec_count=counter.executions if counter is not None else 0, writer=writer, model=model
+            )
         finally:
             self._close_metadata(tools, metadata_written)
             if opened_store is not None:
@@ -581,8 +588,8 @@ class RunService:
         tools: ControlledTools,
         context: ExecutionContext,
         sql_executions: int,
+        writer: "_StepWriter",
         envelope_updates: Mapping[str, object] | None = None,
-        previous_event_count: int = 0,
         metadata_record: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         current = self.store.get_run(run_id)
@@ -591,14 +598,13 @@ class RunService:
         status = str(payload.get("status"))
         error_code = payload.get("error_code")
         outcome = outcome_for(status, error_code)
-        new_events = _new_agent_events(payload, previous_event_count)
         counters = _commit_counters(current, payload, sql_executions)
         envelope = _commit_envelope(run_id, current, payload, outcome, agent, envelope_updates)
 
         if _cancel_requested(current):
             # Cancellation wins before any result is committed; events precede the terminal status.
             envelope["status"] = "CANCELLED"
-            self._append_agent_events(run_id, new_events, metadata_record)
+            self._append_agent_events(run_id, writer, payload, metadata_record)
             return self._finish_cancelled(run_id, checkpoint_json=_json(envelope), **counters)
 
         # Written after the cancel branch, so a run that is not SUCCEEDED never carries an answer status.
@@ -635,7 +641,7 @@ class RunService:
         }
         # Step events precede the run leaving RUNNING, a terminal event precedes the terminal status:
         # a stream reader that stops on a terminal status has received every event.
-        self._append_agent_events(run_id, new_events, metadata_record)
+        self._append_agent_events(run_id, writer, payload, metadata_record)
         if status == "waiting_approval":
             self.store.update_run(run_id, **update)
             self._create_pending_approval(run_id, current, payload, permission)
@@ -663,17 +669,36 @@ class RunService:
         self.store.update_run(run_id, status="FAILED", error_code=code, **update)
         return self.store.get_run(run_id)  # type: ignore[return-value]
 
-    def _end_on_error(self, run_id: str, exc: Exception, *, sql_exec_count: int) -> dict[str, object]:
+    def _end_on_error(
+        self,
+        run_id: str,
+        exc: Exception,
+        *,
+        sql_exec_count: int,
+        writer: "_StepWriter | None" = None,
+        model: CountingModel | None = None,
+    ) -> dict[str, object]:
         """End a run whose execution raised: FAILED on the error's code, unless cancelled meanwhile.
 
         The first execution, a resume and an approved execution all end here; left
         waiting, an approved run could never execute again (its approval is already
         consumed).  Cancellation wins, as it does before a commit.
+
+        The counts and usage are those of the last step whose events are all stored,
+        as a commit would store them; without a step of this execution the stored
+        ones stay.  A chat call this execution started without a stored event makes
+        the usage unknown.
         """
 
-        # The calls made before the error are not recorded, so the run's total is not known.
-        update = {"sql_exec_count": sql_exec_count, "usage_json": _json(_USAGE_LOST)}
-        if _cancel_requested(self.store.get_run(run_id) or {}):
+        run = self.store.get_run(run_id) or {}
+        update: dict[str, object] = {"sql_exec_count": sql_exec_count}
+        if writer is not None and writer.state is not None:
+            update.update(_step_counters(writer.state))
+        elif run.get("usage") is None:
+            update["usage_json"] = _json(_usage_summary(()))
+        if (model.calls if model is not None else 0) > (writer.model_calls_written if writer is not None else 0):
+            update["usage_json"] = _json(_USAGE_LOST)
+        if _cancel_requested(run):
             return self._finish_cancelled(run_id, **update)
         return self._finish_failed(run_id, _error_code(exc), **update)
 
@@ -698,17 +723,13 @@ class RunService:
     def _append_agent_events(
         self,
         run_id: str,
-        events: Sequence[Mapping[str, object]],
+        writer: "_StepWriter",
+        payload: Mapping[str, object],
         metadata_record: Mapping[str, object] | None = None,
     ) -> None:
-        for event in events:
-            self.store.append_event(
-                run_id,
-                "agent_step",
-                "RUNNING",
-                result_id=str(event["result_id"]) if event.get("result_id") else None,
-                payload=dict(event),
-            )
+        """The result's events the graph has not stored yet (none after a graph run), then the MCP session record."""
+
+        writer.write(payload.get("events") or ())
         if metadata_record is not None:
             # One record per MCP session (MCP setting only), after the steps it served.
             self.store.append_event(run_id, "metadata_session", "RUNNING", payload=dict(metadata_record))
@@ -817,7 +838,7 @@ class RunService:
             if choice.clarified_metric is not None:
                 binding = _clarified_binding(catalog, choice.clarified_metric, agent_checkpoint, answer)
                 checkpoint_for_resume["metric_bindings"] = [binding.as_dict()]
-            previous_event_count = _checked_event_count(agent_checkpoint, run)
+            writer = _StepWriter(self.store, run_id, written=_checked_event_count(agent_checkpoint, run))
             context = ExecutionContext(
                 run_id=run_id,
                 tenant_id=subject.tenant_id,
@@ -825,8 +846,9 @@ class RunService:
                 role=subject.role,
             )
             counter = CountingExecutor(executor)
+            counted = CountingModel(model)
             deps = RuntimeDependencies(
-                model=model,  # type: ignore[arg-type]
+                model=counted,  # type: ignore[arg-type]
                 executor=counter,
                 retriever=retriever,
                 call_store=call_store,
@@ -834,18 +856,25 @@ class RunService:
             )
             tools = product_tools(deps, metadata=metadata)
             agent = build_b1_agent(
-                model,  # type: ignore[arg-type]
+                counted,  # type: ignore[arg-type]
                 tools,
                 call_store=call_store,
                 run_config=run_config,
                 retrieval_available=retriever is not None,
+                on_step=writer,
             )
             try:
                 result, metadata_record = self._resume_agent(agent, tools, choice, context, answer, checkpoint_for_resume)
             except ApprovalConflict:
                 raise
             except Exception as exc:  # noqa: BLE001 - as in a first execution, the run ends on the error's code
-                return self._end_on_error(run_id, exc, sql_exec_count=int(run.get("sql_exec_count", 0)) + counter.executions)
+                return self._end_on_error(
+                    run_id,
+                    exc,
+                    sql_exec_count=int(run.get("sql_exec_count", 0)) + counter.executions,
+                    writer=writer,
+                    model=counted,
+                )
             envelope_updates: dict[str, object] = {}
             if choice.selected_metric is not None:
                 envelope_updates["clarified_metric"] = choice.selected_metric
@@ -858,8 +887,8 @@ class RunService:
                 tools=tools,
                 context=context,
                 sql_executions=counter.executions,
+                writer=writer,
                 envelope_updates=envelope_updates,
-                previous_event_count=previous_event_count,
                 metadata_record=metadata_record,
             )
 
@@ -1297,11 +1326,44 @@ def _cancel_requested(run: Mapping[str, object]) -> bool:
     return run.get("status") in {"CANCEL_REQUESTED", "CANCELLED"} or bool(run.get("cancel_requested"))
 
 
-def _new_agent_events(payload: Mapping[str, object], previous_event_count: int) -> list[dict[str, object]]:
-    raw_events = payload.get("events")
-    if not isinstance(raw_events, list):
-        return []
-    return [dict(event) for event in raw_events[previous_event_count:] if isinstance(event, Mapping)]
+class _StepWriter:
+    """Stores each agent event of one execution once, as the graph produces it.
+
+    ``written`` counts the run's events already stored (a resume starts after the
+    checkpoint's).  ``state`` is the last agent state whose events are all stored.
+    """
+
+    def __init__(self, store: StateStore, run_id: str, *, written: int = 0) -> None:
+        self.store, self.run_id, self.written = store, run_id, written
+        self.model_calls_written = 0
+        self.state: Mapping[str, object] | None = None
+
+    def __call__(self, state: Mapping[str, object]) -> None:
+        self.write(state.get("events") or ())
+        self.state = state
+
+    def write(self, events: Sequence[Mapping[str, object]]) -> None:
+        for event in events[self.written:]:
+            self.store.append_event(
+                self.run_id,
+                "agent_step",
+                "RUNNING",
+                result_id=str(event["result_id"]) if event.get("result_id") else None,
+                payload=dict(event),
+            )
+            self.written += 1
+            if event.get("kind") == "model_call":
+                self.model_calls_written += 1
+
+
+def _step_counters(state: Mapping[str, object]) -> dict[str, object]:
+    """What a commit stores from an agent state: the graph's own counters and the usage of its events."""
+
+    return {
+        "model_call_count": int(state.get("model_call_count", 0)),
+        "tool_call_count": int(state.get("tool_call_count", 0)),
+        "usage_json": _json(_usage_summary(state.get("events", ()))),
+    }
 
 
 def _commit_counters(current: Mapping[str, object], payload: Mapping[str, object], sql_executions: int) -> dict[str, object]:

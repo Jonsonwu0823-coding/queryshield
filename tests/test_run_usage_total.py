@@ -282,7 +282,7 @@ def test_a_resumed_run_totals_the_calls_before_and_after_the_pause(service, upst
     assert _status_total(service, waiting["run_id"]) == _known(before + after)
 
 
-def test_a_run_that_raises_on_its_first_execution_has_an_unknown_total(service, upstream, model, embedder) -> None:
+def test_a_run_that_raises_on_its_first_execution_totals_its_calls_before_the_error(service, upstream, model, embedder) -> None:
     model.search = True
     embedder.error = _embedding_error()
 
@@ -290,28 +290,31 @@ def test_a_run_that_raises_on_its_first_execution_has_an_unknown_total(service, 
 
     assert (body["status"], body["error"]["code"]) == ("FAILED", "upstream_http_error")
     assert upstream.chat_usage, "a chat call was made before the error"
-    assert body["usage_total"] == UNKNOWN
-    assert _status_total(service, body["run_id"]) == UNKNOWN
+    assert body["usage_total"] == _known(upstream.chat_usage)
+    assert _status_total(service, body["run_id"]) == _known(upstream.chat_usage)
 
 
-def test_a_run_that_raises_while_resuming_has_an_unknown_total(service, upstream, model, embedder) -> None:
+def test_a_run_that_raises_while_resuming_totals_the_calls_before_and_after_the_pause(service, upstream, model, embedder) -> None:
     waiting = _ask(service, "2026年9月销售额是多少？")
-    assert waiting["usage_total"]["status"] == "known"
+    before = list(upstream.chat_usage)
+    assert waiting["usage_total"] == _known(before)
     model.search = True
     embedder.error = _embedding_error()
 
     resumed = _resume(service, waiting["run_id"])
 
     assert (resumed["status"], resumed["error"]["code"]) == ("FAILED", "upstream_http_error")
-    assert resumed["usage_total"] == UNKNOWN
-    assert _status_total(service, waiting["run_id"]) == UNKNOWN
+    assert before and upstream.chat_usage[len(before):], "calls before the pause and after it"
+    assert resumed["usage_total"] == _known(upstream.chat_usage)
+    assert _status_total(service, waiting["run_id"]) == _known(upstream.chat_usage)
     # The stored record says so too: the evaluation reads its status.
-    assert shared_run_service().store.get_run(waiting["run_id"])["usage"]["status"] == "unknown"
+    assert shared_run_service().store.get_run(waiting["run_id"])["usage"]["status"] == "known"
 
 
-def test_a_run_cancelled_during_a_failing_resume_has_an_unknown_total(service, model, embedder) -> None:
+def test_a_run_cancelled_during_a_failing_resume_totals_its_calls(service, upstream, model, embedder) -> None:
     waiting = _ask(service, "2026年9月销售额是多少？")
-    assert waiting["usage_total"]["status"] == "known"
+    before = list(upstream.chat_usage)
+    assert waiting["usage_total"] == _known(before)
     model.search = True
     model.cancel_run = waiting
     embedder.error = _embedding_error()
@@ -319,8 +322,9 @@ def test_a_run_cancelled_during_a_failing_resume_has_an_unknown_total(service, m
     resumed = _resume(service, waiting["run_id"])
 
     assert resumed["status"] == "CANCELLED"
-    assert resumed["usage_total"] == UNKNOWN
-    assert _status_total(service, waiting["run_id"]) == UNKNOWN
+    assert upstream.chat_usage[len(before):], "a call after the pause"
+    assert resumed["usage_total"] == _known(upstream.chat_usage)
+    assert _status_total(service, waiting["run_id"]) == _known(upstream.chat_usage)
 
 
 def test_an_approved_execution_keeps_the_total_of_the_pause(service, upstream) -> None:
@@ -338,9 +342,10 @@ def test_an_approved_execution_keeps_the_total_of_the_pause(service, upstream) -
     assert _status_total(service, pending["run_id"]) == paused
 
 
-def test_an_approved_execution_that_raises_has_an_unknown_total(service, monkeypatch) -> None:
+def test_an_approved_execution_that_raises_keeps_the_total_of_the_pause(service, upstream, monkeypatch) -> None:
     pending = _ask(service, "查询客户姓名")
-    assert pending["usage_total"]["status"] == "known"
+    paused = _known(upstream.chat_usage)
+    assert pending["usage_total"] == paused
 
     def raises(*args, **kwargs):
         raise RuntimeError("connection reset")
@@ -349,7 +354,7 @@ def test_an_approved_execution_that_raises_has_an_unknown_total(service, monkeyp
     approved = _approve(service, pending)
 
     assert approved["error"]["code"] == "execution_failed"
-    assert _status_total(service, pending["run_id"]) == UNKNOWN
+    assert _status_total(service, pending["run_id"]) == paused
 
 
 def test_the_b0_run_reports_its_one_call(service, upstream, monkeypatch) -> None:

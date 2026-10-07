@@ -307,15 +307,15 @@ STATE_KEYS = [
 
 
 class _Spy:
-    """Wraps the compiled graph and keeps the state each invocation starts from."""
+    """Wraps the compiled graph and keeps the state each execution starts from (the graph is driven by ``stream``)."""
 
     def __init__(self, graph) -> None:
         self.graph = graph
         self.states: list[dict] = []
 
-    def invoke(self, state):
+    def stream(self, state, **kwargs):
         self.states.append(dict(state))
-        return self.graph.invoke(state)
+        return self.graph.stream(state, **kwargs)
 
 
 def test_a_new_run_and_a_restored_run_start_from_the_same_state_keys() -> None:

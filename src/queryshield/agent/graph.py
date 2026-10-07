@@ -268,6 +268,7 @@ class BoundedAgent:
         run_config: RunConfig | None = None,
         parallel_scheduler: ParallelScheduler | None = None,
         retrieval_available: bool = True,
+        on_step: Callable[[Mapping[str, object]], None] | None = None,
     ) -> None:
         if type(retrieval_available) is not bool:
             raise TypeError("retrieval_available must be a boolean")
@@ -283,6 +284,8 @@ class BoundedAgent:
         # Server configuration: without a product retriever the context does
         # not describe search_catalog and the tool node refuses it.
         self.retrieval_available = retrieval_available
+        # Told the state after every completed node, so the server can store the steps as they happen.
+        self.on_step = on_step
         self._waiting_checkpoints: dict[str, _GraphState] = {}
         self._compiled_graph = self._build_graph()
 
@@ -361,7 +364,7 @@ class BoundedAgent:
             parallel_plan=parallel_plan,
             retrieval_items=initial_retrieval_items,
         )
-        final_state = self._compiled_graph.invoke(state)
+        final_state = self._invoke(state)
         result = self._result_from_state(final_state, run_id=context.run_id)
         if result.status == "waiting_user":
             self._waiting_checkpoints[context.run_id] = final_state
@@ -543,13 +546,22 @@ class BoundedAgent:
                 "started_at": self._clock(),
             }
         )
-        final_state = self._compiled_graph.invoke(resumed_state)
+        final_state = self._invoke(resumed_state)
         result = self._result_from_state(final_state, run_id=context.run_id)
         if result.status == "waiting_user":
             self._waiting_checkpoints[context.run_id] = final_state
         else:
             self._waiting_checkpoints.pop(context.run_id, None)
         return result
+
+    def _invoke(self, state: _GraphState) -> _GraphState:
+        """Run the graph to its end; ``on_step`` sees the state each node committed (the input first)."""
+
+        final_state = state
+        for final_state in self._compiled_graph.stream(state, stream_mode="values"):
+            if self.on_step is not None:
+                self.on_step(final_state)
+        return final_state
 
     def _result_from_state(self, final_state: Mapping[str, object], *, run_id: str) -> AgentRunResult:
         return AgentRunResult(

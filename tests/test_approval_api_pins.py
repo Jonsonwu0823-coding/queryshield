@@ -460,10 +460,22 @@ def _finished_run(client) -> str:
     return response.json()["run_id"]
 
 
+# The test's own copy of what an agent_step frame may show; the product's list must agree.
+STEP_FIELDS = ("kind", "status", "error_code", "tool_name", "elapsed_ms", "model", "usage_status")
+TOKEN_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
+
+
 def _frame(event: dict) -> str:
     data = {key: event[key] for key in ("event_id", "run_id", "type", "status", "occurred_at")}
     if event.get("result_id") is not None:
         data["result_id"] = event["result_id"]
+    if event["type"] == "agent_step":
+        payload = event["payload"]
+        usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        data["step"] = {
+            **{key: payload[key] for key in STEP_FIELDS if key in payload},
+            **{key: usage[key] for key in TOKEN_FIELDS if key in usage},
+        }
     return (
         f"id: {event['event_id']}\nevent: {event['type']}\n"
         f"data: {json.dumps(data, ensure_ascii=False, separators=(',', ':'))}\n\n"
