@@ -40,6 +40,7 @@ class EmbeddingAdapter(Protocol):
         *,
         request_id: str | None = None,
         model_call_id: str | None = None,
+        run_id: str | None = None,
     ) -> EmbeddingCallResult:
         """Return one validated embedding operation."""
 

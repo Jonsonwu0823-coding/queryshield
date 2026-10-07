@@ -57,6 +57,7 @@ class FakeModel:
         *,
         request_id: str | None = None,
         model_call_id: str | None = None,
+        run_id: str | None = None,
         tools: list[dict[str, Any]] | None = None,
     ) -> ModelCallResult:
         if not messages:

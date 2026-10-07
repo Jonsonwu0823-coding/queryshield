@@ -731,7 +731,7 @@ class _DynamicModel:
         self.steps = list(steps)
         self.messages: list[list[dict[str, str]]] = []
 
-    def complete(self, messages, *, request_id=None, model_call_id=None):
+    def complete(self, messages, *, request_id=None, model_call_id=None, run_id=None):
         from queryshield.providers.contracts import ModelCallResult
 
         self.messages.append([dict(message) for message in messages])
@@ -1014,7 +1014,7 @@ def test_failed_model_call_event_keeps_http_status_and_provider_error_code() -> 
     class _ForbiddenModel:
         mode = "real"
 
-        def complete(self, messages, *, request_id=None, model_call_id=None):
+        def complete(self, messages, *, request_id=None, model_call_id=None, run_id=None):
             raise ModelProviderError(
                 "upstream_http_error",
                 {"status": "failed", "error_code": "upstream_http_error", "http_status": 403,

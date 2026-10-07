@@ -84,6 +84,7 @@ class _ScriptedModel:
         *,
         request_id: str | None = None,
         model_call_id: str | None = None,
+        run_id: str | None = None,
     ) -> ModelCallResult:
         if request_id is None or model_call_id is None:
             raise AssertionError("server identities were not passed to the model")

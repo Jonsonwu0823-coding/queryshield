@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import math
 import os
-import re
 from typing import Any, Mapping, Sequence
 
 import httpx
@@ -17,7 +16,14 @@ from queryshield.providers.contracts import (
     new_request_id,
     usage_is_consistent,
 )
-from queryshield.providers.http import base_url_is_valid, endpoint_url, json_headers, post_json
+from queryshield.providers.http import (
+    base_url_is_valid,
+    endpoint_url,
+    http_error_codes,
+    json_headers,
+    post_json,
+    response_model,
+)
 
 
 @dataclass(frozen=True)
@@ -106,6 +112,7 @@ class OpenAICompatibleModel:
         *,
         request_id: str | None = None,
         model_call_id: str | None = None,
+        run_id: str | None = None,
         tools: Sequence[Mapping[str, object]] | None = None,
     ) -> ModelCallResult:
         normalized_messages = _normalize_messages(messages)
@@ -121,7 +128,7 @@ class OpenAICompatibleModel:
             )
 
         payload = self._payload(normalized_messages, tools)
-        headers = json_headers(self.config.api_key, local_request_id)
+        headers = json_headers(self.config.api_key, local_request_id, run_id)
         try:
             response = post_json(self._client, self.config.endpoint, payload, headers, self.config.timeout_seconds)
         except httpx.TimeoutException as exc:
@@ -131,11 +138,12 @@ class OpenAICompatibleModel:
 
         provider_request_id = _header_value(response, "x-request-id")
         if response.status_code < 200 or response.status_code >= 300:
+            code, provider_error_code = http_error_codes(response)
             raise fail(
-                "upstream_http_error",
+                code,
                 provider_request_id=provider_request_id,
                 http_status=response.status_code,
-                provider_error_code=_provider_error_code(response),
+                provider_error_code=provider_error_code,
             )
         try:
             body = response.json()
@@ -148,7 +156,7 @@ class OpenAICompatibleModel:
         return ModelCallResult(
             mode="real",
             provider=self.provider,
-            model=_response_model(body, self.config.model),
+            model=response_model(body, self.config.model),
             request_id=local_request_id,
             model_call_id=server_call_id,
             provider_call_id=provider_call_id,
@@ -269,11 +277,6 @@ def _parse_usage(raw_usage: object) -> ModelUsage | None:
     return ModelUsage(prompt_tokens=prompt, completion_tokens=completion, total_tokens=total)
 
 
-def _response_model(body: Mapping[str, object], fallback: str) -> str:
-    model = body.get("model")
-    return model.strip() if isinstance(model, str) and model.strip() else fallback
-
-
 def _header_value(response: httpx.Response, name: str) -> str | None:
     value = response.headers.get(name)
     return value.strip() if isinstance(value, str) and value.strip() else None
@@ -309,34 +312,6 @@ def _failed_record(
     if provider_error_code is not None:
         record["provider_error_code"] = provider_error_code
     return record
-
-
-_PROVIDER_ERROR_CODE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
-
-
-def _provider_error_code(response: Any) -> str | None:
-    """The provider's machine error code from a JSON error body, or None.
-
-    Only ``error.code`` (OpenAI style) or a top-level ``code`` is read, and
-    only when it is a short identifier.  The message and any other text are
-    never recorded: they can echo prompts, keys or endpoints.
-    """
-
-    try:
-        body = response.json()
-    except Exception:  # non-JSON or unreadable body
-        return None
-    if not isinstance(body, Mapping):
-        return None
-    error = body.get("error")
-    code = error.get("code") if isinstance(error, Mapping) else None
-    if code is None:
-        code = body.get("code")
-    if type(code) is int:
-        code = str(code)
-    if type(code) is not str or not _PROVIDER_ERROR_CODE.fullmatch(code):
-        return None
-    return code
 
 
 def _configuration_error(code: str) -> ModelProviderError:

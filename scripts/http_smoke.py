@@ -9,11 +9,13 @@ answer text and credentials are never printed or written.
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import json
 import os
 import re
 from pathlib import Path
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -24,8 +26,11 @@ from uuid import uuid4
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
+for _path in (str(PROJECT_ROOT), str(SRC_ROOT)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
+from scripts.fake_upstream import FAKE_UPSTREAM_MODEL, evidence_failures  # noqa: E402
 
 REQUIRED_NAMES = (
     "QUERYSHIELD_DATABASE_URL",
@@ -38,6 +43,9 @@ REQUIRED_NAMES = (
     "QUERYSHIELD_EMBEDDING_MODEL_REVISION",
     "QUERYSHIELD_EMBEDDING_DIMENSIONS",
 )
+# fake-upstream: the Real adapters against the fake upstream; the server runs in real mode.
+SERVER_MODE = {"fake": "fake", "real": "real", "fake-upstream": "real"}
+FAKE_UPSTREAM_MODEL_NAMES = ("QUERYSHIELD_MODEL_NAME", "QUERYSHIELD_EMBEDDING_MODEL_NAME")
 TERMINAL = {"SUCCEEDED", "DENIED", "FAILED", "LIMIT_REACHED", "CANCELLED", "USAGE_UNKNOWN"}
 DB_PREFLIGHT_TIMEOUT_SECONDS = 3
 
@@ -64,6 +72,40 @@ def _database_reachable() -> bool:
             return connection.execute("SELECT 1").fetchone() == (1,)
     except Exception:  # noqa: BLE001 - any failure means blocked; details may hold credentials
         return False
+
+
+def required_names(mode: str) -> tuple[str, ...]:
+    return REQUIRED_NAMES if SERVER_MODE[mode] == "real" else ("QUERYSHIELD_DATABASE_URL",)
+
+
+def names_not_fake_upstream(environ) -> list[str]:
+    """fake-upstream mode: the configured model names must be the fake upstream's (a real service rejects that name)."""
+
+    return [name for name in FAKE_UPSTREAM_MODEL_NAMES if environ.get(name, "").strip() != FAKE_UPSTREAM_MODEL]
+
+
+def recorded_model_names(state_path: Path, run_ids, environ) -> list[str]:
+    """The chat model names the runs' model_call events recorded, and the embedding model the server used."""
+
+    from queryshield.db.state_store import StateStore
+
+    names = {environ.get("QUERYSHIELD_EMBEDDING_MODEL_NAME", "").strip()} - {""}
+    with StateStore(state_path) as store:
+        for run_id in run_ids:
+            for event in store.events(run_id):
+                payload = event.get("payload") or {}
+                if event.get("type") == "agent_step" and payload.get("kind") == "model_call" and isinstance(payload.get("model"), str):
+                    names.add(payload["model"])
+    return sorted(names)
+
+
+def model_labels(mode: str, state_path: Path, run_ids, environ) -> tuple[list[str] | None, list[str]]:
+    """The model names a real or fake-upstream run recorded, and its evidence failures; a fake run has neither."""
+
+    if mode == "fake":
+        return None, []
+    names = recorded_model_names(state_path, run_ids, environ)
+    return names, evidence_failures(mode, names)
 
 
 def _free_port() -> int:
@@ -378,6 +420,15 @@ def _record(step: str, code: int, body: dict, state_path: Path, **extra) -> dict
     return record
 
 
+def _store_run_ids(state_path: Path) -> list[str]:
+    """Every run in this smoke's own state store (a new temporary store per smoke)."""
+
+    if not state_path.is_file():
+        return []
+    with closing(sqlite3.connect(state_path.as_uri() + "?mode=ro", uri=True)) as connection:
+        return [row[0] for row in connection.execute("SELECT run_id FROM runs ORDER BY run_id")]
+
+
 def _catalog_questions() -> set[str]:
     from queryshield.catalog import load_default_catalog
 
@@ -579,16 +630,19 @@ def main() -> int:
     parser.add_argument("--evidence-dir", type=Path, required=True)
     parser.add_argument(
         "--mode",
-        choices=("real", "fake"),
+        choices=tuple(SERVER_MODE),
         default="real",
-        help="fake is a free wiring dry run (Fake model, product Fake retriever, real PostgreSQL)",
+        help="fake is a free wiring dry run (Fake model, product Fake retriever, real PostgreSQL); "
+        "fake-upstream runs the Real adapters against the OpenAI-compatible fake upstream (docs/operations.md)",
     )
     parser.add_argument("--model-protocol", choices=("json", "native"), default="json", help="how the model returns its decision")
     args = parser.parse_args()
-    required = REQUIRED_NAMES if args.mode == "real" else ("QUERYSHIELD_DATABASE_URL",)
-    missing = [name for name in required if not os.getenv(name, "").strip()]
+    missing = [name for name in required_names(args.mode) if not os.getenv(name, "").strip()]
     if missing:
         print(json.dumps({"status": "blocked", "missing_configuration_names": missing}))
+        return 2
+    if args.mode == "fake-upstream" and names_not_fake_upstream(os.environ):
+        print(json.dumps({"status": "blocked", "reason": "model_names_not_fake_upstream", "names": names_not_fake_upstream(os.environ)}))
         return 2
     args.evidence_dir.mkdir(parents=True, exist_ok=True)
     if not _database_reachable():
@@ -613,7 +667,7 @@ def main() -> int:
     env.pop("QUERYSHIELD_RETRIEVAL", None)
     env.pop("QUERYSHIELD_METADATA_TOOLS", None)
     env.update({
-        "QUERYSHIELD_PROVIDER_MODE": args.mode,
+        "QUERYSHIELD_PROVIDER_MODE": SERVER_MODE[args.mode],
         "QUERYSHIELD_MODEL_PROTOCOL": args.model_protocol,
         "QUERYSHIELD_STATE_STORE_PATH": str(state_path),
         "QUERYSHIELD_CALL_STORE_PATH": str(workdir / "calls.sqlite3"),
@@ -665,6 +719,8 @@ def main() -> int:
     for record in records:
         if isinstance(record.get("http_status"), int) and record["http_status"] >= 500:
             hard_failures.append(f"server_error:{record['step']}")
+    model_names, failures = model_labels(args.mode, state_path, _store_run_ids(state_path), os.environ)
+    hard_failures.extend(failures)
     summary = {
         "mode": args.mode,
         "model_protocol": args.model_protocol,
@@ -674,6 +730,8 @@ def main() -> int:
         "records": records,
         "note": "status codes, terminal states, fact counts and metric ids only; no rows, names, answers or credentials",
     }
+    if model_names is not None:
+        summary["model_names"] = model_names
     (args.evidence_dir / "http-smoke-summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )

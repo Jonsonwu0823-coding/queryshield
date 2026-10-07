@@ -1,0 +1,29 @@
+# The service calls models through an OpenAI-compatible model gateway (quota, rate limits, billing)
+# that runs in its own Compose project; the two projects meet on an external Docker network.
+#
+#   docker network create "$QUERYSHIELD_GATEWAY_NETWORK"   # once; skip if it exists
+#   docker compose -f compose.yaml -f compose.model-gateway.yaml up -d --build
+#
+# Set in the shell (all required, no defaults; never written in a file):
+#   QUERYSHIELD_GATEWAY_NETWORK    the external network both projects join
+#   QUERYSHIELD_GATEWAY_BASE_URL   the gateway's address on that network, ending in /v1
+#   QUERYSHIELD_MODEL_API_KEY      the key the gateway issued (used for chat and embeddings)
+# plus the model names, revision and dimensions as for any real model (docs/operations.md).
+# With the fake upstream behind the gateway, add compose.fake-upstream.yaml and
+# compose.fake-upstream-gateway.yaml. Only app (and fake-upstream) join the network: Docker
+# resolves service names there, so a database service on it could answer for the other project's.
+
+services:
+  app:
+    networks: [default, gateway]
+    environment:
+      QUERYSHIELD_PROVIDER_MODE: real
+      QUERYSHIELD_MODEL_BASE_URL: ${QUERYSHIELD_GATEWAY_BASE_URL:?QUERYSHIELD_GATEWAY_BASE_URL is not set - the gateway address, ending in /v1}
+      QUERYSHIELD_EMBEDDING_BASE_URL: ${QUERYSHIELD_GATEWAY_BASE_URL:?QUERYSHIELD_GATEWAY_BASE_URL is not set - the gateway address, ending in /v1}
+      QUERYSHIELD_MODEL_API_KEY: ${QUERYSHIELD_MODEL_API_KEY:?QUERYSHIELD_MODEL_API_KEY is not set - the key the gateway issued}
+      QUERYSHIELD_EMBEDDING_API_KEY: ${QUERYSHIELD_MODEL_API_KEY:?QUERYSHIELD_MODEL_API_KEY is not set - the key the gateway issued}
+
+networks:
+  gateway:
+    name: ${QUERYSHIELD_GATEWAY_NETWORK:?QUERYSHIELD_GATEWAY_NETWORK is not set - the external network shared with the gateway}
+    external: true

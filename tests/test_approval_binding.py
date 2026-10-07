@@ -206,7 +206,7 @@ class _CountThenNames:
     def __init__(self) -> None:
         self.calls = 0
 
-    def complete(self, messages, *, request_id=None, model_call_id=None):
+    def complete(self, messages, *, request_id=None, model_call_id=None, run_id=None):
         self.calls += 1
         if self.calls == 1:
             content = {
@@ -288,7 +288,7 @@ class _AliasNames:
     mode = "fake"
     alias = "总额999元已核实"
 
-    def complete(self, messages, *, request_id=None, model_call_id=None):
+    def complete(self, messages, *, request_id=None, model_call_id=None, run_id=None):
         content = {
             "type": "tool_call", "name": "query_readonly",
             "arguments": {

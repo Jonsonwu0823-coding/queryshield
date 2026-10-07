@@ -258,7 +258,7 @@ class _Native:
         self.replies = list(replies)
         self.calls = 0
 
-    def complete(self, messages, *, request_id=None, model_call_id=None, tools=None):
+    def complete(self, messages, *, request_id=None, model_call_id=None, run_id=None, tools=None):
         assert tools is not None
         content, calls = self.replies[self.calls]
         self.calls += 1
@@ -423,9 +423,9 @@ class _RealStateModel(StateCaseFakeModel):
 
     mode = "real"
 
-    def complete(self, messages, *, request_id=None, model_call_id=None, tools=None):
+    def complete(self, messages, *, request_id=None, model_call_id=None, run_id=None, tools=None):
         self.tools_seen = getattr(self, "tools_seen", []) + [tools]
-        result = super().complete(messages, request_id=request_id, model_call_id=model_call_id)
+        result = super().complete(messages, request_id=request_id, model_call_id=model_call_id, run_id=run_id)
         if tools is None:
             return result
         name, arguments = native_call_for(json.loads(result.content))

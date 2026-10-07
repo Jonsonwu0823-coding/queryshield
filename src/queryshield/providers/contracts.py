@@ -110,6 +110,7 @@ class ModelAdapter(Protocol):
         *,
         request_id: str | None = None,
         model_call_id: str | None = None,
+        run_id: str | None = None,
         tools: Sequence[Mapping[str, object]] | None = None,
     ) -> ModelCallResult:
         """Run one non-streaming call without exposing provider credentials.

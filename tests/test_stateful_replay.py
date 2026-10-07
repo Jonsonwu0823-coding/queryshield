@@ -542,8 +542,8 @@ def test_reused_model_records_are_scoped_to_the_current_product_case() -> None:
         def select_case(self, case):
             self.delegate = StateCaseFakeModel(case)
 
-        def complete(self, messages, *, request_id=None, model_call_id=None):
-            result = self.delegate.complete(messages, request_id=request_id, model_call_id=model_call_id)
+        def complete(self, messages, *, request_id=None, model_call_id=None, run_id=None):
+            result = self.delegate.complete(messages, request_id=request_id, model_call_id=model_call_id, run_id=run_id)
             result = replace(
                 result,
                 usage=ModelUsage(prompt_tokens=4, completion_tokens=2, total_tokens=6),
@@ -1875,9 +1875,9 @@ class _MessageCapture:
         self.model = getattr(delegate, "model", "fake")
         self.sent: list[list[dict[str, object]]] = []
 
-    def complete(self, messages, *, request_id=None, model_call_id=None):
+    def complete(self, messages, *, request_id=None, model_call_id=None, run_id=None):
         self.sent.append([dict(message) for message in messages])
-        return self.delegate.complete(messages, request_id=request_id, model_call_id=model_call_id)
+        return self.delegate.complete(messages, request_id=request_id, model_call_id=model_call_id, run_id=run_id)
 
 
 @pytest.mark.parametrize("profile", ["B0", "B1"])

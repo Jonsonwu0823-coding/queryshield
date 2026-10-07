@@ -83,6 +83,7 @@ class _ParallelModel:
         *,
         request_id: str | None = None,
         model_call_id: str | None = None,
+        run_id: str | None = None,
     ) -> ModelCallResult:
         self.calls += 1
         if self.calls == 1:

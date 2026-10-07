@@ -130,7 +130,7 @@ HTTP 接口都在 `src/queryshield/api/main.py`：
 
 ### 模型适配器
 
-`src/queryshield/providers/`：`QUERYSHIELD_PROVIDER_MODE` 为 `fake`（默认）时用确定性的 `FakeModel`，为 `real` 时用 OpenAI 兼容的 `OpenAICompatibleModel`（`/chat/completions`，超时默认 15 秒，输出上限默认 512 tokens）。缺配置以 503 结束，不退回 Fake。用量只记提供方返回的值：没有就记 `unknown`，不补 0；Fake 的用量一律是 `unknown`。另有嵌入（`embedding.py`）和重排（`rerank.py`）适配器。
+`src/queryshield/providers/`：`QUERYSHIELD_PROVIDER_MODE` 为 `fake`（默认）时用确定性的 `FakeModel`，为 `real` 时用 OpenAI 兼容的 `OpenAICompatibleModel`（`/chat/completions`，超时默认 15 秒，输出上限默认 512 tokens）。缺配置以 503 结束，不退回 Fake。用量只记提供方返回的值：没有就记 `unknown`，不补 0；Fake 的用量一律是 `unknown`。另有嵌入（`embedding.py`）和重排（`rerank.py`）适配器。聊天和嵌入共用 `http.py`：run 里的调用带请求头 `X-Run-Id`（run 编号），出错时用同一个函数读提供方的错误码，网关的 429 `quota_exhausted`、`rate_limited` 映射成 `model_quota_exhausted`、`model_rate_limited`；调用记录的模型名取响应里的 `model`。
 
 ### 两种动作协议
 
@@ -209,7 +209,7 @@ sequenceDiagram
 | `LIMIT_REACHED` | 502 | 预算用完仍没有回答，对外状态是 `unknown` |
 | `CANCELLED` | 409 | 错误码 `run_cancelled` |
 
-`FAILED` 按错误码细化的几类：配置、数据库、知识库、权限来源不可用是 503（例如 `missing_model_configuration`、`database_unavailable`、`knowledge_unavailable`、`approval_permission_unavailable`、`mcp_unavailable`）；超时是 504（`upstream_timeout`、`query_timeout`、`mcp_timeout`）；问题本身无法在边界内回答是 422（`result_row_limit`、`clarification_value_unsupported`）；模型输出用不了是 502（`query_repair_limit`、`answer_not_grounded`、`answer_basis_conflict`、`clarification_not_needed`、`metric_contradicts_question`、`invalid_json` 等）。
+`FAILED` 按错误码细化的几类：配置、数据库、知识库、权限来源不可用，以及模型网关报额度用完或被限流，是 503（例如 `missing_model_configuration`、`database_unavailable`、`knowledge_unavailable`、`approval_permission_unavailable`、`mcp_unavailable`、`model_quota_exhausted`、`model_rate_limited`）；超时是 504（`upstream_timeout`、`query_timeout`、`mcp_timeout`）；问题本身无法在边界内回答是 422（`result_row_limit`、`clarification_value_unsupported`）；模型输出用不了是 502（`query_repair_limit`、`answer_not_grounded`、`answer_basis_conflict`、`clarification_not_needed`、`metric_contradicts_question`、`invalid_json` 等）。
 
 ## 设计取舍
 

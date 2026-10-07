@@ -653,6 +653,7 @@ class BoundedAgent:
                 context_result.messages,
                 request_id=identity.request_id,
                 model_call_id=identity.model_call_id,
+                run_id=state["context"].run_id,
                 **options,
             )
         except ModelProviderError as exc:

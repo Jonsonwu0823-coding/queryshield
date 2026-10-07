@@ -527,6 +527,7 @@ class RunService:
     ) -> dict[str, object]:
         opened_store = None
         tools: object | None = None
+        counter: CountingExecutor | None = None
         metadata_written = [False]
         try:
             self.store.append_event(run_id, "step_started", "RUNNING", payload={"step": "agent_run", "profile": deps.profile})
@@ -558,11 +559,10 @@ class RunService:
                 metadata_record=metadata_record,
             )
         except Exception as exc:  # noqa: BLE001 - durable terminal state is the boundary
-            code = _error_code(exc)
             metadata_record = self._close_metadata(tools, metadata_written)
             if metadata_record is not None:
                 self.store.append_event(run_id, "metadata_session", "RUNNING", payload=metadata_record)
-            return self._finish_failed(run_id, code)
+            return self._end_on_error(run_id, exc, sql_exec_count=counter.executions if counter is not None else 0)
         finally:
             self._close_metadata(tools, metadata_written)
             if opened_store is not None:
@@ -662,6 +662,18 @@ class RunService:
         self.store.append_event(run_id, "terminal", "FAILED", payload={"error_code": code})
         self.store.update_run(run_id, status="FAILED", error_code=code, **update)
         return self.store.get_run(run_id)  # type: ignore[return-value]
+
+    def _end_on_error(self, run_id: str, exc: Exception, *, sql_exec_count: int) -> dict[str, object]:
+        """End a run whose execution raised: FAILED on the error's code, unless cancelled meanwhile.
+
+        The first execution, a resume and an approved execution all end here; left
+        waiting, an approved run could never execute again (its approval is already
+        consumed).  Cancellation wins, as it does before a commit.
+        """
+
+        if _cancel_requested(self.store.get_run(run_id) or {}):
+            return self._finish_cancelled(run_id, sql_exec_count=sql_exec_count)
+        return self._finish_failed(run_id, _error_code(exc), sql_exec_count=sql_exec_count)
 
     def _succeeded_result_json(
         self,
@@ -826,7 +838,12 @@ class RunService:
                 run_config=run_config,
                 retrieval_available=retriever is not None,
             )
-            result, metadata_record = self._resume_agent(agent, tools, choice, context, answer, checkpoint_for_resume)
+            try:
+                result, metadata_record = self._resume_agent(agent, tools, choice, context, answer, checkpoint_for_resume)
+            except ApprovalConflict:
+                raise
+            except Exception as exc:  # noqa: BLE001 - as in a first execution, the run ends on the error's code
+                return self._end_on_error(run_id, exc, sql_exec_count=int(run.get("sql_exec_count", 0)) + counter.executions)
             envelope_updates: dict[str, object] = {}
             if choice.selected_metric is not None:
                 envelope_updates["clarified_metric"] = choice.selected_metric
@@ -866,6 +883,12 @@ class RunService:
         except RunResumeError as exc:
             code = "not_found" if exc.code == "resume_context_mismatch" else "checkpoint_invalid"
             raise ApprovalConflict(code, "resume checkpoint could not be restored") from exc
+        except Exception:
+            # The run ends on this error; like a first execution, its MCP session record is kept.
+            record = self._close_metadata(tools, metadata_written)
+            if record is not None:
+                self.store.append_event(context.run_id, "metadata_session", "RUNNING", payload=record)
+            raise
         finally:
             metadata_record = self._close_metadata(tools, metadata_written)
         return result, metadata_record
@@ -1020,7 +1043,24 @@ class RunService:
         run: Mapping[str, object],
         approval: Mapping[str, object],
     ) -> dict[str, object]:
-        """Execute the single approved call for the requester and render server-side.
+        """Execute the single approved call; whatever it raises ends the run (the approval is consumed)."""
+
+        counter: CountingExecutor | None = None
+        try:
+            counter = CountingExecutor(self._executor_factory())
+            return self._run_approved(run_id, run, approval, counter)
+        except Exception as exc:  # noqa: BLE001 - durable terminal state is the boundary
+            executed = counter.executions if counter is not None else 0
+            return self._end_on_error(run_id, exc, sql_exec_count=int(run.get("sql_exec_count", 0)) + executed)
+
+    def _run_approved(
+        self,
+        run_id: str,
+        run: Mapping[str, object],
+        approval: Mapping[str, object],
+        counter: CountingExecutor,
+    ) -> dict[str, object]:
+        """Run the single approved call for the requester and render server-side.
 
         The approver's identity only authorizes this call; the result, facts
         and answer belong to the requester.  Earlier verified metric results
@@ -1034,14 +1074,8 @@ class RunService:
             role=str(run["role"]),
         )
         catalog = load_default_catalog()
-        counter = CountingExecutor(self._executor_factory())
         tools = ControlledTools(catalog=catalog, executor=counter)
-        try:
-            evidence = execute_approved_query(tools, pending_call_from_action(approval["action"]), context=requester)  # type: ignore[arg-type]
-        except (ToolError, RuntimeConfigurationError) as exc:
-            return self._finish_failed(
-                run_id, _error_code(exc), sql_exec_count=int(run.get("sql_exec_count", 0)) + counter.executions
-            )
+        evidence = execute_approved_query(tools, pending_call_from_action(approval["action"]), context=requester)  # type: ignore[arg-type]
         sql_total = int(run.get("sql_exec_count", 0)) + counter.executions
         current_run = self.store.get_run(run_id) or {}
         if _cancel_requested(current_run):

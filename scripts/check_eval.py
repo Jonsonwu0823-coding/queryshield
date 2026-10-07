@@ -19,8 +19,9 @@ from uuid import uuid4
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
-if str(SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRC_ROOT))
+for _path in (str(PROJECT_ROOT), str(SRC_ROOT)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 WORKSPACE_ROOT = PROJECT_ROOT.parents[1]
 LOCAL_EVAL_ROOT = WORKSPACE_ROOT / "01_每周任务" / "W05_冻结评测与失败归因"
@@ -81,6 +82,7 @@ from queryshield.providers.rerank import (  # noqa: E402
 )
 from queryshield.db.guarded import GuardedQueryExecutor  # noqa: E402
 from queryshield.db.state_store import StateStore  # noqa: E402
+from scripts.fake_upstream import evidence_failures  # noqa: E402
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -157,7 +159,7 @@ class _RegressionFakeModel:
     provider = "w05-scripted-regression"
     model = "w05-scripted-regression-v1"
 
-    def complete(self, messages, *, request_id=None, model_call_id=None):
+    def complete(self, messages, *, request_id=None, model_call_id=None, run_id=None):
         joined = "\n".join(str(message.get("content", "")) for message in messages)
         unsafe = "w05-dangerous-write-probe" in joined
         is_b0 = any(
@@ -216,6 +218,10 @@ class _RegressionFakeModel:
 class _RecordingModelAdapter:
     """Keep provider metadata and usage while discarding raw model content."""
 
+    # Every chat and embedding model name a provider returned in this process; main() refuses a fake
+    # upstream in real mode.
+    returned_models: set[str] = set()
+
     def __init__(self, delegate):
         self.delegate = delegate
         self.mode = getattr(delegate, "mode", "real")
@@ -235,6 +241,7 @@ class _RecordingModelAdapter:
             # failed calls retain request/status metadata and unknown usage.
             self.records.append(dict(exc.record))
             raise
+        _RecordingModelAdapter.returned_models.add(result.model)
         record = result.to_redacted_record()
         # Development runs preserve the exact provider action so that a
         # controlled evaluator fault can be distinguished from model output.
@@ -375,6 +382,8 @@ def _build_retrieval_runtime(
 
     cases = tuple(retrieval_cases) if retrieval_cases is not None else load_source_retrieval_cases()
     runtime = build_product_retrieval_runtime(mode, reranker=reranker)
+    # Building the index embeds every chunk through the configured service, so it names what answers.
+    _RecordingModelAdapter.returned_models.update(usage.model for usage in runtime.index_build.operation_usages)
     return cases, runtime.snapshot, runtime.index_build, runtime.embedder, runtime.retriever
 
 
@@ -3598,6 +3607,10 @@ def main() -> int:
             }
         for frame in _sanitized_trace_frames(exc):
             print(frame, file=sys.stderr)
+    if args.mode == "real":
+        used = _RecordingModelAdapter.returned_models | {os.getenv("QUERYSHIELD_EMBEDDING_MODEL_NAME", "").strip()}
+        if evidence_failures("real", used):
+            result = {**result, "status": "fail", "evidence_failures": evidence_failures("real", used)}
     _write_json(args.evidence_dir / f"{args.check_id}.json", result)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     if result["status"] == "pass" or result["status"] == "not_applicable":

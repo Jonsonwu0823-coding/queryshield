@@ -66,6 +66,7 @@ class _ScriptedModel:
         *,
         request_id: str | None = None,
         model_call_id: str | None = None,
+        run_id: str | None = None,
     ) -> ModelCallResult:
         assert request_id is not None
         assert model_call_id is not None

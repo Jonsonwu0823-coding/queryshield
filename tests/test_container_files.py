@@ -22,6 +22,8 @@ DOCKERFILE = PROJECT_ROOT / "Dockerfile"
 DOCKERIGNORE = PROJECT_ROOT / ".dockerignore"
 COMPOSE = PROJECT_ROOT / "compose.yaml"
 OVERRIDE = PROJECT_ROOT / "deploy" / "ci-tmp-volume.compose.yaml"
+GATEWAY = PROJECT_ROOT / "compose.model-gateway.yaml"
+FAKE_UPSTREAM_GATEWAY = PROJECT_ROOT / "compose.fake-upstream-gateway.yaml"
 ENV_EXAMPLE = PROJECT_ROOT / ".env.example"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "queryshield-ci.yml"
 FALLBACK_WORKFLOW = PROJECT_ROOT / "deploy" / "queryshield-ci.yml"
@@ -58,6 +60,10 @@ _ComposeLoader.add_constructor("!reset", lambda loader, node: [])
 
 def _compose() -> dict:
     return yaml.safe_load(_text(COMPOSE))
+
+
+def _load(path: Path) -> dict:
+    return yaml.safe_load(_text(path))
 
 
 def _is_reference_or_empty(value: object) -> bool:
@@ -174,14 +180,14 @@ def test_required_variables_stop_compose_with_their_name_and_match_the_env_examp
 
 def test_no_credential_literal_in_the_container_files_or_the_workflow() -> None:
     compose = _compose()
-    for service in compose["services"].values():
+    for service in [*compose["services"].values(), *_load(GATEWAY)["services"].values()]:
         for key, value in (service.get("environment") or {}).items():
             if SECRET_NAME.search(key):
                 assert _is_reference_or_empty(value), f"{key} must come from the environment, not a literal"
     for url in (value for service in compose["services"].values() for value in (service.get("environment") or {}).values() if isinstance(value, str) and "://" in value):
         userinfo = re.match(r"[a-z]+://[^:@/]+:([^@]*)@", url)
         assert userinfo and userinfo.group(1).startswith("${"), "a database URL takes its password from a variable"
-    for path in (DOCKERFILE, COMPOSE, OVERRIDE, _workflow_path()):
+    for path in (DOCKERFILE, COMPOSE, OVERRIDE, GATEWAY, FAKE_UPSTREAM_GATEWAY, _workflow_path()):
         for number, line in enumerate(_text(path).splitlines(), start=1):
             if line.lstrip().startswith("#"):
                 continue
@@ -284,6 +290,85 @@ def test_compose_job_runs_both_demo_passes_the_tmp_volume_checks_and_always_clea
     last = steps[-1]
     assert last.get("if") == "always()" and "down -v" in last["run"]
     assert any(step.get("if") == "failure()" and "logs" in step.get("run", "") for step in steps)
+
+
+# --- the model gateway overrides -------------------------------------------------------------------------
+
+GATEWAY_NETWORK = "${QUERYSHIELD_GATEWAY_NETWORK:?QUERYSHIELD_GATEWAY_NETWORK is not set"
+
+
+def _gateway_network(path: Path) -> dict:
+    networks = _load(path)["networks"]
+    assert set(networks) == {"gateway"}
+    return networks["gateway"]
+
+
+def test_only_app_joins_the_gateway_network_and_nothing_is_published() -> None:
+    gateway, fake_upstream = _load(GATEWAY), _load(FAKE_UPSTREAM_GATEWAY)
+    assert set(gateway["services"]) == {"app"}
+    assert set(fake_upstream["services"]) == {"fake-upstream"}
+    # db and setup stay on the project network only: Docker resolves service names on the shared one.
+    for override in (gateway, fake_upstream):
+        for name, service in override["services"].items():
+            assert service["networks"] == ["default", "gateway"], name
+            assert "ports" not in service and "expose" not in service, name
+    for name in ("db", "setup"):
+        assert "networks" not in _compose()["services"][name], name
+
+
+def test_the_gateway_network_is_external_and_named_only_by_a_required_variable() -> None:
+    for path in (GATEWAY, FAKE_UPSTREAM_GATEWAY):
+        network = _gateway_network(path)
+        assert network["external"] is True
+        assert network["name"].startswith(GATEWAY_NETWORK), path.name
+
+
+def test_app_reaches_the_gateway_in_real_mode_with_required_address_and_key() -> None:
+    environment = _load(GATEWAY)["services"]["app"]["environment"]
+    assert environment == {
+        "QUERYSHIELD_PROVIDER_MODE": "real",
+        "QUERYSHIELD_MODEL_BASE_URL": environment["QUERYSHIELD_MODEL_BASE_URL"],
+        "QUERYSHIELD_EMBEDDING_BASE_URL": environment["QUERYSHIELD_MODEL_BASE_URL"],
+        "QUERYSHIELD_MODEL_API_KEY": environment["QUERYSHIELD_MODEL_API_KEY"],
+        "QUERYSHIELD_EMBEDDING_API_KEY": environment["QUERYSHIELD_MODEL_API_KEY"],
+    }
+    assert environment["QUERYSHIELD_MODEL_BASE_URL"].startswith("${QUERYSHIELD_GATEWAY_BASE_URL:?QUERYSHIELD_GATEWAY_BASE_URL is not set")
+    assert environment["QUERYSHIELD_MODEL_API_KEY"].startswith("${QUERYSHIELD_MODEL_API_KEY:?QUERYSHIELD_MODEL_API_KEY is not set")
+
+
+def test_every_variable_of_the_gateway_overrides_is_required_and_named_in_its_message() -> None:
+    for path in (GATEWAY, FAKE_UPSTREAM_GATEWAY):
+        code = _code(path)
+        references = re.findall(r"\$\{([^}]*)\}", code)
+        assert references, path.name
+        for reference in references:
+            name, separator, message = reference.partition(":?")
+            assert separator and message.startswith(f"{name} is not set"), f"{path.name}: ${{{reference}}} must be required"
+
+
+def test_the_ci_compose_job_reaches_a_fake_gateway_over_an_external_network(workflow) -> None:
+    steps = workflow["jobs"]["compose"]["steps"]
+    step = next(item for item in steps if "compose.model-gateway.yaml" in item.get("run", ""))
+    run = step["run"]
+    assert step["env"]["QUERYSHIELD_GATEWAY_BASE_URL"].startswith("http://ci-fake-gateway:")
+    for expected in (
+        'docker network create "$QUERYSHIELD_GATEWAY_NETWORK"',
+        'docker run -d --name ci-fake-gateway --network "$QUERYSHIELD_GATEWAY_NETWORK"',
+        "up -d --no-deps app",
+        "docker network inspect",
+        '[ "$attached" = "$expected" ]',
+        "for service in db setup",
+        "demo_run.py --mode fake-upstream",
+        "POST $path HTTP",
+        "-f compose.fake-upstream.yaml -f compose.model-gateway.yaml -f compose.fake-upstream-gateway.yaml config",
+    ):
+        assert expected in run, expected
+    # On a failure the trap shows both logs first, then always removes app, the fake gateway and the network.
+    cleanup = run[run.index("cleanup() {"): run.index("trap cleanup EXIT")]
+    logs = max(cleanup.index("docker logs --tail 100 ci-fake-gateway"), cleanup.index("logs --no-color --tail 100 app"))
+    assert logs < cleanup.index("rm -sf app") < cleanup.index("docker rm -f ci-fake-gateway") < cleanup.index("docker network rm")
+    names = [item["name"] for item in steps]
+    assert names.index(step["name"]) < names.index("Show the service log when a step failed")
 
 
 # --- the local real-model script -----------------------------------------------------------------------

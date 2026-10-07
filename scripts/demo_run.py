@@ -525,6 +525,12 @@ def summary_record(question: Mapping[str, object], obs: Mapping[str, object], ju
     }
 
 
+def fake_scripted_only(mode: str, question: Mapping[str, object]) -> bool:
+    """Fake and fake-upstream runs skip the questions the Fake model does not script."""
+
+    return mode != "real" and not question.get("fake_supported")
+
+
 def not_applicable_record(question: Mapping[str, object]) -> dict:
     return {
         "id": question["id"],
@@ -712,7 +718,7 @@ def _blocked(reason: str, **extra) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--evidence-dir", type=Path, required=True)
-    parser.add_argument("--mode", choices=("real", "fake"), default="real")
+    parser.add_argument("--mode", choices=tuple(smoke.SERVER_MODE), default="real", help="fake-upstream: the Real adapters against the fake upstream, fake-supported questions only")
     parser.add_argument(
         "--model-protocol",
         choices=("json", "native"),
@@ -729,10 +735,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    required = smoke.REQUIRED_NAMES if args.mode == "real" else ("QUERYSHIELD_DATABASE_URL",)
-    missing = [name for name in required if not os.getenv(name, "").strip()]
+    missing = [name for name in smoke.required_names(args.mode) if not os.getenv(name, "").strip()]
     if missing:
         return _blocked("missing_configuration", missing_configuration_names=missing)
+    if args.mode == "fake-upstream" and smoke.names_not_fake_upstream(os.environ):
+        return _blocked("model_names_not_fake_upstream", names=smoke.names_not_fake_upstream(os.environ))
     external = None
     if args.base_url:
         tokens, problems = tokens_from_environment(os.environ)
@@ -781,7 +788,7 @@ def main(argv: list[str] | None = None) -> int:
         env.update(
             {
                 "QUERYSHIELD_DEMO_DATASET": DEMO_DATASET,
-                "QUERYSHIELD_PROVIDER_MODE": args.mode,
+                "QUERYSHIELD_PROVIDER_MODE": smoke.SERVER_MODE[args.mode],
                 "QUERYSHIELD_MODEL_PROTOCOL": args.model_protocol,
                 "QUERYSHIELD_STATE_STORE_PATH": str(state_path),
                 "QUERYSHIELD_CALL_STORE_PATH": str(workdir / "calls.sqlite3"),
@@ -817,7 +824,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             return _blocked("server_not_healthy")
         for question in questions:
-            if args.mode == "fake" and not question.get("fake_supported"):
+            if fake_scripted_only(args.mode, question):
                 records.append(not_applicable_record(question))
                 continue
             try:
@@ -858,6 +865,8 @@ def main(argv: list[str] | None = None) -> int:
                 snapshot_ids.add(str(config["knowledge_snapshot_id"]))
     hard_failures = sorted({f"{r['id']}:{item}" for r in records for item in r.get("hard_failures", [])})
     hard_failures += [f"setup:{item['check']}" for item in setup if not item.get("ok")]
+    model_names, failures = smoke.model_labels(args.mode, state_path, run_ids, os.environ)
+    hard_failures += failures
     summary = {
         "mode": args.mode,
         "model_protocol": args.model_protocol,
@@ -881,6 +890,8 @@ def main(argv: list[str] | None = None) -> int:
         },
         "note": "ids, status codes, terminal states, counts and numbers only; no question or answer text, customer names, URLs or credentials",
     }
+    if model_names is not None:
+        summary["model_names"] = model_names
     (args.evidence_dir / "demo-summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     (args.evidence_dir / "demo-raw.json").write_text(json.dumps(raw_records, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({key: summary[key] for key in ("status", "hard_failures", "known_gaps")}, ensure_ascii=False))

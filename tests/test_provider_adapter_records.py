@@ -614,10 +614,12 @@ def test_embedding_transport_failures(error, code) -> None:
 
 
 @pytest.mark.parametrize("status", [503, 300, 199])
-def test_embedding_http_error_records_only_the_status(status) -> None:
+def test_embedding_http_error_records_the_status_and_the_provider_code(status) -> None:
     error, _ = _embed((status, {"error": {"code": "busy"}}, {"x-request-id": " p "}))
     assert error.code == "upstream_http_error"
-    assert list(error.record.items()) == _failed_embed_record("upstream_http_error", provider_request_id=" p ", http_status=status)
+    assert list(error.record.items()) == _failed_embed_record(
+        "upstream_http_error", provider_request_id=" p ", http_status=status, provider_error_code="busy"
+    )
 
 
 def test_embedding_inputs_of_exactly_32kib_are_sent() -> None:

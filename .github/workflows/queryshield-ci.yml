@@ -221,6 +221,97 @@ jobs:
           fi
           echo "no MCP index directory after stop and start"
 
+      - name: Fake upstream - app in real mode against the OpenAI-compatible fake upstream, fake-supported demo questions
+        run: |
+          FAKE_UPSTREAM="-f compose.yaml -f compose.fake-upstream.yaml"
+          # The last step's "down -v" uses the other override and leaves this service and the project
+          # network behind (it still exits 0), so the service is removed here; on a failure its log is shown first.
+          trap 'status=$?; [ "$status" -eq 0 ] || docker compose $FAKE_UPSTREAM logs --no-color --tail 100 fake-upstream; docker compose $FAKE_UPSTREAM rm -sf fake-upstream; exit "$status"' EXIT
+          docker compose $FAKE_UPSTREAM up -d
+          for attempt in $(seq 1 60); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' "$(docker compose $FAKE_UPSTREAM ps -q app)" 2>/dev/null || true)" = "healthy" ] && break
+            [ "$attempt" = "60" ] && { echo "app did not become healthy" >&2; exit 1; }
+            sleep 2
+          done
+          docker compose $FAKE_UPSTREAM exec -T app python scripts/demo_run.py --mode fake-upstream --base-url http://127.0.0.1:8000 --evidence-dir /tmp/evidence-fake-upstream
+          docker compose $FAKE_UPSTREAM exec -T app cat /tmp/evidence-fake-upstream/demo-summary.json > "$RUNNER_TEMP/compose-evidence/demo-run-fake-upstream-summary.json"
+          grep -F '"qs-fake-upstream-v1"' "$RUNNER_TEMP/compose-evidence/demo-run-fake-upstream-summary.json"
+
+      - name: Model gateway - app reaches a fake gateway over an external network, the database stays off it
+        env:
+          QUERYSHIELD_GATEWAY_NETWORK: ci-model-gateway
+          QUERYSHIELD_GATEWAY_BASE_URL: http://ci-fake-gateway:8000/v1
+          QUERYSHIELD_MODEL_NAME: qs-fake-upstream-v1
+          QUERYSHIELD_EMBEDDING_MODEL_NAME: qs-fake-upstream-v1
+          QUERYSHIELD_EMBEDDING_MODEL_REVISION: qs-fake-upstream-v1
+          QUERYSHIELD_EMBEDDING_DIMENSIONS: "128"
+        run: |
+          GATEWAY="-f compose.yaml -f compose.model-gateway.yaml"
+          # The fake gateway never reads the key; a random one keeps literals out of this file.
+          QUERYSHIELD_MODEL_API_KEY="$(openssl rand -hex 16)"
+          echo "::add-mask::$QUERYSHIELD_MODEL_API_KEY"
+          export QUERYSHIELD_MODEL_API_KEY
+          cleanup() {
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              echo "--- fake gateway log ---"; docker logs --tail 100 ci-fake-gateway 2>&1 || true
+              echo "--- app log ---"; docker compose $GATEWAY logs --no-color --tail 100 app || true
+            fi
+            # app leaves the external network before it is removed; the next step's "down -v" removes the rest.
+            docker compose $GATEWAY rm -sf app || true
+            docker rm -f ci-fake-gateway || true
+            docker network rm "$QUERYSHIELD_GATEWAY_NETWORK" || true
+            exit "$status"
+          }
+          trap cleanup EXIT
+          wait_healthy() {
+            for attempt in $(seq 1 60); do
+              [ "$(docker inspect -f '{{.State.Health.Status}}' "$1" 2>/dev/null || true)" = "healthy" ] && return 0
+              sleep 2
+            done
+            echo "$1 did not become healthy" >&2
+            return 1
+          }
+          docker network create "$QUERYSHIELD_GATEWAY_NETWORK"
+          # The fake gateway: a second fake upstream, outside this Compose project, on the external network only.
+          docker run -d --name ci-fake-gateway --network "$QUERYSHIELD_GATEWAY_NETWORK" --read-only --tmpfs /tmp \
+            queryshield-app:local python scripts/fake_upstream.py --host 0.0.0.0 --port 8000
+          wait_healthy ci-fake-gateway
+          docker compose $GATEWAY up -d --no-deps app
+          app_id="$(docker compose $GATEWAY ps -q app)"
+          wait_healthy "$app_id"
+
+          # 1. This project's own fake upstream is not running, so the gateway is the only upstream app can reach.
+          [ -z "$(docker ps -q --filter label=com.docker.compose.project=queryshield --filter label=com.docker.compose.service=fake-upstream)" ]
+          # 2. On the external network: exactly app and the fake gateway; db and setup are not on it.
+          attached="$(docker network inspect -f '{{range $id, $c := .Containers}}{{$id}}{{"\n"}}{{end}}' "$QUERYSHIELD_GATEWAY_NETWORK" | awk NF | sort)"
+          expected="$(printf '%s\n' "$app_id" "$(docker inspect -f '{{.Id}}' ci-fake-gateway)" | sort)"
+          echo "attached to $QUERYSHIELD_GATEWAY_NETWORK:"; echo "$attached"
+          [ "$attached" = "$expected" ]
+          for service in db setup; do
+            id="$(docker compose $GATEWAY ps -aq "$service")"
+            if [ -z "$id" ] || echo "$attached" | grep -qx "$id"; then
+              echo "$service is missing or on $QUERYSHIELD_GATEWAY_NETWORK" >&2
+              exit 1
+            fi
+            echo "$service is not on $QUERYSHIELD_GATEWAY_NETWORK"
+          done
+          # 3. The fake-supported demo questions, with every model and embedding call through the gateway.
+          docker compose $GATEWAY exec -T app python scripts/demo_run.py --mode fake-upstream --base-url http://127.0.0.1:8000 --evidence-dir /tmp/evidence-model-gateway
+          docker compose $GATEWAY exec -T app cat /tmp/evidence-model-gateway/demo-summary.json > "$RUNNER_TEMP/compose-evidence/demo-run-model-gateway-summary.json"
+          grep -F '"qs-fake-upstream-v1"' "$RUNNER_TEMP/compose-evidence/demo-run-model-gateway-summary.json"
+          # 4. The gateway served chat and embedding calls from app's address on the external network.
+          app_ip="$(docker inspect -f "{{(index .NetworkSettings.Networks \"$QUERYSHIELD_GATEWAY_NETWORK\").IPAddress}}" "$app_id")"
+          echo "app on $QUERYSHIELD_GATEWAY_NETWORK: $app_ip"
+          for path in /v1/chat/completions /v1/embeddings; do
+            count="$(docker logs ci-fake-gateway 2>&1 | grep -F "$app_ip:" | grep -cF "\"POST $path HTTP")"
+            echo "fake gateway served $count POST $path from app"
+            [ "$count" -gt 0 ]
+          done
+          # 5. With the fake upstream behind a gateway (four files), only app and fake-upstream join the network.
+          docker compose -f compose.yaml -f compose.fake-upstream.yaml -f compose.model-gateway.yaml -f compose.fake-upstream-gateway.yaml config --format json \
+            | python3 -c 'import json, sys; services = json.load(sys.stdin)["services"]; joined = sorted(name for name, service in services.items() if "gateway" in (service.get("networks") or {})); print("on the gateway network:", joined); sys.exit(joined != ["app", "fake-upstream"])'
+
       - name: Show the service log when a step failed
         if: failure()
         run: |

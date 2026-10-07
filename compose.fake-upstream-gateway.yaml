@@ -1,0 +1,17 @@
+# The fake upstream behind a model gateway: fake-upstream joins the gateway's external network too,
+# so the gateway can use http://fake-upstream:8000/v1 as its upstream. Use it with the other three:
+#
+#   docker compose -f compose.yaml -f compose.fake-upstream.yaml \
+#       -f compose.model-gateway.yaml -f compose.fake-upstream-gateway.yaml up -d --build
+#
+# A separate file, so that compose.model-gateway.yaml alone works with a real gateway (it would
+# otherwise name a fake-upstream service that has no image).
+
+services:
+  fake-upstream:
+    networks: [default, gateway]
+
+networks:
+  gateway:
+    name: ${QUERYSHIELD_GATEWAY_NETWORK:?QUERYSHIELD_GATEWAY_NETWORK is not set - the external network shared with the gateway}
+    external: true

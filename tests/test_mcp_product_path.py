@@ -7,6 +7,7 @@ ending leaves no server process behind.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 import time
@@ -18,6 +19,7 @@ from queryshield.approval.service import shared_run_service
 from queryshield.knowledge.runtime import shared_retrieval_runtime
 from queryshield.mcp_metadata.launch import LaunchSpec, product_launch
 from queryshield.mcp_metadata.process import process_exists
+from queryshield.providers.fake_model import FakeModel
 from queryshield.tools.semantic import ControlledTools
 
 from mcp_helpers import config
@@ -215,6 +217,39 @@ def test_a_model_exception_after_the_session_opened_still_closes_it(mcp):
     _assert_sessions_closed(body["run_id"])
     types = [e["type"] for e in _events(body["run_id"])]
     assert types.index("metadata_session") < types.index("terminal")
+
+
+class _SearchesThenBreaksAfterTheResume(FakeModel):
+    """The Fake model until ``resumed``; then one search over MCP, then a failure."""
+
+    resumed = False
+    calls_after_resume = 0
+
+    def complete(self, messages, **kwargs):
+        result = super().complete(messages, **kwargs)
+        if not self.resumed:
+            return result
+        self.calls_after_resume += 1
+        if self.calls_after_resume == 1:
+            return replace(result, content=json.dumps({"type": "tool_call", "name": "search_catalog", "arguments": {"query": "净额"}}))
+        raise RuntimeError("the model failed after the resumed session opened")
+
+
+def test_a_failing_resume_still_records_and_closes_its_session(mcp):
+    model = _SearchesThenBreaksAfterTheResume()
+    app.dependency_overrides[get_model_provider] = lambda: model
+    body = ask(mcp, "销售额是多少").json()
+    assert body["status"] == "WAITING_USER"
+    before = _sessions(body["run_id"])
+    model.resumed = True
+
+    resumed = mcp.post(f"/runs/{body['run_id']}/resume", headers=auth(REQUESTER), json={"answer": "按支付订单总额，2026年7月"})
+
+    assert resumed.status_code == 502 and resumed.json()["error"]["code"] == "execution_failed"
+    assert model.calls_after_resume == 2, "the resumed run searched over MCP, then failed"
+    _assert_sessions_closed(body["run_id"], count=len(before) + 1)
+    types = [e["type"] for e in _events(body["run_id"])]
+    assert max(i for i, kind in enumerate(types) if kind == "metadata_session") < max(i for i, kind in enumerate(types) if kind == "terminal")
 
 
 def _wrong_snapshot(ctx, retriever, mode, cwd):

@@ -62,7 +62,7 @@ class _ScriptedModel:
         self.outputs = list(outputs)
         self.messages: list[tuple[Mapping[str, str], ...]] = []
 
-    def complete(self, messages, *, request_id=None, model_call_id=None) -> ModelCallResult:
+    def complete(self, messages, *, request_id=None, model_call_id=None, run_id=None) -> ModelCallResult:
         assert request_id and model_call_id
         self.messages.append(tuple(dict(message) for message in messages))
         content = self.outputs[len(self.messages) - 1]

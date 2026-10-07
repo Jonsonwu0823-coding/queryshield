@@ -307,7 +307,7 @@ class StateCaseFakeModel:
         self._search_issued = False
         self.has_initial_retrieval = bool(case.case["initial"].get("run_state", {}).get("retrieval_items", []))
 
-    def complete(self, messages, *, request_id=None, model_call_id=None):
+    def complete(self, messages, *, request_id=None, model_call_id=None, run_id=None):
         baseline = any(
             message.get("role") == "system"
             and str(message.get("content", "")).startswith("You are the W05 single-pass baseline")

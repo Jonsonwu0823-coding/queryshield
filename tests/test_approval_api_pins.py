@@ -948,7 +948,9 @@ def test_an_approved_query_that_fails_ends_the_run_with_the_error_code(service, 
     assert svc.store.get_approval(run["approval_id"])["status"] == "APPROVED"
 
 
-def test_an_unexpected_error_in_an_approved_query_leaves_the_run_waiting(service, monkeypatch) -> None:
+def test_an_unexpected_error_in_an_approved_query_ends_the_run(service, monkeypatch) -> None:
+    """The approval is consumed before the query runs, so the run must not stay waiting for a replay."""
+
     svc, executor = service
     run = _pending(service)
 
@@ -956,9 +958,9 @@ def test_an_unexpected_error_in_an_approved_query_leaves_the_run_waiting(service
         raise RuntimeError("boom")
 
     monkeypatch.setattr(executor, "execute", failing)
-    with pytest.raises(RuntimeError):
-        _approve(service, run)
-    assert svc.store.get_run(run["run_id"])["status"] == "WAITING_APPROVAL"
+    done = _approve(service, run)
+    assert (done["status"], done["error_code"], done["sql_exec_count"]) == ("FAILED", "execution_failed", 0)
+    assert svc.store.get_run(run["run_id"])["status"] == "FAILED"
     assert svc.store.get_approval(run["approval_id"])["status"] == "APPROVED"
     assert svc._active_count() == 0
 

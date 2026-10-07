@@ -109,6 +109,91 @@ docker compose up -d --build
 
 真实模型的行为问题（例如自己定月份、被退回一次才答对）按已知缺口记录，不当作服务端失败；判定口径与 HTTP 冒烟一致。
 
+### 用假上游跑 OpenAI 兼容的路径
+
+`scripts/fake_upstream.py` 把确定性的 Fake 模型和 Fake 嵌入包成一个 OpenAI 兼容的服务（假上游）：`POST /v1/chat/completions`（JSON 协议和原生 function calling 都支持，非流式）、`POST /v1/embeddings`、`GET /health`。服务端用 Real 模式、真实的适配器经 HTTP 调它，整条 OpenAI 兼容的路径都走到了，但不花钱、结果可重复，也不需要任何密钥。它只是测试替身，不在 `src/` 里。
+
+Real 适配器指向假上游时，Agent 每一步的决定、执行的 SQL、事实、回答、追问和审批都与进程内的 Fake 相同（`tests/test_fake_upstream_equivalence.py` 逐项比对，JSON、原生两种协议）。
+
+用 Compose 起（`compose.fake-upstream.yaml` 加一个不发布端口的 `fake-upstream` 服务，`app` 改用 Real 模式指向它；`not-a-real-key` 是占位值，假上游不读 key）：
+
+```bash
+docker compose -f compose.yaml -f compose.fake-upstream.yaml up -d --build
+docker compose -f compose.yaml -f compose.fake-upstream.yaml exec app python scripts/demo_run.py --mode fake-upstream --base-url http://127.0.0.1:8000 --evidence-dir /tmp/demo-run
+docker compose up -d --remove-orphans   # 回到默认的进程内 Fake，并删掉 fake-upstream 容器
+```
+
+不用 Compose，在本机起（Bash；PowerShell 用 `$env:名字='值'` 设同样的变量）：
+
+```bash
+python scripts/fake_upstream.py --host 127.0.0.1 --port 8090 &
+export QUERYSHIELD_MODEL_BASE_URL=http://127.0.0.1:8090/v1 QUERYSHIELD_EMBEDDING_BASE_URL=http://127.0.0.1:8090/v1
+export QUERYSHIELD_MODEL_NAME=qs-fake-upstream-v1 QUERYSHIELD_EMBEDDING_MODEL_NAME=qs-fake-upstream-v1 \
+       QUERYSHIELD_EMBEDDING_MODEL_REVISION=qs-fake-upstream-v1 QUERYSHIELD_EMBEDDING_DIMENSIONS=128
+export QUERYSHIELD_MODEL_API_KEY=not-a-real-key QUERYSHIELD_EMBEDDING_API_KEY=not-a-real-key
+python scripts/http_smoke.py --mode fake-upstream --evidence-dir /tmp/smoke          # 测试库
+python scripts/demo_run.py --mode fake-upstream --evidence-dir /tmp/demo-run         # 演示库（docs/demo-data.md）
+```
+
+**经假上游的结果不是真实模型的结果。** 每个响应的 `model` 字段和 `X-Fake-Upstream` 响应头都是 `qs-fake-upstream-v1`，服务端把这个模型名记进每次模型调用的记录。脚本按记下的名字判断：
+
+- `--mode fake-upstream`：服务端用 Real 模式；开跑前要求两个模型名都是 `qs-fake-upstream-v1`（否则 blocked，误指向真实服务时，对方也不认这个名字）；演示只跑 Fake 能回答的题；摘要写 `mode: "fake-upstream"` 和 `model_names`，记到别的模型名就是硬失败。
+- `--mode real`：摘要也写 `model_names`；记到 `qs-fake-upstream-v1`（或嵌入的配置名是这个名字）就是硬失败 `fake_upstream_in_real_mode`。`scripts/check_eval.py` 的 real 路径同样判失败，它还读建索引时嵌入服务实际返回的模型名。
+- 已知限制：嵌入的调用记录写响应里的模型名（没有时写配置名），但服务端不按 run 存嵌入的模型名，所以冒烟和演示仍按**配置名**认嵌入：只把嵌入误指到假上游、配置名又是真实名字时，这两个脚本认不出来（`check_eval.py` 认得出）。
+- `--mode fake`：与以前完全相同。
+
+**用量规则**（固定，供模型网关结算演示；不近似任何真实分词器）：每段文字的 UTF-8 字节数除以 4、向上取整，每段单独算再相加。`prompt_tokens` 是每条消息的内容，带 `tools` 时再加 `tools` 的紧凑 JSON；`completion_tokens` 是回复文字，或函数名加参数；`total_tokens` 是两者之和。嵌入的 `prompt_tokens` 和 `total_tokens` 都是每条输入之和。每个响应有新的 `id`（同一请求发两次也不重复）和 `x-request-id`。嵌入只有 128 维，请求别的维度返回 400。
+
+**与进程内 Fake 的已知不同**（只有这些）：
+
+| 位置 | 进程内 Fake | 经假上游 |
+|---|---|---|
+| 模型调用记录的 `provider`、`model` | `fake`、`fake-model` | `openai_compatible`、`qs-fake-upstream-v1` |
+| 上游调用号、请求号 | 空 | `fake-chatcmpl-…`、`fake-req-…` |
+| 用量 | 未知 | 按上面的规则算出的数（结果和演示摘要里的用量跟着变） |
+| run 的 `mode` | `fake` | `real` |
+| 嵌入记录、嵌入后的知识快照号 | Fake 嵌入的名字 | 假上游的名字（模型名进了索引哈希；来源、排序、分数都相同） |
+| 脚本摘要 | `mode: "fake"` | `mode: "fake-upstream"`，多一个 `model_names` |
+
+### 经模型网关调用模型
+
+模型网关是一个 OpenAI 兼容的服务（管额度、限流和记账），跑在它自己的 Compose 项目里，要转发 `tools` 和 `tool_calls`，并原样返回上游的 `model`（否则认不出假上游）。两个项目经一个**外部 Docker 网络**互通，只有 `app`（和下面的 `fake-upstream`）接入它：Docker 在网络上按服务名解析，数据库这类服务接进去，可能被对方的同名服务顶替。
+
+在当前 shell 里设置（都必须设置，没有默认值；网络名和地址与网关那边约定，key 由网关发）：
+
+```bash
+export QUERYSHIELD_GATEWAY_NETWORK='<共用网络名>'
+export QUERYSHIELD_GATEWAY_BASE_URL='http://<网关在网络上的地址>/v1'
+read -rs QUERYSHIELD_MODEL_API_KEY; export QUERYSHIELD_MODEL_API_KEY     # 聊天和嵌入共用这一个 key
+export QUERYSHIELD_MODEL_NAME=… QUERYSHIELD_EMBEDDING_MODEL_NAME=… \
+       QUERYSHIELD_EMBEDDING_MODEL_REVISION=… QUERYSHIELD_EMBEDDING_DIMENSIONS=…   # 与网关上配置的模型一致
+docker network inspect "$QUERYSHIELD_GATEWAY_NETWORK" >/dev/null 2>&1 || docker network create "$QUERYSHIELD_GATEWAY_NETWORK"
+```
+
+只接网关（网关后面是真实模型）：
+
+```bash
+docker compose -f compose.yaml -f compose.model-gateway.yaml up -d --build
+```
+
+网关后面接本项目的假上游（联调、CI 都这样用；网关的上游地址配成 `http://fake-upstream:8000/v1`，两个模型名都是 `qs-fake-upstream-v1`）：
+
+```bash
+docker compose -f compose.yaml -f compose.fake-upstream.yaml -f compose.model-gateway.yaml -f compose.fake-upstream-gateway.yaml up -d --build
+```
+
+**文件顺序不能换**：`compose.model-gateway.yaml` 必须放在 `compose.fake-upstream.yaml` 后面。后面的文件覆盖前面的，顺序反了，`app` 的两个地址会被假上游那个文件改回 `http://fake-upstream:8000/v1`，直接连假上游、绕过网关，而且不会报错。
+
+- `compose.model-gateway.yaml` 只改 `app`：接入外部网络、`QUERYSHIELD_PROVIDER_MODE=real`、两个地址都是 `QUERYSHIELD_GATEWAY_BASE_URL`、两个 key 都是 `QUERYSHIELD_MODEL_API_KEY`。`compose.fake-upstream-gateway.yaml` 只让 `fake-upstream` 也接入这个网络；单独接真实网关时不用它，也不用假上游的文件。
+- 哪个变量没设，Compose 就停下并报出它的名字；不向本机发布新端口。
+- 回到默认的进程内 Fake：`docker compose up -d --remove-orphans`。
+- rerank 不经网关（产品路径建检索时不用 rerank）。服务端每次模型调用默认 15 秒超时（嵌入 30 秒），网关的上游超时要更短；适配器不重试，也不读 `Retry-After`。
+- CI 的 `compose` 任务在一个外部网络上起一个“假网关”（第二个假上游容器，不在本项目里），`app` 经 `compose.model-gateway.yaml` 指向它跑演示题，并检查网络上只有 `app` 和假网关、`db` 和 `setup` 不在。
+
+**每次调用带上 run 编号。** run 里的每次聊天调用（B0；B1 的 JSON 和原生协议；追问后恢复；评测的运行）和查询嵌入，都带请求头 `X-Run-Id: <run 编号>`，值就是 run 编号本身（产品里是 `run-` 加 UUID），网关可以按 run 汇总用量。run 之外的调用（启动后第一次检索时建知识索引、`scripts/model_probe.py` 这类探针）不带。审批后继续只执行被批准的 SQL，不调模型。`X-Client-Request-Id` 照旧是每次调用一个新值。
+
+**额度用完、被限流。** 网关返回 HTTP 429、错误码（`error.code`，没有时读顶层 `code`）是 `quota_exhausted` 或 `rate_limited` 时，run 以 FAILED 结束，错误码分别是 `model_quota_exhausted`、`model_rate_limited`，HTTP 码都是 503：这是本服务在网关那边的账户状态，不是最终用户请求太多。别的 429（别的提供方自己的错误码）和其它状态码照旧是 `upstream_http_error`（502）。同步 `/queries`、追问后恢复、B0、B1 都按这张表。失败的调用记录保留 `http_status` 和 `provider_error_code`，不记错误消息原文。开了 MCP 元数据工具（`QUERYSHIELD_METADATA_TOOLS=mcp`）时，查询嵌入在子进程里做，它的上游失败照旧是 `mcp_unavailable`（同样是 503）。
+
 ## 4. 检查与 CI
 
 本机和 CI 用同一个入口 `scripts/check-all.ps1`（PowerShell 5.1 或 7；Linux 上用 `pwsh`）：

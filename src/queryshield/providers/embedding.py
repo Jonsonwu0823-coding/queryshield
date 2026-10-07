@@ -19,7 +19,14 @@ from typing import Any, Literal
 import httpx
 
 from queryshield.providers.contracts import finite_float, new_local_call_id, new_request_id
-from queryshield.providers.http import base_url_is_valid, endpoint_url, json_headers, post_json
+from queryshield.providers.http import (
+    base_url_is_valid,
+    endpoint_url,
+    http_error_codes,
+    json_headers,
+    post_json,
+    response_model,
+)
 
 
 EmbeddingMode = Literal["fake", "real"]
@@ -283,6 +290,7 @@ class FixedEmbedding:
         *,
         request_id: str | None = None,
         model_call_id: str | None = None,
+        run_id: str | None = None,
     ) -> EmbeddingCallResult:
         normalized = _normalize_inputs(inputs)
         missing = [value for value in normalized if value not in self._vectors]
@@ -358,6 +366,7 @@ class OpenAICompatibleEmbedding:
         *,
         request_id: str | None = None,
         model_call_id: str | None = None,
+        run_id: str | None = None,
     ) -> EmbeddingCallResult:
         normalized = _normalize_inputs(inputs)
         local_request_id = request_id or new_request_id()
@@ -371,7 +380,7 @@ class OpenAICompatibleEmbedding:
             "input": list(normalized),
             "dimensions": self.config.dimensions,
         }
-        headers = json_headers(self.config.api_key, local_request_id)
+        headers = json_headers(self.config.api_key, local_request_id, run_id)
         try:
             response = post_json(self._client, self.config.endpoint, payload, headers, self.config.timeout_seconds)
         except httpx.TimeoutException as exc:
@@ -381,7 +390,13 @@ class OpenAICompatibleEmbedding:
 
         provider_request_id = response.headers.get("x-request-id") or None
         if response.status_code < 200 or response.status_code >= 300:
-            raise fail("upstream_http_error", provider_request_id=provider_request_id, http_status=response.status_code)
+            code, provider_error_code = http_error_codes(response)
+            raise fail(
+                code,
+                provider_request_id=provider_request_id,
+                http_status=response.status_code,
+                provider_error_code=provider_error_code,
+            )
         try:
             body = response.json()
             provider_call_id, vectors, total_tokens = _parse_embedding_response(
@@ -392,8 +407,9 @@ class OpenAICompatibleEmbedding:
         except (ValueError, TypeError) as exc:
             raise fail(getattr(exc, "code", "invalid_response"), provider_request_id=provider_request_id) from exc
 
+        model = response_model(body, self.config.model)
         usage = _operation_usage(
-            model=self.config.model,
+            model=model,
             model_revision=self.config.model_revision,
             model_call_id=server_call_id,
             provider_call_id=provider_call_id,
@@ -404,7 +420,7 @@ class OpenAICompatibleEmbedding:
         return EmbeddingCallResult(
             mode="real",
             provider=self.provider,
-            model=self.config.model,
+            model=model,
             model_revision=self.config.model_revision,
             request_id=local_request_id,
             model_call_id=server_call_id,
@@ -477,6 +493,7 @@ def _failed_record(
     *,
     provider_request_id: str | None = None,
     http_status: int | None = None,
+    provider_error_code: str | None = None,
 ) -> dict[str, object]:
     record: dict[str, object] = {
         "status": "failed",
@@ -495,6 +512,8 @@ def _failed_record(
     }
     if http_status is not None:
         record["http_status"] = http_status
+    if provider_error_code is not None:
+        record["provider_error_code"] = provider_error_code
     return record
 
 

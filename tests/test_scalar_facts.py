@@ -255,7 +255,7 @@ class _Steps:
         self.steps = steps
         self.calls = 0
 
-    def complete(self, messages, *, request_id=None, model_call_id=None):
+    def complete(self, messages, *, request_id=None, model_call_id=None, run_id=None):
         step = self.steps[min(self.calls, len(self.steps) - 1)]
         self.calls += 1
         return ModelCallResult(

@@ -104,13 +104,14 @@ class HashFeatureEmbedding(FixedEmbedding):
         *,
         request_id: str | None = None,
         model_call_id: str | None = None,
+        run_id: str | None = None,
     ) -> EmbeddingCallResult:
         normalized = _normalize_inputs(inputs)
         with self._register_lock:
             for value in normalized:
                 if value not in self._vectors:
                     self._vectors[value] = feature_vector(value, dimensions=self.dimensions)
-            return super().embed(inputs, request_id=request_id, model_call_id=model_call_id)
+            return super().embed(inputs, request_id=request_id, model_call_id=model_call_id, run_id=run_id)
 
 
 @dataclass(frozen=True)

@@ -109,7 +109,7 @@ class _Scripted:
         self.steps = list(steps)
         self.messages: list[list[dict[str, str]]] = []
 
-    def complete(self, messages, *, request_id=None, model_call_id=None):
+    def complete(self, messages, *, request_id=None, model_call_id=None, run_id=None):
         self.messages.append([dict(message) for message in messages])
         step = self.steps[len(self.messages) - 1]
         action = step(messages) if callable(step) else step

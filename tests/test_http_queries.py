@@ -76,7 +76,7 @@ class Scripted:
         self.calls = 0
         self.messages = []
 
-    def complete(self, messages, *, request_id=None, model_call_id=None):
+    def complete(self, messages, *, request_id=None, model_call_id=None, run_id=None):
         self.messages.append([dict(message) for message in messages])
         content = self.outputs[min(self.calls, len(self.outputs) - 1)]
         self.calls += 1
@@ -282,7 +282,7 @@ def test_sync_parse_error_uses_the_single_repair(env) -> None:
     )
     model = Scripted([good.replace('"type":"tool_call"', '"type":"query_readonly"', 1), good, "FINAL"])
 
-    def complete_with_final(messages, *, request_id=None, model_call_id=None):
+    def complete_with_final(messages, *, request_id=None, model_call_id=None, run_id=None):
         if model.calls == 2:
             result_id = next(
                 json.loads(message["content"].split("\n", 1)[1])["output"]["result_id"]
@@ -294,7 +294,7 @@ def test_sync_parse_error_uses_the_single_repair(env) -> None:
                 "type": "final_answer", "answer": "ok", "source_ids": [],
                 "fact_refs": [{"result_id": result_id, "metric_id": "gross_fen"}],
             })
-        return Scripted.complete(model, messages, request_id=request_id, model_call_id=model_call_id)
+        return Scripted.complete(model, messages, request_id=request_id, model_call_id=model_call_id, run_id=run_id)
 
     model.complete = complete_with_final
     app.dependency_overrides[get_model_provider] = lambda: model

@@ -121,6 +121,10 @@ FAILED_ERROR_HTTP: Mapping[str, int] = {
     "approval_permission_unavailable": 503,
     # The product knowledge base could not be loaded (not a permission problem).
     "knowledge_unavailable": 503,
+    # A model gateway's quota or rate limit for this service's account: the service is
+    # temporarily unavailable, not the end user sending too much, so not 429.
+    "model_quota_exhausted": 503,
+    "model_rate_limited": 503,
     "upstream_timeout": 504,
     "query_timeout": 504,
     "result_row_limit": 422,
@@ -441,7 +445,7 @@ def run_b0_single_pass(
 
     # 2. Call the model once.
     try:
-        call = model.complete(messages, request_id=request_id, model_call_id=model_call_id)
+        call = model.complete(messages, request_id=request_id, model_call_id=model_call_id, run_id=context.run_id)
     except ModelProviderError as exc:
         usage = {"usage_status": "unknown", "prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
         status = "timeout" if exc.code == "upstream_timeout" else "failed"

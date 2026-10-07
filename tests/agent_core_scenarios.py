@@ -104,7 +104,7 @@ class ErrorModel:
 
     mode = "fake"
 
-    def complete(self, messages, *, request_id=None, model_call_id=None):
+    def complete(self, messages, *, request_id=None, model_call_id=None, run_id=None):
         raise ModelProviderError(
             "upstream_timeout",
             {"status": "failed", "provider": "scripted", "usage": None, "usage_status": "unknown", "http_status": 504},
@@ -121,7 +121,7 @@ class UsageModel:
         self.usages = list(usages)
         self.calls = 0
 
-    def complete(self, messages, *, request_id=None, model_call_id=None):
+    def complete(self, messages, *, request_id=None, model_call_id=None, run_id=None):
         index = self.calls
         self.calls += 1
         step = self.steps[index]

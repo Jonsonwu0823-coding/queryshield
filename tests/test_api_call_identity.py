@@ -271,7 +271,7 @@ class _FailingModel:
     def __init__(self, code: str) -> None:
         self.code = code
 
-    def complete(self, messages, *, request_id=None, model_call_id=None):
+    def complete(self, messages, *, request_id=None, model_call_id=None, run_id=None):
         raise ModelProviderError(
             self.code,
             {"status": "failed", "mode": "real", "provider": "scripted", "usage": None, "usage_status": "unknown", "error_code": self.code},

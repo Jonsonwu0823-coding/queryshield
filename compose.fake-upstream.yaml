@@ -1,0 +1,40 @@
+# The OpenAI-compatible path without a paid model: the Real adapters against the fake upstream
+# (scripts/fake_upstream.py, the deterministic Fake model and Fake embedding behind HTTP).
+#
+#   docker compose -f compose.yaml -f compose.fake-upstream.yaml up -d --build
+#   docker compose -f compose.yaml -f compose.fake-upstream.yaml exec app \
+#       python scripts/demo_run.py --mode fake-upstream --base-url http://127.0.0.1:8000 --evidence-dir /tmp/demo-run
+#
+# Results through it are never real-model evidence: the fake upstream names itself
+# qs-fake-upstream-v1 in every response, and the demo and smoke scripts check that name.
+# not-a-real-key is a placeholder, not a credential: the fake upstream never reads the key.
+# docs/operations.md describes how to put a model gateway between app and the fake upstream.
+
+services:
+  fake-upstream:
+    # The service image: it copies scripts/fake_upstream.py.
+    build:
+      context: .
+    image: queryshield-app:local
+    command: ["python", "scripts/fake_upstream.py", "--host", "0.0.0.0", "--port", "8000"]
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    # No "ports": only the other services reach it. The image's health check probes :8000/health.
+
+  app:
+    depends_on:
+      fake-upstream:
+        condition: service_healthy
+    environment:
+      QUERYSHIELD_PROVIDER_MODE: real
+      QUERYSHIELD_MODEL_BASE_URL: http://fake-upstream:8000/v1
+      QUERYSHIELD_MODEL_API_KEY: not-a-real-key
+      QUERYSHIELD_MODEL_NAME: qs-fake-upstream-v1
+      QUERYSHIELD_EMBEDDING_BASE_URL: http://fake-upstream:8000/v1
+      QUERYSHIELD_EMBEDDING_API_KEY: not-a-real-key
+      QUERYSHIELD_EMBEDDING_MODEL_NAME: qs-fake-upstream-v1
+      QUERYSHIELD_EMBEDDING_MODEL_REVISION: qs-fake-upstream-v1
+      QUERYSHIELD_EMBEDDING_DIMENSIONS: "128"

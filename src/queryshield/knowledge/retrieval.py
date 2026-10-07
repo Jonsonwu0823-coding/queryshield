@@ -429,6 +429,7 @@ class HybridRetriever:
             (query,),
             request_id=f"{retrieval_id}-request",
             model_call_id=f"{retrieval_id}-embedding",
+            run_id=context.run_id,
         )
         vector_ids = _rank_vector(candidates, self.index, embedding.vectors[0])
         ranking = _rrf_ranking(keyword_ids, vector_ids, keyword_scores=dict(keyword_scored))

@@ -97,7 +97,7 @@ class _Scripted:
         self.outputs = list(outputs)
         self.messages = []
 
-    def complete(self, messages, *, request_id=None, model_call_id=None):
+    def complete(self, messages, *, request_id=None, model_call_id=None, run_id=None):
         self.messages.append([dict(message) for message in messages])
         return ModelCallResult(
             mode="fake",
