@@ -58,7 +58,10 @@ from queryshield.facts.persisted import validate_persisted_run_result
 
 @asynccontextmanager
 async def _application_lifespan(application: FastAPI):
-    application.state.parallel_recovery = shared_run_service().recover_parallel_groups()
+    service = shared_run_service()
+    application.state.parallel_recovery = service.recover_parallel_groups()
+    # After the parallel groups, whose runs end by their own rule.
+    application.state.interrupted_runs = service.end_interrupted_runs()
     yield
     # The MCP index directory holds chunk text for every identity: remove it on a normal stop.
     from queryshield.mcp_metadata.launch import cleanup_index_dir

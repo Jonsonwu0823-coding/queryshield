@@ -84,12 +84,13 @@ HTTP 接口都在 `src/queryshield/api/main.py`：
   - 执行先结束：取消不写任何东西，返回结束时的 run。
   - 取消先于执行方的最终写入到达（哪怕已经过了提交开头的检查）：取消返回 202，run 以 `CANCELLED` 结束，`CANCEL_REQUESTED` 的事件在终止事件前面。
   - 执行先停下来等待（恢复后又追问一次，首次执行停在等审批）：按等待中的 run 取消（200 `CANCELLED`，一条终止事件）。
+  - 启动时结束进程退出留下的 run（见“容量与取消”）也用它：转不成就重读一次再判断。
   - 取消的写入没成功（读和写之间状态变了），就按 run 现在的状态重新判断一次。
   - 拒绝先到：取消不写任何东西，返回 `DENIED`。
-- **容量与取消。** 同时活跃的 run 最多 2 个（`MAX_ACTIVE_RUNS`），只算首次执行；追问后恢复和审批后执行不算在内，它们各由一把服务级的锁串行，同一时刻最多各一个。取消运行中的 run（首次执行、恢复、审批后执行）只记“请求取消”，等执行真正退出后再落终态；等待中的 run 直接变成 `CANCELLED`。提交开头检查一次取消（取消了就不必再算结果），但以最终写入为准：只要取消在最终写入之前到达（返回了 202），run 就以 `CANCELLED` 结束；结果本来是等待（追问、等审批）时也一样，不建审批记录。恢复和审批后执行开始时清掉取消标记，从干净的状态开始。进程在执行中退出会留下 `RUNNING`，启动时不扫描；恢复和审批后执行也一样。
+- **容量与取消。** 同时活跃的 run 最多 2 个（`MAX_ACTIVE_RUNS`），只算首次执行；追问后恢复和审批后执行不算在内，它们各由一把服务级的锁串行，同一时刻最多各一个。取消运行中的 run（首次执行、恢复、审批后执行）只记“请求取消”，等执行真正退出后再落终态；等待中的 run 直接变成 `CANCELLED`。提交开头检查一次取消（取消了就不必再算结果），但以最终写入为准：只要取消在最终写入之前到达（返回了 202），run 就以 `CANCELLED` 结束；结果本来是等待（追问、等审批）时也一样，不建审批记录。恢复和审批后执行开始时清掉取消标记，从干净的状态开始。进程在执行中退出（崩溃、被杀、容器重启）后，没人再结束这次执行：应用启动时，在并行分支组的收尾之后，`RunService.end_interrupted_runs` 把状态库里本进程没有在执行的 `RUNNING` 改成 `FAILED`（错误码 `execution_interrupted`，按默认规则 502），`CANCEL_REQUESTED` 改成 `CANCELLED`（和执行方按取消结束写同样的两条事件）；首次执行、恢复、审批后执行都一样，等待中和已结束的 run 不动。计数保留中断前存下的值（首次执行是 0），用量记 `unknown`：调用可能已经发出、还没写进事件。“本进程在执行”靠一张进程级的登记表：run 变成 `RUNNING` 之前登记，最终写入之后在 `finally` 里注销；收尾期间持有它的锁。
 - **步骤随执行写入。** 有界 Agent 用 LangGraph 的 `stream` 跑图，每个节点完成后，运行服务把这一步新产生的事件写进事件表（类型 `agent_step`，payload 是整个事件），每条只写一次；提交时只写还没写的（不经过图的结果，例如点名外租户的拒绝）。事件表里的顺序是 `accepted`、`step_started`、各步骤、（MCP 设置下的 `metadata_session`）、`waiting` 或终止事件。执行中途抛异常时，已写入的步骤留在表里，计数和用量取最后一个已写完的步骤的 Agent 状态；运行服务给模型包一层计数，这次执行调模型的次数多于写进去的 `model_call` 条数时（调用发出了，但它所在的节点没完成），用量记 `unknown`。
 - **事件流（SSE）。** `GET /runs/{id}/events` 推事件表里的事件，每帧 `id`、`event` 和一行 `data`：`event_id`、`run_id`、`type`、`status`、`occurred_at`，有结果时加 `result_id`。`agent_step` 帧另带 `step`，只从事件里挑这些字段（有才带）：`kind`、`status`、`error_code`、`tool_name`、`elapsed_ms`（工具调用的耗时）、`model`、`usage_status`、`prompt_tokens`、`completion_tokens`、`total_tokens`；不带模型原文、提示词、SQL、参数、检索词、行数据和各种编号、哈希、版本。模型调用的事件没有耗时字段，耗时可以看相邻帧的 `occurred_at`。其它类型的帧不带 `step`。同租户的审批人在 `WAITING_APPROVAL` 时也能连这个流，看到的是同样的摘要。
-- **恢复。** 应用启动时，`recover_parallel_groups` 扫描状态库里的并行分支组：全部已提交的复用结果，状态不确定的标 `FAILED/recovery_required`，不重跑 SQL（`src/queryshield/agent/parallel_durable.py` 的 `recover_on_startup`）。
+- **恢复。** 应用启动时，`recover_parallel_groups` 扫描状态库里的并行分支组：全部已提交的复用结果，状态不确定的标 `FAILED/recovery_required`，不重跑 SQL（`src/queryshield/agent/parallel_durable.py` 的 `recover_on_startup`）。然后 `end_interrupted_runs` 结束其余还在执行的 run（见“容量与取消”），摘要放在 `app.state.interrupted_runs`，不重跑任何东西。
 
 ### 有界 Agent
 
@@ -241,8 +242,9 @@ sequenceDiagram
 | 提交检查之后、最终写入之前才到的取消 | 202 `CANCEL_REQUESTED`，run 以 `CANCELLED` 结束，只有一条终止事件；结果本来是等待时也一样，不建审批记录 |
 | 取消读到 `RUNNING` 之后，执行正好停下来等待 | 200 `CANCELLED`，一条终止事件；之后的恢复或审批 409 `invalid_run_state` |
 | 取消读到 `RUNNING` 之后，执行正好结束 | 200，返回结束时的 run，不写任何东西 |
+| 进程在执行中退出、重启之后 | `GET` 200：原来 `RUNNING` 的是 `FAILED`（`execution_interrupted`），原来 `CANCEL_REQUESTED` 的是 `CANCELLED`；`usage_total` 是 `unknown`；事件流推到终止事件就结束；取消 200，返回这个 run，不写；恢复 409 `invalid_run_state`；审批按已有规则：审批后执行被中断的是已消费审批的回放（`FAILED` 502 `execution_interrupted`，`CANCELLED` 200，审批记录仍是 `APPROVED`），没有这条审批的 404 `approval_not_found`；都不调模型、不跑 SQL |
 
-2026-10 之前，恢复和审批后执行期间 run 一直停在等待状态（`WAITING_USER` / `WAITING_APPROVAL`），显示暂停时的合计；这时取消会立刻落 `CANCELLED`，执行跑完再写第二条终止事件、更新计数，甚至把终态改回 `SUCCEEDED`；恢复的提交出错返回 409、run 留在 `WAITING_USER`。后来一段时间里，提交检查之后才到的取消会丢失，run 按执行的结果结束；暂停前跑过查询的 run，恢复后的回答一定核对失败。
+2026-10 之前，恢复和审批后执行期间 run 一直停在等待状态（`WAITING_USER` / `WAITING_APPROVAL`），显示暂停时的合计；这时取消会立刻落 `CANCELLED`，执行跑完再写第二条终止事件、更新计数，甚至把终态改回 `SUCCEEDED`；恢复的提交出错返回 409、run 留在 `WAITING_USER`。后来一段时间里，提交检查之后才到的取消会丢失，run 按执行的结果结束；暂停前跑过查询的 run，恢复后的回答一定核对失败；进程在执行中退出留下的 run 永远停在 `RUNNING` 或 `CANCEL_REQUESTED`，事件流不结束。
 
 ## 设计取舍
 

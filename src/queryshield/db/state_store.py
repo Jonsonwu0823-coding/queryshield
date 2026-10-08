@@ -261,6 +261,16 @@ class StateStore:
             ).fetchone()
         return _run_from_row(row) if row is not None else None
 
+    def run_ids_with_status(self, *statuses: str) -> tuple[str, ...]:
+        """The runs in any of ``statuses``, oldest first (startup ends the ones a process exit left executing)."""
+
+        placeholders = ", ".join("?" for _ in statuses)
+        with self._lock:
+            rows = self._connection.execute(
+                f"SELECT run_id FROM runs WHERE status IN ({placeholders}) ORDER BY created_at, run_id", statuses
+            ).fetchall()
+        return tuple(str(row[0]) for row in rows)
+
     def update_run(self, run_id: str, **fields: object) -> dict[str, object]:
         allowed = {
             "status", "action_json", "approval_id", "result_json", "facts_json",

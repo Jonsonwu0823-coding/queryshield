@@ -8,12 +8,15 @@ verified query a WAITING_APPROVAL run is bound to.  Both run as RUNNING, like a
 first execution.  Every write that moves a run out of a waiting state, RUNNING or
 CANCEL_REQUESTED (to start, cancel, deny, or end an execution) is conditional
 (``StateStore.transition_run``), so a cancel and a start or an end that overlap
-leave one terminal event, stored last.
+leave one terminal event, stored last.  At startup, the runs a process exit left
+executing are ended the same way (``RunService.end_interrupted_runs``).
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -78,6 +81,8 @@ SENSITIVE_PERMISSION_SOURCE_ID = "semantic-sensitive-customer-name"
 APPROVAL_PERMISSION_UNAVAILABLE_CODE = "approval_permission_unavailable"
 # The product knowledge base could not be loaded: a different cause from a missing permission source.
 KNOWLEDGE_UNAVAILABLE_CODE = "knowledge_unavailable"
+# The process exited while the run executed; the next startup ended it.
+INTERRUPTED_CODE = "execution_interrupted"
 APPROVAL_ACTION_KIND = "query_readonly"
 
 
@@ -254,6 +259,35 @@ def reset_shared_state_stores() -> None:
 
 TERMINAL_STATUSES = frozenset({"SUCCEEDED", "DENIED", "FAILED", "LIMIT_REACHED", "CANCELLED", "USAGE_UNKNOWN"})
 
+# The runs executing in this process, whichever service runs them: startup ends only the others.
+# A run is registered before it can become RUNNING and unregistered in ``finally`` after its
+# final write.  Counted, so a refused resume or approval of a run that is executing does not
+# unregister it.  Lock order: a service lock (resume, approval), then this one, then the
+# store's; this one is never taken while the store's is held.
+_EXECUTING: Counter[str] = Counter()
+_EXECUTING_LOCK = Lock()
+
+
+def _register(run_id: str) -> None:
+    with _EXECUTING_LOCK:
+        _EXECUTING[run_id] += 1
+
+
+def _unregister(run_id: str) -> None:
+    with _EXECUTING_LOCK:
+        _EXECUTING[run_id] -= 1
+        if _EXECUTING[run_id] <= 0:
+            del _EXECUTING[run_id]
+
+
+@contextmanager
+def _executing(run_id: str):
+    _register(run_id)
+    try:
+        yield
+    finally:
+        _unregister(run_id)
+
 
 class RunService:
     """Application-facing durable workflow service over the product runtime."""
@@ -296,6 +330,43 @@ class RunService:
         from queryshield.agent.parallel_durable import DurableParallelScheduler
 
         return DurableParallelScheduler(state=self.store).recover_on_startup()
+
+    def end_interrupted_runs(self) -> dict[str, list[str]]:
+        """At startup, after the parallel groups: end the runs a process exit left executing.
+
+        A RUNNING or CANCEL_REQUESTED run that no execution of this process registered has
+        nobody left to end it.  RUNNING ends FAILED (``execution_interrupted``),
+        CANCEL_REQUESTED ends CANCELLED as an execution asked to cancel does.  Each move is
+        conditional; the counts stay as stored and the usage is unknown (a call may have been
+        sent without its event).  The registry is held for the whole scan, so no execution of
+        this process starts meanwhile.
+        """
+
+        ended: dict[str, list[str]] = {"failed": [], "cancelled": []}
+        with _EXECUTING_LOCK:
+            for run_id in self.store.run_ids_with_status("RUNNING", "CANCEL_REQUESTED"):
+                status = None if run_id in _EXECUTING else self._end_interrupted(run_id)
+                if status is not None:
+                    ended["failed" if status == "FAILED" else "cancelled"].append(run_id)
+        return ended
+
+    def _end_interrupted(self, run_id: str) -> str | None:
+        """The status the run ended in; None once it is neither RUNNING nor CANCEL_REQUESTED.
+
+        A move that fails (the run moved meanwhile, e.g. a cancel request) is decided again.
+        """
+
+        while True:
+            status = (self.store.get_run(run_id) or {}).get("status")
+            if status == "RUNNING":
+                to_status, events = "FAILED", [_event("terminal", "FAILED", {"error_code": INTERRUPTED_CODE})]
+                fields = {"error_code": INTERRUPTED_CODE}
+            elif status == "CANCEL_REQUESTED":
+                to_status, events, fields = "CANCELLED", _CANCELLED_EVENTS, {}
+            else:
+                return None
+            if self.store.transition_run(run_id, status, to_status, events=events, usage_json=_json(_USAGE_LOST), **fields):
+                return to_status
 
     def _default_executor(self) -> object:
         check_fake_database_boundary(self.mode)
@@ -461,26 +532,32 @@ class RunService:
             "request_time_window": dict(time_window) if time_window is not None else None,
             "status": "RUNNING",
         }
-        self.store.create_run(
-            run_id=run_id,
-            tenant_id=subject.tenant_id,
-            principal_id=subject.principal_id,
-            role=subject.role,
-            question=question,
-            # The adapter that will actually answer, not an environment guess.
-            mode=str(getattr(deps.model, "mode", self.mode)),
-            checkpoint=checkpoint,
-            run_config={
-                "profile": deps.profile,
-                "mode": self.mode,
-                "catalog_version": BOUND_CATALOG_VERSION,
-                "knowledge_snapshot_id": knowledge_snapshot_id,
-                "policy_version": BOUND_POLICY_VERSION,
-                "retrieval": retrieval_label(run_retriever),
-                "agent_run_config": agent_run_config.as_dict(),
-            },
-            model_call_count=0,
-        )
+        # Registered before the run exists as RUNNING; ``_execute_run`` unregisters it.
+        _register(run_id)
+        try:
+            self.store.create_run(
+                run_id=run_id,
+                tenant_id=subject.tenant_id,
+                principal_id=subject.principal_id,
+                role=subject.role,
+                question=question,
+                # The adapter that will actually answer, not an environment guess.
+                mode=str(getattr(deps.model, "mode", self.mode)),
+                checkpoint=checkpoint,
+                run_config={
+                    "profile": deps.profile,
+                    "mode": self.mode,
+                    "catalog_version": BOUND_CATALOG_VERSION,
+                    "knowledge_snapshot_id": knowledge_snapshot_id,
+                    "policy_version": BOUND_POLICY_VERSION,
+                    "retrieval": retrieval_label(run_retriever),
+                    "agent_run_config": agent_run_config.as_dict(),
+                },
+                model_call_count=0,
+            )
+        except BaseException:
+            _unregister(run_id)
+            raise
         with self._active_lock:
             self._active.add(run_id)
         return run_id
@@ -584,6 +661,7 @@ class RunService:
                 opened_store.close()
             with self._active_lock:
                 self._active.discard(run_id)
+            _unregister(run_id)
 
     # -- one commit path for every outcome ----------------------------------
 
@@ -689,13 +767,7 @@ class RunService:
     def _finish_cancelled(self, run_id: str, **update: object) -> dict[str, object]:
         """CANCEL_REQUESTED -> CANCELLED with both events; a run in any other status is left as it is."""
 
-        self.store.transition_run(
-            run_id,
-            "CANCEL_REQUESTED",
-            "CANCELLED",
-            events=[_event("step_finished", "CANCELLED", {"cancelled_before_commit": True}), _event("terminal", "CANCELLED")],
-            **update,
-        )
+        self.store.transition_run(run_id, "CANCEL_REQUESTED", "CANCELLED", events=_CANCELLED_EVENTS, **update)
         return self.store.get_run(run_id)  # type: ignore[return-value]
 
     def _end_on_error(
@@ -865,7 +937,7 @@ class RunService:
 
         subject = RunIdentity.from_mapping(identity)
         metadata = self.metadata_config()
-        with self._resume_lock:
+        with self._resume_lock, _executing(run_id):
             run, checkpoint_envelope, agent_checkpoint, run_config = self._load_waiting_run(run_id, subject)
             # Clarified values in the server checkpoint are authoritative.  A
             # user answer may supply a bounded month, but it cannot select or
@@ -1024,7 +1096,7 @@ class RunService:
         # Serialize the check-then-execute section.  StateStore makes the
         # decision transition atomic, but the business query must only run
         # for the caller that won that transition.
-        with self._approval_lock:
+        with self._approval_lock, _executing(run_id):
             return self._approve_locked(
                 run_id=run_id,
                 approval_id=approval_id,
@@ -1411,6 +1483,10 @@ def _event(
     """One event of a transition (``StateStore.append_event``'s arguments)."""
 
     return {"event_type": event_type, "status": status, "payload": payload, "result_id": result_id}
+
+
+# How an execution asked to cancel ends: nothing it produced is committed.
+_CANCELLED_EVENTS = (_event("step_finished", "CANCELLED", {"cancelled_before_commit": True}), _event("terminal", "CANCELLED"))
 
 
 def _cancel_requested(run: Mapping[str, object]) -> bool:
