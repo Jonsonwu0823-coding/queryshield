@@ -569,6 +569,18 @@ class ControlledTools:
             raise ToolError("result_not_found", "the result is not visible in this run")
         return evidence
 
+    def restore_result_evidence(self, evidence: ResultEvidence, *, context: ExecutionContext) -> None:
+        """Put back a result this run verified in an earlier execution (a resume's tools start empty)."""
+
+        _require_context(context)
+        if (evidence.run_id, evidence.tenant_id, evidence.principal_id) != (
+            context.run_id,
+            context.tenant_id,
+            context.principal_id,
+        ):
+            raise ToolError("result_not_found", "the result is not visible in this run")
+        self._evidence[(context.run_id, evidence.result_id)] = evidence
+
     def get_retrieval_evidence(
         self,
         retrieval_id: str,

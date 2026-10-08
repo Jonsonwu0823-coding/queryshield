@@ -294,14 +294,16 @@ class StateStore:
         from_status: str,
         to_status: str,
         *,
-        event: tuple[str, str, Mapping[str, object] | None] | None = None,
+        events: Sequence[Mapping[str, object]] = (),
+        approval: Mapping[str, object] | None = None,
         **fields: object,
     ) -> bool:
         """Move a run from ``from_status`` to ``to_status``; False, writing nothing, if it is in another status.
 
-        ``event`` (type, status, payload) is stored first, in the same transaction:
-        a reader never sees the new status without its event, nor the event of a
-        transition that did not happen.
+        ``events`` (``append_event``'s keyword arguments, in order) are stored first,
+        in the same transaction: a reader never sees the new status without its
+        events, nor the events of a transition that did not happen.  ``approval``
+        (``create_approval``'s fields) is inserted first, and the run records it.
         """
 
         with self._lock:
@@ -311,9 +313,11 @@ class StateStore:
                 if row is None or row["status"] != from_status:
                     self._connection.execute("ROLLBACK")
                     return False
-                if event is not None:
-                    event_type, event_status, payload = event
-                    self.append_event(run_id, event_type, event_status, payload=payload)
+                if approval is not None:
+                    self._insert_approval(run_id=run_id, **approval)
+                    fields.update(action_json=json_text(approval["action"]), approval_id=approval["approval_id"])
+                for event in events:
+                    self.append_event(run_id, **event)
                 self.update_run(run_id, status=to_status, **fields)
             except BaseException:
                 self._connection.execute("ROLLBACK")
@@ -405,6 +409,42 @@ class StateStore:
         expires_at: datetime,
     ) -> dict[str, object]:
         with self._lock:
+            self._insert_approval(
+                approval_id=approval_id,
+                run_id=run_id,
+                tenant_id=tenant_id,
+                requester_principal_id=requester_principal_id,
+                action_hash=action_hash,
+                action=action,
+                policy_version=policy_version,
+                catalog_version=catalog_version,
+                knowledge_snapshot_id=knowledge_snapshot_id,
+                expires_at=expires_at,
+            )
+            self.update_run(
+                run_id,
+                status="WAITING_APPROVAL",
+                action_json=json_text(action),
+                approval_id=approval_id,
+            )
+            self.append_event(run_id, "waiting", "WAITING_APPROVAL", payload={"approval_id": approval_id})
+        return self.get_approval(approval_id)  # type: ignore[return-value]
+
+    def _insert_approval(
+        self,
+        *,
+        approval_id: str,
+        run_id: str,
+        tenant_id: str,
+        requester_principal_id: str,
+        action_hash: str,
+        action: Mapping[str, object],
+        policy_version: str,
+        catalog_version: str,
+        knowledge_snapshot_id: str,
+        expires_at: datetime,
+    ) -> None:
+        with self._lock:
             self._connection.execute(
                 """
                 INSERT INTO approvals(
@@ -426,14 +466,6 @@ class StateStore:
                     isoformat(expires_at),
                 ),
             )
-            self.update_run(
-                run_id,
-                status="WAITING_APPROVAL",
-                action_json=json_text(action),
-                approval_id=approval_id,
-            )
-            self.append_event(run_id, "waiting", "WAITING_APPROVAL", payload={"approval_id": approval_id})
-        return self.get_approval(approval_id)  # type: ignore[return-value]
 
     def get_approval(self, approval_id: str) -> dict[str, object] | None:
         with self._lock:

@@ -8,10 +8,8 @@ and a start (or a rejection) that overlap leave exactly one terminal event.
 
 Each model call reports its own usage, so a pause's stored total is known and differs from
 the final one.  Where the outcome allows, the pause also ran an SQL, so a count is the pause's
-plus the resume's, both non-zero.  (A resume whose run answered after an SQL before the pause
-cannot ground its answer: the earlier result is not in the resumed execution's tools.  The
-paths that end SUCCEEDED therefore pause without one.)  Interleavings are fixed with hooks and gates, never left to timing; every wait
-has a timeout.
+plus the resume's, both non-zero.  Interleavings are fixed with hooks and gates, never left to timing;
+every wait has a timeout.
 """
 
 from __future__ import annotations
@@ -294,7 +292,7 @@ def test_a_refused_resume_cancelled_meanwhile_ends_cancelled_once(service, monke
     _assert_one_terminal_last(_events(svc, run["run_id"]))
 
 
-def test_a_cancel_after_the_commits_check_is_lost_but_the_run_ends_once(service, monkeypatch) -> None:
+def test_a_cancel_after_the_commits_check_ends_the_resume_cancelled(service, monkeypatch) -> None:
     svc, _ = service
     run = _paused(service, with_sql=False)
     answer_envelope = service_module._answer_envelope
@@ -306,10 +304,11 @@ def test_a_cancel_after_the_commits_check_is_lost_but_the_run_ends_once(service,
     monkeypatch.setattr(service_module, "_answer_envelope", cancel_then)
     done = _resume(service, run, [_query(), _cite_all])
 
-    assert done["status"] == "SUCCEEDED"
+    # The commit's final write is conditional: the run is no longer RUNNING, so it ends CANCELLED.
+    assert done["status"] == "CANCELLED" and done["sql_exec_count"] == 1
     events = _events(svc, run["run_id"])
     _assert_one_terminal_last(events)
-    assert events[-2:] == [("step_finished", "CANCEL_REQUESTED"), ("terminal", "SUCCEEDED")]
+    assert events[-3:] == [("step_finished", "CANCEL_REQUESTED"), *CANCELLED_STEPS]
 
 
 # --- an approved execution runs as RUNNING -----------------------------------------------------------------------
@@ -375,7 +374,7 @@ def test_an_approval_whose_consumed_record_no_longer_matches_leaves_the_run_wait
     assert executor.executed == executed_before and _events(svc, run["run_id"]) == events_before
 
 
-def test_a_cancel_after_the_approved_querys_check_is_lost_but_the_run_ends_once(service, monkeypatch) -> None:
+def test_a_cancel_after_the_approved_querys_check_ends_the_run_cancelled(service, monkeypatch) -> None:
     svc, _ = service
     run = _pending(service)
     refs = service_module._approved_fact_refs
@@ -387,8 +386,11 @@ def test_a_cancel_after_the_approved_querys_check_is_lost_but_the_run_ends_once(
     monkeypatch.setattr(service_module, "_approved_fact_refs", cancel_then)
     done = _approve(service, run)
 
-    assert done["status"] == "SUCCEEDED"
-    _assert_one_terminal_last(_events(svc, run["run_id"]))
+    # The approved query's final write is conditional: the run ends CANCELLED, with its SQL counted.
+    assert done["status"] == "CANCELLED" and done["sql_exec_count"] == 2
+    events = _events(svc, run["run_id"])
+    _assert_one_terminal_last(events)
+    assert events[-3:] == [("step_finished", "CANCEL_REQUESTED"), *CANCELLED_STEPS]
 
 
 # --- a cancel that overlaps a start, a commit or a rejection -----------------------------------------------------
@@ -522,26 +524,16 @@ def test_a_cancel_that_read_running_while_the_first_execution_paused_for_approva
     assert approving.value.code == "invalid_run_state" and executor.executed == executed
 
 
-def _cancel_after_the_commits_check(svc, monkeypatch) -> None:
-    """The first commit's cancel check passes, then the owner cancels: the outcome is committed anyway."""
+def test_a_cancel_flag_left_on_a_waiting_run_does_not_cancel_the_next_resume(service) -> None:
+    """Such a run comes only from data stored before the final writes were conditional.
 
-    answer_envelope = service_module._answer_envelope
-    armed = [True]
+    The old commit committed its outcome after a cancel had arrived past its check, and left
+    the cancel flag on the waiting run.  A resume starts clean.
+    """
 
-    def cancel_then(*args, **kwargs):
-        if armed[0]:
-            armed[0] = False
-            assert svc.cancel(run_id=next(iter(svc._active)), identity=REQUESTER)["status"] == "CANCEL_REQUESTED"
-        return answer_envelope(*args, **kwargs)
-
-    monkeypatch.setattr(service_module, "_answer_envelope", cancel_then)
-
-
-def test_a_cancel_lost_before_a_pause_does_not_cancel_the_next_resume(service, monkeypatch) -> None:
     svc, _ = service
-    _cancel_after_the_commits_check(svc, monkeypatch)
     run = _paused(service, with_sql=False)
-    assert svc.store.get_run(run["run_id"])["cancel_requested"]
+    svc.store.update_run(run["run_id"], cancel_requested=1)
 
     done = _resume(service, run, [_query(), _cite_all])
 
@@ -549,11 +541,12 @@ def test_a_cancel_lost_before_a_pause_does_not_cancel_the_next_resume(service, m
     _assert_one_terminal_last(_events(svc, run["run_id"]))
 
 
-def test_a_cancel_lost_before_an_approval_pause_does_not_cancel_the_approved_query(service, monkeypatch) -> None:
+def test_a_cancel_flag_left_on_a_waiting_run_does_not_cancel_the_approved_query(service) -> None:
+    """As above, for a run waiting for approval: the approved execution starts clean."""
+
     svc, _ = service
-    _cancel_after_the_commits_check(svc, monkeypatch)
     run = _pending(service)
-    assert svc.store.get_run(run["run_id"])["cancel_requested"]
+    svc.store.update_run(run["run_id"], cancel_requested=1)
 
     done = _approve(service, run)
 
@@ -638,11 +631,11 @@ def test_a_transition_applies_only_from_the_named_status_and_writes_its_event_on
     try:
         before = store.events("run-t", after_event_id=0, limit=10)
         assert store.get_run("run-t")["status"] == "RUNNING"
-        assert not store.transition_run("run-t", "WAITING_USER", "CANCELLED", event=("terminal", "CANCELLED", None))
+        assert not store.transition_run("run-t", "WAITING_USER", "CANCELLED", events=[{"event_type": "terminal", "status": "CANCELLED"}])
         assert (store.get_run("run-t")["status"], store.events("run-t", after_event_id=0, limit=10)) == ("RUNNING", before)
 
         assert store.transition_run(
-            "run-t", "RUNNING", "CANCEL_REQUESTED", event=("step_finished", "CANCEL_REQUESTED", {"x": 1}), cancel_requested=1
+            "run-t", "RUNNING", "CANCEL_REQUESTED", events=[{"event_type": "step_finished", "status": "CANCEL_REQUESTED", "payload": {"x": 1}}], cancel_requested=1
         )
         run = store.get_run("run-t")
         assert (run["status"], run["cancel_requested"]) == ("CANCEL_REQUESTED", True)
@@ -658,7 +651,7 @@ def test_a_transition_whose_write_fails_stores_neither_its_event_nor_its_status(
     try:
         before = store.events("run-t", after_event_id=0, limit=10)
         with pytest.raises(StateStoreError):
-            store.transition_run("run-t", "RUNNING", "CANCELLED", event=("terminal", "CANCELLED", None), no_such_field=1)
+            store.transition_run("run-t", "RUNNING", "CANCELLED", events=[{"event_type": "terminal", "status": "CANCELLED"}], no_such_field=1)
         assert (store.get_run("run-t")["status"], store.events("run-t", after_event_id=0, limit=10)) == ("RUNNING", before)
     finally:
         store.close()

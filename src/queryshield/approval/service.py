@@ -5,9 +5,10 @@ product runtime (``queryshield.agent.runtime.run_profile``).  One commit path
 persists every outcome; ``/runs/{run_id}/resume`` continues a real
 WAITING_USER checkpoint, and ``/runs/{run_id}/approval`` executes exactly the
 verified query a WAITING_APPROVAL run is bound to.  Both run as RUNNING, like a
-first execution.  Every write that moves a run out of a waiting state or
-RUNNING to start, cancel or deny it is conditional (``StateStore.transition_run``),
-so a cancel and a start that overlap leave one terminal event.
+first execution.  Every write that moves a run out of a waiting state, RUNNING or
+CANCEL_REQUESTED (to start, cancel, deny, or end an execution) is conditional
+(``StateStore.transition_run``), so a cancel and a start or an end that overlap
+leave one terminal event, stored last.
 """
 
 from __future__ import annotations
@@ -607,12 +608,13 @@ class RunService:
         outcome = outcome_for(status, error_code)
         counters = _commit_counters(current, payload, sql_executions)
         envelope = _commit_envelope(run_id, current, payload, outcome, agent, envelope_updates)
+        # Serialized now: what the commit adds to the envelope below never reaches a cancelled run.
+        cancelled = {"checkpoint_json": _json({**envelope, "status": "CANCELLED"}), **counters}
 
         if _cancel_requested(current):
             # Cancellation wins before any result is committed; events precede the terminal status.
-            envelope["status"] = "CANCELLED"
             self._append_agent_events(run_id, writer, payload, metadata_record)
-            return self._finish_cancelled(run_id, checkpoint_json=_json(envelope), **counters)
+            return self._finish_cancelled(run_id, **cancelled)
 
         # Written after the cancel branch, so a run that is not SUCCEEDED never carries an answer status.
         envelope.update(_answer_envelope(payload, succeeded=outcome.run_status == "SUCCEEDED"))
@@ -630,8 +632,13 @@ class RunService:
                 envelope["status"] = outcome.run_status
         if status == "waiting_approval":
             envelope["pre_approval_results"] = [
-                evidence.as_dict() for evidence in self._verified_metric_evidences(payload, tools, context)
+                evidence.as_dict() for evidence in self._run_evidences(payload, tools, context) if is_scalar_metric_result(evidence)
             ]
+        elif status == "waiting_user":
+            # Every result the resumed answer check loads; the resume puts them back in its tools.
+            paused = [evidence.as_dict() for evidence in self._run_evidences(payload, tools, context)]
+            if paused:
+                envelope["paused_results"] = paused
 
         update: dict[str, object] = {
             "checkpoint_json": _json(envelope),
@@ -649,31 +656,46 @@ class RunService:
         # Step events precede the run leaving RUNNING, a terminal event precedes the terminal status:
         # a stream reader that stops on a terminal status has received every event.
         self._append_agent_events(run_id, writer, payload, metadata_record)
+        approval = None
         if status == "waiting_approval":
-            self.store.update_run(run_id, **update)
-            self._create_pending_approval(run_id, current, payload, permission)
+            approval = self._pending_approval(current, payload, permission)
+            event = _event("waiting", outcome.run_status, {"approval_id": approval["approval_id"]})
         elif status == "waiting_user":
-            self.store.update_run(run_id, status=outcome.run_status, **update)
-            self.store.append_event(run_id, "waiting", "WAITING_USER")
+            event = _event("waiting", outcome.run_status)
         else:
-            self.store.append_event(
-                run_id,
-                "terminal",
-                outcome.run_status,
-                payload={"error_code": error_code} if error_code else None,
-            )
-            self.store.update_run(run_id, status=outcome.run_status, **update)
-        return self.store.get_run(run_id)  # type: ignore[return-value]
+            event = _event("terminal", outcome.run_status, {"error_code": error_code} if error_code else None)
+        return self._leave_running(run_id, outcome.run_status, [event], cancelled, approval=approval, **update)
+
+    def _leave_running(
+        self,
+        run_id: str,
+        to_status: str,
+        events: Sequence[Mapping[str, object]],
+        cancelled: Mapping[str, object],
+        *,
+        approval: Mapping[str, object] | None = None,
+        **fields: object,
+    ) -> dict[str, object]:
+        """End this execution: RUNNING -> ``to_status`` with its events, in one transaction.
+
+        A run that is no longer RUNNING was asked to cancel meanwhile: it ends
+        CANCELLED with ``cancelled`` (this execution's counts), and no approval is created.
+        """
+
+        if self.store.transition_run(run_id, "RUNNING", to_status, events=events, approval=approval, **fields):
+            return self.store.get_run(run_id)  # type: ignore[return-value]
+        return self._finish_cancelled(run_id, **cancelled)
 
     def _finish_cancelled(self, run_id: str, **update: object) -> dict[str, object]:
-        self.store.append_event(run_id, "step_finished", "CANCELLED", payload={"cancelled_before_commit": True})
-        self.store.append_event(run_id, "terminal", "CANCELLED")
-        self.store.update_run(run_id, status="CANCELLED", **update)
-        return self.store.get_run(run_id)  # type: ignore[return-value]
+        """CANCEL_REQUESTED -> CANCELLED with both events; a run in any other status is left as it is."""
 
-    def _finish_failed(self, run_id: str, code: str, **update: object) -> dict[str, object]:
-        self.store.append_event(run_id, "terminal", "FAILED", payload={"error_code": code})
-        self.store.update_run(run_id, status="FAILED", error_code=code, **update)
+        self.store.transition_run(
+            run_id,
+            "CANCEL_REQUESTED",
+            "CANCELLED",
+            events=[_event("step_finished", "CANCELLED", {"cancelled_before_commit": True}), _event("terminal", "CANCELLED")],
+            **update,
+        )
         return self.store.get_run(run_id)  # type: ignore[return-value]
 
     def _end_on_error(
@@ -689,7 +711,8 @@ class RunService:
 
         The first execution, a resume and an approved execution all end here; left
         waiting, an approved run could never execute again (its approval is already
-        consumed).  Cancellation wins, as it does before a commit.
+        consumed).  Cancellation wins, as it does at a commit: the move to FAILED is
+        conditional, and a run asked to cancel ends CANCELLED instead.
 
         The counts and usage are those of the last step whose events are all stored,
         as a commit would store them; without a step of this execution the stored
@@ -705,9 +728,8 @@ class RunService:
             update["usage_json"] = _json(_usage_summary(()))
         if (model.calls if model is not None else 0) > (writer.model_calls_written if writer is not None else 0):
             update["usage_json"] = _json(_USAGE_LOST)
-        if _cancel_requested(run):
-            return self._finish_cancelled(run_id, **update)
-        return self._finish_failed(run_id, _error_code(exc), **update)
+        code = _error_code(exc)
+        return self._leave_running(run_id, "FAILED", [_event("terminal", "FAILED", {"error_code": code})], update, error_code=code, **update)
 
     def _succeeded_result_json(
         self,
@@ -767,31 +789,34 @@ class RunService:
                 raise ApprovalConflict("evidence_validation_failed", "result evidence could not be persisted") from exc
         return evidences
 
-    def _verified_metric_evidences(
+    def _run_evidences(
         self,
         payload: Mapping[str, object],
         tools: ControlledTools,
         context: ExecutionContext,
     ) -> list[ResultEvidence]:
-        """Results of this run that are tenant-wide metric values (``is_scalar_metric_result``)."""
+        """The evidence of this run's successful query results that the tools hold.
+
+        That is every one, except the results of a run paused before they were kept with the pause.
+        """
 
         evidences: list[ResultEvidence] = []
         for result_id in _successful_query_result_ids(payload):
             try:
-                evidence = tools.get_result_evidence(result_id, context=context)
+                evidences.append(tools.get_result_evidence(result_id, context=context))
             except ToolError:
                 continue
-            if is_scalar_metric_result(evidence):
-                evidences.append(evidence)
         return evidences
 
-    def _create_pending_approval(
+    def _pending_approval(
         self,
-        run_id: str,
         run: Mapping[str, object],
         payload: Mapping[str, object],
         permission: tuple[str, Mapping[str, object] | None] | None = None,
-    ) -> None:
+    ) -> dict[str, object]:
+        """The approval record for the run's pending call (``StateStore.create_approval``'s fields)."""
+
+        run_id = str(run["run_id"])
         final_action = payload.get("action")
         pending_call = final_action.get("tool_call") if isinstance(final_action, Mapping) else None
         source_id, acl = permission or self._approval_permission(run)
@@ -804,18 +829,17 @@ class RunService:
             permission_source_id=source_id,
         )
         run_config = run.get("run_config") if isinstance(run.get("run_config"), Mapping) else {}
-        self.store.create_approval(
-            approval_id=f"approval-{uuid4()}",
-            run_id=run_id,
-            tenant_id=str(run["tenant_id"]),
-            requester_principal_id=str(run["principal_id"]),
-            action_hash=action_hash(action),
-            action=action,
-            policy_version=BOUND_POLICY_VERSION,
-            catalog_version=BOUND_CATALOG_VERSION,
-            knowledge_snapshot_id=str(run_config.get("knowledge_snapshot_id") or DEFAULT_KNOWLEDGE_SNAPSHOT),
-            expires_at=self.clock() + timedelta(seconds=APPROVAL_TTL_SECONDS),
-        )
+        return {
+            "approval_id": f"approval-{uuid4()}",
+            "tenant_id": str(run["tenant_id"]),
+            "requester_principal_id": str(run["principal_id"]),
+            "action_hash": action_hash(action),
+            "action": action,
+            "policy_version": BOUND_POLICY_VERSION,
+            "catalog_version": BOUND_CATALOG_VERSION,
+            "knowledge_snapshot_id": str(run_config.get("knowledge_snapshot_id") or DEFAULT_KNOWLEDGE_SNAPSHOT),
+            "expires_at": self.clock() + timedelta(seconds=APPROVAL_TTL_SECONDS),
+        }
 
     # -- WAITING_USER continuation -------------------------------------------
 
@@ -853,6 +877,7 @@ class RunService:
                 binding = _clarified_binding(catalog, choice.clarified_metric, agent_checkpoint, answer)
                 checkpoint_for_resume["metric_bindings"] = [binding.as_dict()]
             stored_steps = _checked_event_count(agent_checkpoint, run)
+            paused_results = _paused_evidences(checkpoint_envelope, run)
             writer = _StepWriter(self.store, run_id, written=stored_steps)
             if not self.store.transition_run(run_id, "WAITING_USER", "RUNNING", cancel_requested=0):
                 return self.store.get_run(run_id)  # type: ignore[return-value]
@@ -873,6 +898,8 @@ class RunService:
                     profile=B1_PROFILE,
                 )
                 tools = product_tools(deps, metadata=metadata)
+                for evidence in paused_results:
+                    tools.restore_result_evidence(evidence, context=context)
                 agent = build_b1_agent(
                     counted,  # type: ignore[arg-type]
                     tools,
@@ -1049,7 +1076,7 @@ class RunService:
         if decided.get("status") == "REJECTED":
             # Only a run still waiting is denied: a cancel that came first stands.
             self.store.transition_run(
-                run_id, "WAITING_APPROVAL", "DENIED", event=("terminal", "DENIED", {"approval_id": approval_id})
+                run_id, "WAITING_APPROVAL", "DENIED", events=[_event("terminal", "DENIED", {"approval_id": approval_id})]
             )
             return self.store.get_run(run_id)  # type: ignore[return-value]
         if decided.get("status") == "APPROVED":
@@ -1162,11 +1189,14 @@ class RunService:
         approved_envelope = dict(current_run.get("checkpoint") or {}) if isinstance(current_run.get("checkpoint"), Mapping) else {}
         # Server text throughout; verified only with facts.
         approved_envelope.update({"answer_status": "verified" if facts else "unverified", "answer_source_ids": []})
-        self.store.append_event(run_id, "step_finished", "SUCCEEDED", result_id=evidence.result_id, payload={"step": "approved_query"})
-        self.store.append_event(run_id, "terminal", "SUCCEEDED", result_id=evidence.result_id)
-        self.store.update_run(
+        return self._leave_running(
             run_id,
-            status="SUCCEEDED",
+            "SUCCEEDED",
+            [
+                _event("step_finished", "SUCCEEDED", {"step": "approved_query"}, result_id=evidence.result_id),
+                _event("terminal", "SUCCEEDED", result_id=evidence.result_id),
+            ],
+            {"sql_exec_count": sql_total},
             result_json=_json(result),
             facts_json=_json({"schema_version": FACTS_SCHEMA_VERSION, "facts": facts}) if facts else None,
             answer=answer,
@@ -1174,7 +1204,6 @@ class RunService:
             error_code=None,
             checkpoint_json=_json(approved_envelope),
         )
-        return self.store.get_run(run_id)  # type: ignore[return-value]
 
     # -- cancellation and visibility ----------------------------------------------
 
@@ -1186,7 +1215,7 @@ class RunService:
         status = str(run["status"])
         if status in {"WAITING_APPROVAL", "WAITING_USER"}:
             # Nothing is executing; the waiting run ends here and cannot resume.
-            moved = self.store.transition_run(run_id, status, "CANCELLED", event=("terminal", "CANCELLED", None), cancel_requested=1)
+            moved = self.store.transition_run(run_id, status, "CANCELLED", events=[_event("terminal", "CANCELLED")], cancel_requested=1)
         elif status == "RUNNING":
             # The execution owns the final transition after its resource exits;
             # a running request must never be reported as CANCELLED early.
@@ -1194,7 +1223,7 @@ class RunService:
                 run_id,
                 "RUNNING",
                 "CANCEL_REQUESTED",
-                event=("step_finished", "CANCEL_REQUESTED", {"cancel_requested": True}),
+                events=[_event("step_finished", "CANCEL_REQUESTED", {"cancel_requested": True})],
                 cancel_requested=1,
             )
         else:
@@ -1358,6 +1387,30 @@ def _approved_fact_refs(prior: Sequence[ResultEvidence], evidence: ResultEvidenc
                 seen.add(key)
                 references.append(FactRef(result_id=source.result_id, metric_id=binding.metric_id))
     return references
+
+
+def _paused_evidences(envelope: Mapping[str, object], run: Mapping[str, object]) -> list[ResultEvidence]:
+    """The results the run verified before it paused, rebuilt and checked against the stored run.
+
+    A run paused before they were kept with the pause has none.  A record that is
+    malformed or not this run's makes the checkpoint invalid.
+    """
+
+    records = envelope.get("paused_results", [])
+    try:
+        if not isinstance(records, list):
+            raise ValueError("paused results are not a list")
+        return [evidence_from_record(record, run) for record in records]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ApprovalConflict("checkpoint_invalid", "paused results do not belong to this run") from exc
+
+
+def _event(
+    event_type: str, status: str, payload: Mapping[str, object] | None = None, *, result_id: str | None = None
+) -> dict[str, object]:
+    """One event of a transition (``StateStore.append_event``'s arguments)."""
+
+    return {"event_type": event_type, "status": status, "payload": payload, "result_id": result_id}
 
 
 def _cancel_requested(run: Mapping[str, object]) -> bool:
