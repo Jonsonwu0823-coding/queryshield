@@ -5,7 +5,9 @@ param(
     [ValidateRange(30, 900)][int]$StartupTimeoutSeconds = 240,
     [switch]$FakeDryRun,
     [ValidateSet('json', 'native')][string]$ModelProtocol = 'json',
-    [switch]$NonInteractive
+    [switch]$NonInteractive,
+    [string]$GatewayBaseUrl,
+    [string]$GatewayNetwork
 )
 
 # The demo questions and the walkthrough against the Docker Compose stack with the REAL model.
@@ -19,6 +21,13 @@ param(
 # -> wait for the app to be healthy -> docker compose exec ... demo_run.py --base-url ... and
 # demo_walkthrough.py -> copy the two summaries to the evidence folder -> docker compose down
 # (volumes are kept; "docker compose down -v" resets everything).
+#
+# Through a model gateway: -GatewayBaseUrl (its address on the shared network, ending in /v1) and
+# -GatewayNetwork (the external Docker network the gateway created) instead of -BailianBaseUrl.
+# The key the gateway issued is read from QUERYSHIELD_MODEL_API_KEY or entered hidden, as above.
+# Every docker compose call then uses compose.yaml with compose.model-gateway.yaml, and only the
+# demo questions run (no walkthrough), so each run in the gateway's ledger is one run_id in
+# demo-summary.json, the only file copied. The gateway must accept the same model names.
 #
 # The summaries hold ids, status codes, terminal states and numbers only. The raw demo file
 # (demo-raw.json, answers and customer names) stays inside the container and is not copied.
@@ -37,7 +46,9 @@ $touchedNames = @(
     "QUERYSHIELD_EMBEDDING_MODEL_NAME",
     "QUERYSHIELD_EMBEDDING_MODEL_REVISION",
     "QUERYSHIELD_EMBEDDING_DIMENSIONS",
-    "QUERYSHIELD_METADATA_TOOLS"
+    "QUERYSHIELD_METADATA_TOOLS",
+    "QUERYSHIELD_GATEWAY_BASE_URL",
+    "QUERYSHIELD_GATEWAY_NETWORK"
 )
 $previousValues = @{}
 foreach ($name in $touchedNames) {
@@ -45,6 +56,7 @@ foreach ($name in $touchedNames) {
 }
 $exitCode = 0
 $stackStarted = $false
+$composeFiles = @()
 
 function Read-HiddenSecret {
     param([string]$Prompt)
@@ -62,11 +74,19 @@ function Read-HiddenSecret {
     }
 }
 
+function Get-DockerArguments {
+    # Every docker compose call names the same files ($composeFiles): none, or the gateway override after compose.yaml.
+    param([string[]]$Arguments)
+    if ($Arguments[0] -ne "compose") { return $Arguments }
+    return @("compose") + $script:composeFiles + @($Arguments | Select-Object -Skip 1)
+}
+
 function Invoke-Docker {
     # Returns ONLY the integer exit code. The command's output (docker compose up --build writes the build log
     # to standard output) goes to the screen: output left in the pipeline would be returned together with the
     # exit code, and "(Invoke-Docker ...) -ne 0" would then filter that array instead of comparing a number.
     param([string[]]$Arguments)
+    $Arguments = Get-DockerArguments $Arguments
     $previousPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
@@ -80,6 +100,7 @@ function Invoke-Docker {
 
 function Get-DockerText {
     param([string[]]$Arguments)
+    $Arguments = Get-DockerArguments $Arguments
     $previousPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     try {
@@ -92,12 +113,23 @@ function Get-DockerText {
 }
 
 try {
+    $gatewayMode = [bool]($GatewayBaseUrl -or $GatewayNetwork)
+    if ($gatewayMode -and -not ($GatewayBaseUrl -and $GatewayNetwork)) {
+        Write-Output 'The gateway mode needs both -GatewayBaseUrl and -GatewayNetwork.'
+        $exitCode = 2
+        throw [ArgumentException]::new('Gateway address or network is missing.')
+    }
+    if ($gatewayMode -and ($BailianBaseUrl -or $FakeDryRun)) {
+        Write-Output 'The gateway mode does not take -BailianBaseUrl or -FakeDryRun.'
+        $exitCode = 2
+        throw [ArgumentException]::new('Gateway mode combined with another mode.')
+    }
     if ($FakeDryRun -and $BailianBaseUrl) {
         Write-Output 'The Fake dry run does not accept or use a provider URL.'
         $exitCode = 2
         throw [ArgumentException]::new('Provider URL is not applicable to the Fake dry run.')
     }
-    if (-not $FakeDryRun -and -not $BailianBaseUrl) {
+    if (-not $FakeDryRun -and -not $BailianBaseUrl -and -not $gatewayMode) {
         Write-Output 'Give -BailianBaseUrl (the Beijing workspace OpenAI compatible address from the Bailian API Key page), or use -FakeDryRun.'
         $exitCode = 2
         throw [ArgumentException]::new('Provider URL is missing.')
@@ -109,25 +141,58 @@ try {
     }
 
     $mode = if ($FakeDryRun) { 'fake' } else { 'real' }
+    $runLabel = if ($gatewayMode) { 'gateway' } else { $mode }
+    if ($gatewayMode) { $script:composeFiles = @("-f", "compose.yaml", "-f", "compose.model-gateway.yaml") }
     [Environment]::SetEnvironmentVariable("QUERYSHIELD_PROVIDER_MODE", $mode, "Process")
     [Environment]::SetEnvironmentVariable("QUERYSHIELD_MODEL_PROTOCOL", $ModelProtocol, "Process")
     # The demo run is judged against the local metadata tools unless you set the MCP setting yourself.
     if ($mode -eq 'real') {
-        $serviceUri = $null
-        $validUri = [Uri]::TryCreate($BailianBaseUrl.Trim(), [UriKind]::Absolute, [ref]$serviceUri)
-        if (-not $validUri -or $serviceUri.Scheme -ne 'https' -or
-            $serviceUri.DnsSafeHost -notmatch '^ws-[a-z0-9]+\.cn-beijing\.maas\.aliyuncs\.com$' -or
-            $serviceUri.AbsolutePath.TrimEnd('/') -ne '/compatible-mode/v1' -or
-            $serviceUri.UserInfo -or $serviceUri.Query -or $serviceUri.Fragment -or -not $serviceUri.IsDefaultPort) {
-            Write-Output 'Use the plain Beijing workspace OpenAI compatible URL copied from Bailian API Key settings; no Markdown links or credentials.'
-            $exitCode = 2
-            throw [ArgumentException]::new('Invalid Bailian workspace endpoint.')
+        if ($gatewayMode) {
+            $gatewayUri = $null
+            $validUri = [Uri]::TryCreate($GatewayBaseUrl.Trim(), [UriKind]::Absolute, [ref]$gatewayUri)
+            if (-not $validUri -or $gatewayUri.Scheme -notin @('http', 'https') -or
+                $gatewayUri.AbsolutePath.TrimEnd('/') -ne '/v1' -or
+                $gatewayUri.UserInfo -or $gatewayUri.Query -or $gatewayUri.Fragment) {
+                Write-Output 'Use the plain http(s) address of the gateway on the shared network, ending in /v1; no credentials, query or fragment.'
+                $exitCode = 2
+                throw [ArgumentException]::new('Invalid gateway endpoint.')
+            }
+            if ($GatewayNetwork -cnotmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*\z') {
+                Write-Output 'The network name starts with a letter or digit and has only letters, digits, _, . and -.'
+                $exitCode = 2
+                throw [ArgumentException]::new('Invalid gateway network name.')
+            }
+            $endpointValues = @{
+                QUERYSHIELD_GATEWAY_BASE_URL = $gatewayUri.Scheme + '://' + $gatewayUri.Authority + '/v1'
+                QUERYSHIELD_GATEWAY_NETWORK = $GatewayNetwork
+            }
+            $profileName = 'Gateway'
+            $keyPrompt = 'Paste the complete key the gateway issued (hidden, not a URL)'
+            $keyPattern = '^[^\s*]+$'
         }
-        $bailianOrigin = $serviceUri.GetLeftPart([UriPartial]::Authority)
-        $profileValues = @{
-            QUERYSHIELD_MODEL_BASE_URL = "$bailianOrigin/compatible-mode/v1"
+        else {
+            $serviceUri = $null
+            $validUri = [Uri]::TryCreate($BailianBaseUrl.Trim(), [UriKind]::Absolute, [ref]$serviceUri)
+            if (-not $validUri -or $serviceUri.Scheme -ne 'https' -or
+                $serviceUri.DnsSafeHost -notmatch '^ws-[a-z0-9]+\.cn-beijing\.maas\.aliyuncs\.com$' -or
+                $serviceUri.AbsolutePath.TrimEnd('/') -ne '/compatible-mode/v1' -or
+                $serviceUri.UserInfo -or $serviceUri.Query -or $serviceUri.Fragment -or -not $serviceUri.IsDefaultPort) {
+                Write-Output 'Use the plain Beijing workspace OpenAI compatible URL copied from Bailian API Key settings; no Markdown links or credentials.'
+                $exitCode = 2
+                throw [ArgumentException]::new('Invalid Bailian workspace endpoint.')
+            }
+            $bailianOrigin = $serviceUri.GetLeftPart([UriPartial]::Authority)
+            $endpointValues = @{
+                QUERYSHIELD_MODEL_BASE_URL = "$bailianOrigin/compatible-mode/v1"
+                QUERYSHIELD_EMBEDDING_BASE_URL = "$bailianOrigin/compatible-mode/v1"
+            }
+            $profileName = 'Bailian'
+            $keyPrompt = 'Paste the complete Bailian API Key (hidden, not a URL)'
+            $keyPattern = '^sk-[^\s*]+$'
+        }
+        # The same models either way: the gateway is set up to accept these names.
+        $profileValues = $endpointValues + @{
             QUERYSHIELD_MODEL_NAME = 'qwen-plus'
-            QUERYSHIELD_EMBEDDING_BASE_URL = "$bailianOrigin/compatible-mode/v1"
             QUERYSHIELD_EMBEDDING_MODEL_NAME = 'text-embedding-v4'
             QUERYSHIELD_EMBEDDING_MODEL_REVISION = 'text-embedding-v4'
             QUERYSHIELD_EMBEDDING_DIMENSIONS = '1024'
@@ -137,7 +202,7 @@ try {
         }
         $sharedKey = [Environment]::GetEnvironmentVariable('QUERYSHIELD_MODEL_API_KEY', 'Process')
         if ([string]::IsNullOrWhiteSpace($sharedKey) -and -not $NonInteractive) {
-            $sharedKey = Read-HiddenSecret 'Paste the complete Bailian API Key (hidden, not a URL)'
+            $sharedKey = Read-HiddenSecret $keyPrompt
         }
         if ([string]::IsNullOrWhiteSpace($sharedKey)) {
             Write-Output 'The API Key is not available; nothing was started.'
@@ -145,7 +210,7 @@ try {
             throw [ArgumentException]::new('API key missing.')
         }
         $sharedKey = $sharedKey.Trim()
-        if ($sharedKey -notmatch '^sk-[^\s*]+$') {
+        if ($sharedKey -notmatch $keyPattern) {
             Write-Output 'API Key format is invalid; copy the complete Key, not a URL, name or masked asterisks.'
             $exitCode = 2
             throw [ArgumentException]::new('Invalid API Key format.')
@@ -154,7 +219,13 @@ try {
             [Environment]::SetEnvironmentVariable($name, $sharedKey, 'Process')
         }
         $sharedKey = $null
-        Write-Output 'Bailian profile selected: qwen-plus, text-embedding-v4 (1024). Credentials are process-only.'
+        Write-Output ($profileName + ' profile selected: qwen-plus, text-embedding-v4 (1024). Credentials are process-only.')
+    }
+    # The gateway's project creates the shared network; without it the demo can only fail.
+    if ($gatewayMode -and (Get-DockerText @("network", "inspect", $GatewayNetwork)).ExitCode -ne 0) {
+        Write-Output ("Docker network '" + $GatewayNetwork + "' was not found. Start the model gateway first (it creates the network); nothing was started.")
+        $exitCode = 2
+        throw [InvalidOperationException]::new('Gateway network is missing.')
     }
 
     Set-Location -LiteralPath $projectRoot
@@ -173,7 +244,7 @@ try {
 
     $stamp = [DateTime]::UtcNow.ToString("yyyyMMdd-HHmmss-fff", [Globalization.CultureInfo]::InvariantCulture)
     if ([string]::IsNullOrWhiteSpace($EvidenceDir)) {
-        $EvidenceDir = Join-Path (Join-Path $projectRoot "evidence") "compose-$mode-$stamp"
+        $EvidenceDir = Join-Path (Join-Path $projectRoot "evidence") "compose-$runLabel-$stamp"
     }
     New-Item -ItemType Directory -Path $EvidenceDir -Force | Out-Null
 
@@ -199,21 +270,23 @@ try {
         Start-Sleep -Seconds 3
     }
     if (-not $healthy) {
-        Write-Output 'The app did not become healthy in time. Check: docker compose logs app'
+        Write-Output ("The app did not become healthy in time. Check: docker " + ((Get-DockerArguments @("compose", "logs", "app")) -join " "))
         $exitCode = 2
         throw [InvalidOperationException]::new('app not healthy.')
     }
 
     Write-Output "Running the demo questions ($mode) inside the app container; output is question ids, verdicts and known gaps only."
     $demoExit = Invoke-Docker @("compose", "exec", "-T", "app", "python", "scripts/demo_run.py", "--mode", $mode, "--base-url", "http://127.0.0.1:8000", "--model-protocol", $ModelProtocol, "--evidence-dir", "/tmp/demo-run")
-    Write-Output "Running the walkthrough ($mode)."
-    $walkExit = Invoke-Docker @("compose", "exec", "-T", "app", "python", "scripts/demo_walkthrough.py", "--mode", $mode, "--evidence-dir", "/tmp/walkthrough")
+    $copies = @(@{ From = "/tmp/demo-run/demo-summary.json"; To = "demo-summary.json" })
+    $walkExit = 0
+    # Through the gateway only the demo runs: every run in the gateway's ledger is then a run_id in demo-summary.json.
+    if (-not $gatewayMode) {
+        Write-Output "Running the walkthrough ($mode)."
+        $walkExit = Invoke-Docker @("compose", "exec", "-T", "app", "python", "scripts/demo_walkthrough.py", "--mode", $mode, "--evidence-dir", "/tmp/walkthrough")
+        $copies += @{ From = "/tmp/walkthrough/walkthrough-summary.json"; To = "walkthrough-summary.json" }
+    }
 
     $utf8 = [System.Text.UTF8Encoding]::new($false)
-    $copies = @(
-        @{ From = "/tmp/demo-run/demo-summary.json"; To = "demo-summary.json" },
-        @{ From = "/tmp/walkthrough/walkthrough-summary.json"; To = "walkthrough-summary.json" }
-    )
     foreach ($copy in $copies) {
         $result = Get-DockerText @("compose", "exec", "-T", "app", "cat", $copy.From)
         if ($result.ExitCode -eq 0 -and $result.Text) {

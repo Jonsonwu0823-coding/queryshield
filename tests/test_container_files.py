@@ -423,15 +423,27 @@ needs_posix = pytest.mark.skipif(__import__("sys").platform == "win32", reason="
 SUMMARY_JSON = '{"status": "pass", "hard_failures": [], "known_gaps": []}'
 
 
-def _fake_docker(directory: Path, *, up_exit: int = 0, exec_exit: int = 0) -> tuple[Path, Path]:
-    """A docker whose `compose up` prints BuildKit-style build-log lines on STANDARD OUTPUT, then answers per sub-command."""
+def _fake_docker(directory: Path, *, up_exit: int = 0, exec_exit: int = 0, network_exit: int = 0) -> tuple[Path, Path]:
+    """A docker whose `compose up` prints BuildKit-style build-log lines on STANDARD OUTPUT, then answers per sub-command.
+
+    Compose's `-f <file>` options are skipped to find the sub-command; `compose up` also records the model
+    key and the other QUERYSHIELD_ variables it was given (up-key.txt, up-env.txt next to the call log).
+    """
 
     directory.mkdir(parents=True, exist_ok=True)
     log = directory / "docker-calls.txt"
     script = f"""#!/bin/sh
 echo "$@" >> "{log}"
+if [ "$1" = compose ]; then
+  shift
+  while [ "$1" = "-f" ]; do shift 2; done
+  set -- compose "$@"
+fi
 case "$1 $2" in
+  "network inspect") echo "[]"; exit {network_exit} ;;
   "compose up")
+    printf '%s\\n' "$QUERYSHIELD_MODEL_API_KEY" > "{directory / 'up-key.txt'}"
+    env | grep '^QUERYSHIELD_' | grep -v '_API_KEY=' | sort > "{directory / 'up-env.txt'}"
     echo "#1 [internal] load build definition from Dockerfile"
     echo "#2 [internal] load metadata for docker.io/library/python"
     echo "#3 DONE 0.0s"

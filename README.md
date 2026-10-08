@@ -74,7 +74,7 @@ docker compose exec app python scripts/demo_walkthrough.py
 
 ### 接真实模型
 
-按 OpenAI 兼容协议接入（只在阿里云百炼上验证过），步骤见[运维说明](docs/operations.md)第 3 节：密钥只在当前 shell 里设置，不写进文件。Windows 上可以一条命令跑完：`scripts/compose-real-demo.ps1 -BailianBaseUrl '<地址>'`（隐藏输入密钥、起 Compose、跑整套演示题和演示脚本、拷出摘要、最后 `docker compose down`）。缺配置时服务以 503 结束（检查脚本记为 blocked），不会退回 Fake。
+按 OpenAI 兼容协议接入（只在阿里云百炼上验证过），步骤见[运维说明](docs/operations.md)第 3 节：密钥只在当前 shell 里设置，不写进文件。Windows 上可以一条命令跑完：`scripts/compose-real-demo.ps1 -BailianBaseUrl '<地址>'`（隐藏输入密钥、起 Compose、跑整套演示题和演示脚本、拷出摘要、最后 `docker compose down`）；经模型网关时改给 `-GatewayBaseUrl`、`-GatewayNetwork`，只跑演示题，见运维说明的“经模型网关调用模型”。缺配置时服务以 503 结束（检查脚本记为 blocked），不会退回 Fake。
 
 模型给出动作有两种协议，由 `QUERYSHIELD_MODEL_PROTOCOL` 选择：`json`（默认）是模型在回复正文里写一个 JSON 动作；`native` 是模型原生的 function calling（请求带 `tools`，回复在 `tool_calls` 里）。两种协议走同一个服务端校验器，对比方法见[架构说明](docs/architecture.md)的“两种动作协议”。`scripts/eval-local-real.ps1`、`scripts/http-local-smoke.ps1`、`scripts/demo-local.ps1`、`scripts/compose-real-demo.ps1` 这四个本机脚本有 `-ModelProtocol json|native` 参数。
 

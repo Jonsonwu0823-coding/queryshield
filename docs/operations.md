@@ -186,6 +186,18 @@ docker network inspect "$QUERYSHIELD_GATEWAY_NETWORK" >/dev/null 2>&1 || docker 
 docker compose -f compose.yaml -f compose.model-gateway.yaml up -d --build
 ```
 
+Windows 上可以一条命令跑完演示题（只接网关，网关后面是真实模型；网关先启动好）：
+
+```powershell
+scripts/compose-real-demo.ps1 -GatewayBaseUrl 'http://<网关在网络上的地址>/v1' -GatewayNetwork '<共用网络名>'
+```
+
+- 网关发的 Key 隐藏输入（当前 PowerShell 里已有 `QUERYSHIELD_MODEL_API_KEY` 就用它，不要求 `sk-` 开头），只放进本进程，结束时恢复，不写进文件、不打印。
+- 先查共用网络：不存在就停下（退出码 2），提示先启动网关，不替你建网络。每次 `docker compose` 调用都带 `-f compose.yaml -f compose.model-gateway.yaml`。
+- 只跑演示题（`demo_run.py --mode real`），不跑演示脚本：演示脚本的 run 不在演示摘要里，跑了就和网关的账对不上。只把 `demo-summary.json` 拷到证据目录（默认在 `evidence/` 下），最后 `docker compose down`，网关和共用网络不动。
+- 模型名和直连百炼相同：聊天 `qwen-plus`，嵌入 `text-embedding-v4`（1024 维）。网关要能接受这两个名字。
+- 对账用 `demo-summary.json` 每条记录的 `run_id`、`model_call_count`、`usage_total`，和网关按 `X-Run-Id` 汇总的数对：只看已结束、`usage_total` 是 `known` 的 run，只算聊天调用（见下面的“按 run 对账”）。
+
 网关后面接本项目的假上游（联调、CI 都这样用；网关的上游地址配成 `http://fake-upstream:8000/v1`，两个模型名都是 `qs-fake-upstream-v1`）：
 
 ```bash
