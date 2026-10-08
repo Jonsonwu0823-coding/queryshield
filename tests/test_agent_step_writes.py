@@ -289,8 +289,8 @@ def test_steps_are_stored_while_the_run_is_still_executing(service) -> None:
     assert api_main._usage_total(done)["status"] == "known"
 
 
-def test_a_resume_shows_the_pause_and_its_total_until_it_commits(service) -> None:
-    """A resume runs while the stored run still waits: status and total stay the pause's until the commit."""
+def test_a_resume_runs_as_running_with_an_unknown_total_until_it_commits(service) -> None:
+    """A resume executes as RUNNING, like a first execution: the total is unknown until the commit stores it."""
 
     svc, executor = service
     run = _start(service, AMBIGUOUS, [_query()])
@@ -310,7 +310,8 @@ def test_a_resume_shows_the_pause_and_its_total_until_it_commits(service) -> Non
         worker.start()
         assert gate.entered.wait(timeout=10)
         executing = svc.store.get_run(run["run_id"])
-        assert executing["status"] == "WAITING_USER" and api_main._usage_total(executing) == paused
+        assert executing["status"] == "RUNNING" and api_main._usage_total(executing) == UNKNOWN_TOTAL
+        assert executing["usage"] == paused, "the pause's stored total is kept, only read as unknown"
         assert [step["kind"] for step in _stored_steps(svc, run["run_id"])] == ["model_call", "tool_call"]
     finally:
         gate.release.set()

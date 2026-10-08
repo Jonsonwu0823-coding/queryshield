@@ -119,7 +119,7 @@ NOT_RUN = {"status": "not_run", "prompt_tokens": 0, "completion_tokens": 0, "tot
 
 @pytest.fixture()
 def script(upstream, model) -> _Script:
-    """Steered calls in place of the C9 model (same fixture name, so ``service`` serves this one)."""
+    """Steered calls in place of the metered upstream model (same fixture name, so ``service`` serves this one)."""
 
     steered = _Script(upstream.model())
     app.dependency_overrides[get_model_provider] = lambda: steered

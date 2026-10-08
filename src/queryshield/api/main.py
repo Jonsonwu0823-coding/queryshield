@@ -297,9 +297,13 @@ def _usage_total(run: Mapping[str, object]) -> dict[str, object]:
 
     known: every chat call reported its usage; not_run: no chat call, so zeros;
     unknown: a call without usage, a total that does not add up, or none stored
-    yet -- nulls, never zeros.  The agent stores ``status``, B0 ``usage_status``.
+    yet -- nulls, never zeros; also while the run executes (RUNNING or
+    CANCEL_REQUESTED), whatever an earlier pause stored.  The agent stores
+    ``status``, B0 ``usage_status``.
     """
 
+    if run.get("status") in {"RUNNING", "CANCEL_REQUESTED"}:
+        return {"status": "unknown", **dict.fromkeys(_TOKEN_FIELDS)}
     stored = run.get("usage") if isinstance(run.get("usage"), Mapping) else {}
     status = stored.get("status", stored.get("usage_status"))
     tokens = {name: stored.get(name) for name in _TOKEN_FIELDS}

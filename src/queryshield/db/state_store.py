@@ -288,6 +288,39 @@ class StateStore:
                 raise StateStoreError("run was not found")
         return self.get_run(run_id)  # type: ignore[return-value]
 
+    def transition_run(
+        self,
+        run_id: str,
+        from_status: str,
+        to_status: str,
+        *,
+        event: tuple[str, str, Mapping[str, object] | None] | None = None,
+        **fields: object,
+    ) -> bool:
+        """Move a run from ``from_status`` to ``to_status``; False, writing nothing, if it is in another status.
+
+        ``event`` (type, status, payload) is stored first, in the same transaction:
+        a reader never sees the new status without its event, nor the event of a
+        transition that did not happen.
+        """
+
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._connection.execute("SELECT status FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+                if row is None or row["status"] != from_status:
+                    self._connection.execute("ROLLBACK")
+                    return False
+                if event is not None:
+                    event_type, event_status, payload = event
+                    self.append_event(run_id, event_type, event_status, payload=payload)
+                self.update_run(run_id, status=to_status, **fields)
+            except BaseException:
+                self._connection.execute("ROLLBACK")
+                raise
+            self._connection.execute("COMMIT")
+        return True
+
     def append_event(
         self,
         run_id: str,

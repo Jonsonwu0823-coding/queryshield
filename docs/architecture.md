@@ -66,7 +66,7 @@ HTTP 接口都在 `src/queryshield/api/main.py`：
 
 **run 的公开字段。** 返回 run 的响应（同步 `POST /queries`、`GET /runs/{id}`、`GET /runs/{id}/result`、resume、审批、取消）都经 `src/queryshield/api/main.py` 的 `_public_run`，带上 run 编号、状态、租户、请求人、调用次数等字段。其中有两个用量字段，不要混用：
 
-- `usage_total`：这个 run 的聊天调用用量合计，所有返回 run 的响应都有，形如 `{"status": "known", "prompt_tokens": 1234, "completion_tokens": 56, "total_tokens": 1290}`。`known`：每次聊天调用都报了用量，三个数是合计；`unknown`：至少一次聊天调用没有用量（例如 Fake 模型）、存下的合计对不上、run 还没存下用量，或者 run 执行中途抛异常结束时有一次已经发出的聊天调用没来得及记下，三个数都是 `null`，不按 0 算；`not_run`：这个 run 没有聊天调用，三个数都是 0。口径和 `model_call_count` 一样只算聊天调用，嵌入不算；追问后恢复的 run 是暂停前和恢复后的合计，审批后执行不调模型，合计不变。执行中途抛异常结束的 run，计数和合计按最后一个已写进事件表的步骤算，出错前已记下的调用都在里面；第一次调模型之前就出错的 run（B0 也一样）是 `not_run`。合计只在 run 停下时更新：首次执行中还没有存下用量，是 `unknown`；追问后恢复的执行期间，run 记录仍是 `WAITING_USER`，显示暂停时的合计，提交后才更新。
+- `usage_total`：这个 run 的聊天调用用量合计，所有返回 run 的响应都有，形如 `{"status": "known", "prompt_tokens": 1234, "completion_tokens": 56, "total_tokens": 1290}`。`known`：每次聊天调用都报了用量，三个数是合计；`unknown`：至少一次聊天调用没有用量（例如 Fake 模型）、存下的合计对不上、run 还没存下用量，或者 run 执行中途抛异常结束时有一次已经发出的聊天调用没来得及记下，三个数都是 `null`，不按 0 算；`not_run`：这个 run 没有聊天调用，三个数都是 0。口径和 `model_call_count` 一样只算聊天调用，嵌入不算；追问后恢复的 run 是暂停前和恢复后的合计，审批后执行不调模型，合计不变。执行中途抛异常结束的 run，计数和合计按最后一个已写进事件表的步骤算，出错前已记下的调用都在里面；第一次调模型之前就出错的 run（B0 也一样）是 `not_run`。合计只在 run 停下时更新：执行期间（`RUNNING`、`CANCEL_REQUESTED`）一律是 `unknown`，包括追问后恢复和审批后执行，即使暂停时已经存下了合计；提交后才是新的合计。
 - `usage`：只有同步 `POST /queries` 的响应有，是逐次聊天调用的明细列表（调用编号、上游的调用编号和请求编号、三个用量、`usage_status`）。
 
 身份：`src/queryshield/auth/identity.py` 的 `resolve_identity` 把 `Authorization: Bearer <令牌>` 映射到四个固定身份之一（租户 A、B 各一个请求人、一个审批人），令牌来自环境变量；有两个令牌相同时整张映射作废。服务端用认证结果构造 `ExecutionContext`，之后所有工具调用都用它。用哪种配置（B1 有界 Agent 或 B0 基线）由服务端设置 `QUERYSHIELD_AGENT_PROFILE` 决定，客户端选不了。
@@ -75,9 +75,17 @@ HTTP 接口都在 `src/queryshield/api/main.py`：
 
 `src/queryshield/approval/service.py` 的 `RunService` 管理 run 的生命周期：同步执行（`run_sync`）、异步执行（`start_async`，后台线程）、追问后继续（`resume_waiting_user`）、审批（`approve`）、取消（`cancel`）、按身份读取（`visible_run`）。状态存在 `src/queryshield/db/state_store.py` 的 `StateStore`（SQLite），表有 runs、approvals、events、preferences、knowledge_snapshots、knowledge_acl、parallel_groups、parallel_branches 等。
 
-- **可见性。** run 只对同租户的发起人可见；同租户的审批人只在 `WAITING_APPROVAL` 时能看到去掉结果的版本。其他人一律 404。
+- **可见性。** run 只对同租户的发起人可见；同租户的审批人只在 `WAITING_APPROVAL` 时能看到去掉结果的版本，批准之后执行期间（`RUNNING`）和结束后都是 404，结果看审批请求自己的响应。其他人一律 404。
 - **审批。** 进入审批时，`build_pending_action` 把要执行的动作（SQL、参数、指标、时间窗、租户、请求人、SQL 策略版本、catalog 版本）连同权限来源 id 和权限版本一起存下，并记动作的哈希。`approve` 在 `_approval_lock` 里完成“检查再执行”：同租户、审批人角色、不是请求人本人、没过期（10 分钟）、权限来源仍然有效且版本不变，然后只执行被批准的那一条。找不到有效的权限来源时，`_approval_permission` 让这次查询以 503 `approval_permission_unavailable` 结束，不建审批。
-- **容量与取消。** 同时活跃的 run 最多 2 个（`MAX_ACTIVE_RUNS`）。取消运行中的 run 只记“请求取消”，等执行真正退出后再落终态；等待中的 run 直接变成 `CANCELLED`。
+- **恢复和审批后执行。** 追问后恢复（`resume_waiting_user`）在各项检查通过后，把 run 从 `WAITING_USER` 改成 `RUNNING`；审批后执行在消费审批、再核绑定的动作之后、执行 SQL 之前，把 run 从 `WAITING_APPROVAL` 改成 `RUNNING`。之后和首次执行一样：执行期间是 `RUNNING`，每个出口都落到终态或回到等待状态，只写一条终止事件。不写单独的“开始”事件，恢复后的步骤照样随执行写入、推到事件流。被拒绝的恢复（检查点无效、答案无效等）和审批（审批人不对、过期、权限变了、绑定的动作变了）不改状态：图在还原检查点时拒绝、这次执行一个步骤都还没写时，run 改回 `WAITING_USER`；已经写了步骤之后才出错（例如保存新的等待检查点失败），按出错结束（`FAILED`），不能再恢复，否则下次恢复会把这些步骤再写一遍。恢复的提交本身出错也按出错结束，和首次执行一样（例如 502 `evidence_validation_failed`）。
+- **有条件的状态转移。** 把 run 移出等待状态或 `RUNNING` 的写入（开始恢复、开始审批后执行、取消、拒绝审批）都用 `StateStore.transition_run`：只有当前状态是指定的那个才改，要写的事件和状态在同一个事务里，先写事件。所以取消和开始、取消和拒绝无论谁先到，都只有一条终止事件：
+  - 取消先到：恢复不调模型，审批后执行不跑 SQL（审批已经消费，记录是 `APPROVED`，run 是 `CANCELLED`；再批一次只回放 `CANCELLED`）；拒绝不再改状态。
+  - 开始先到：取消改走“请求取消”（202 `CANCEL_REQUESTED`），执行停下后落 `CANCELLED`。
+  - 执行先结束：取消不写任何东西，返回结束时的 run。
+  - 执行先停下来等待（恢复后又追问一次，首次执行停在等审批）：按等待中的 run 取消（200 `CANCELLED`，一条终止事件）。
+  - 取消的写入没成功（读和写之间状态变了），就按 run 现在的状态重新判断一次。
+  - 拒绝先到：取消不写任何东西，返回 `DENIED`。
+- **容量与取消。** 同时活跃的 run 最多 2 个（`MAX_ACTIVE_RUNS`），只算首次执行；追问后恢复和审批后执行不算在内，它们各由一把服务级的锁串行，同一时刻最多各一个。取消运行中的 run（首次执行、恢复、审批后执行）只记“请求取消”，等执行真正退出后再落终态；等待中的 run 直接变成 `CANCELLED`。提交在开头检查一次取消，之后才到的取消会丢失，run 按执行的结果结束（只有一条终止事件，前面留着一条 `CANCEL_REQUESTED` 的事件）；提交的结果是等待时，下一次恢复或审批后执行开始时清掉取消标记，从干净的状态开始，照常执行。进程在执行中退出会留下 `RUNNING`，启动时不扫描；恢复和审批后执行也一样。
 - **步骤随执行写入。** 有界 Agent 用 LangGraph 的 `stream` 跑图，每个节点完成后，运行服务把这一步新产生的事件写进事件表（类型 `agent_step`，payload 是整个事件），每条只写一次；提交时只写还没写的（不经过图的结果，例如点名外租户的拒绝）。事件表里的顺序是 `accepted`、`step_started`、各步骤、（MCP 设置下的 `metadata_session`）、`waiting` 或终止事件。执行中途抛异常时，已写入的步骤留在表里，计数和用量取最后一个已写完的步骤的 Agent 状态；运行服务给模型包一层计数，这次执行调模型的次数多于写进去的 `model_call` 条数时（调用发出了，但它所在的节点没完成），用量记 `unknown`。
 - **事件流（SSE）。** `GET /runs/{id}/events` 推事件表里的事件，每帧 `id`、`event` 和一行 `data`：`event_id`、`run_id`、`type`、`status`、`occurred_at`，有结果时加 `result_id`。`agent_step` 帧另带 `step`，只从事件里挑这些字段（有才带）：`kind`、`status`、`error_code`、`tool_name`、`elapsed_ms`（工具调用的耗时）、`model`、`usage_status`、`prompt_tokens`、`completion_tokens`、`total_tokens`；不带模型原文、提示词、SQL、参数、检索词、行数据和各种编号、哈希、版本。模型调用的事件没有耗时字段，耗时可以看相邻帧的 `occurred_at`。其它类型的帧不带 `step`。同租户的审批人在 `WAITING_APPROVAL` 时也能连这个流，看到的是同样的摘要。
 - **恢复。** 应用启动时，`recover_parallel_groups` 扫描状态库里的并行分支组：全部已提交的复用结果，状态不确定的标 `FAILED/recovery_required`，不重跑 SQL（`src/queryshield/agent/parallel_durable.py` 的 `recover_on_startup`）。
@@ -217,6 +225,23 @@ sequenceDiagram
 | `CANCELLED` | 409 | 错误码 `run_cancelled` |
 
 `FAILED` 按错误码细化的几类：配置、数据库、知识库、权限来源不可用，以及模型网关报额度用完或被限流，是 503（例如 `missing_model_configuration`、`database_unavailable`、`knowledge_unavailable`、`approval_permission_unavailable`、`mcp_unavailable`、`model_quota_exhausted`、`model_rate_limited`）；超时是 504（`upstream_timeout`、`query_timeout`、`mcp_timeout`）；问题本身无法在边界内回答是 422（`result_row_limit`、`clarification_value_unsupported`）；模型输出用不了是 502（`query_repair_limit`、`answer_not_grounded`、`answer_basis_conflict`、`clarification_not_needed`、`metric_contradicts_question`、`invalid_json` 等）。
+
+执行期间和取消时各接口返回什么（首次执行、追问后恢复、审批后执行相同）：
+
+| 情形 | 返回 |
+|---|---|
+| 执行期间请求人 `GET /runs/{id}` | 200，`RUNNING`，`usage_total` 是 `unknown`（三个 `null`） |
+| 审批后执行期间审批人 `GET /runs/{id}` 或连事件流 | 404 `not_found` |
+| 执行期间 `POST /runs/{id}/cancel` | 202 `CANCEL_REQUESTED`（`usage_total` 是 `unknown`）；执行停下后变 `CANCELLED`，只有一条终止事件，终态之后计数和合计不再变 |
+| 被取消的那次恢复 / 审批请求 | 409 `run_cancelled` / 200 加 `CANCELLED` |
+| 发请求时已过状态检查、开始执行前被取消 | 同上；恢复不调模型，审批不跑 SQL（审批记录是 `APPROVED`） |
+| 第一个恢复还在执行时的第二个恢复请求 | 409 `invalid_run_state` |
+| 恢复的提交出错 | 按出错结束，例如 502 `evidence_validation_failed`；再恢复返回 409 `invalid_run_state` |
+| 提交检查之后才到的取消 | 取消丢失，按执行的结果结束，只有一条终止事件；结果是等待时，下一次恢复或审批后执行照常执行 |
+| 取消读到 `RUNNING` 之后，执行正好停下来等待 | 200 `CANCELLED`，一条终止事件；之后的恢复或审批 409 `invalid_run_state` |
+| 取消读到 `RUNNING` 之后，执行正好结束 | 200，返回结束时的 run，不写任何东西 |
+
+2026-10 之前，恢复和审批后执行期间 run 一直停在等待状态（`WAITING_USER` / `WAITING_APPROVAL`），显示暂停时的合计；这时取消会立刻落 `CANCELLED`，执行跑完再写第二条终止事件、更新计数，甚至把终态改回 `SUCCEEDED`；恢复的提交出错返回 409、run 留在 `WAITING_USER`。
 
 ## 设计取舍
 

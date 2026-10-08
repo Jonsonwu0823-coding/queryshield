@@ -989,9 +989,10 @@ def test_a_cancel_during_an_approved_query_wins_before_the_result_is_committed(s
     monkeypatch.setattr(executor, "execute", cancelling)
     done = _approve(service, run)
     assert done["status"] == "CANCELLED"
+    # The approved query runs as RUNNING: the cancel is a request, and the run ends once, last.
     assert _seq(svc.store, done) == AGENT_RUN + [
         (*STEP, MODEL_CALL), (*STEP, TOOL_CALL), WAITING_APPROVAL,
-        ("terminal", "CANCELLED", False, {}),
+        ("step_finished", "CANCEL_REQUESTED", False, {"cancel_requested": True}),
         ("step_finished", "CANCELLED", False, {"cancelled_before_commit": True}),
         ("terminal", "CANCELLED", False, {}),
     ]

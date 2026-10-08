@@ -4,7 +4,10 @@ Sync and async ``/queries`` both create a run record here and execute the same
 product runtime (``queryshield.agent.runtime.run_profile``).  One commit path
 persists every outcome; ``/runs/{run_id}/resume`` continues a real
 WAITING_USER checkpoint, and ``/runs/{run_id}/approval`` executes exactly the
-verified query a WAITING_APPROVAL run is bound to.
+verified query a WAITING_APPROVAL run is bound to.  Both run as RUNNING, like a
+first execution.  Every write that moves a run out of a waiting state or
+RUNNING to start, cancel or deny it is conditional (``StateStore.transition_run``),
+so a cancel and a start that overlap leave one terminal event.
 """
 
 from __future__ import annotations
@@ -123,6 +126,10 @@ class ApprovalConflict(ValueError):
     def __init__(self, code: str, message: str) -> None:
         self.code = code
         super().__init__(message)
+
+
+class _ResumeRefused(ApprovalConflict):
+    """The graph refused the stored checkpoint or the answer (``RunResumeError``)."""
 
 
 @dataclass(frozen=True)
@@ -823,7 +830,14 @@ class RunService:
         executor: object,
         retriever: object | None = None,
     ) -> dict[str, object]:
-        """Restore one owner-authorized B1 checkpoint without resetting its budget."""
+        """Restore one owner-authorized B1 checkpoint without resetting its budget.
+
+        After the checks, the run moves WAITING_USER -> RUNNING (only from
+        WAITING_USER: a run cancelled meanwhile never executes) and executes like a
+        first execution: a cancel is a request, and every exit ends the run or
+        leaves it waiting again.  A checkpoint the graph refuses before any step
+        returns the run to WAITING_USER.
+        """
 
         subject = RunIdentity.from_mapping(identity)
         metadata = self.metadata_config()
@@ -838,7 +852,10 @@ class RunService:
             if choice.clarified_metric is not None:
                 binding = _clarified_binding(catalog, choice.clarified_metric, agent_checkpoint, answer)
                 checkpoint_for_resume["metric_bindings"] = [binding.as_dict()]
-            writer = _StepWriter(self.store, run_id, written=_checked_event_count(agent_checkpoint, run))
+            stored_steps = _checked_event_count(agent_checkpoint, run)
+            writer = _StepWriter(self.store, run_id, written=stored_steps)
+            if not self.store.transition_run(run_id, "WAITING_USER", "RUNNING", cancel_requested=0):
+                return self.store.get_run(run_id)  # type: ignore[return-value]
             context = ExecutionContext(
                 run_id=run_id,
                 tenant_id=subject.tenant_id,
@@ -847,27 +864,49 @@ class RunService:
             )
             counter = CountingExecutor(executor)
             counted = CountingModel(model)
-            deps = RuntimeDependencies(
-                model=counted,  # type: ignore[arg-type]
-                executor=counter,
-                retriever=retriever,
-                call_store=call_store,
-                profile=B1_PROFILE,
-            )
-            tools = product_tools(deps, metadata=metadata)
-            agent = build_b1_agent(
-                counted,  # type: ignore[arg-type]
-                tools,
-                call_store=call_store,
-                run_config=run_config,
-                retrieval_available=retriever is not None,
-                on_step=writer,
-            )
             try:
+                deps = RuntimeDependencies(
+                    model=counted,  # type: ignore[arg-type]
+                    executor=counter,
+                    retriever=retriever,
+                    call_store=call_store,
+                    profile=B1_PROFILE,
+                )
+                tools = product_tools(deps, metadata=metadata)
+                agent = build_b1_agent(
+                    counted,  # type: ignore[arg-type]
+                    tools,
+                    call_store=call_store,
+                    run_config=run_config,
+                    retrieval_available=retriever is not None,
+                    on_step=writer,
+                )
                 result, metadata_record = self._resume_agent(agent, tools, choice, context, answer, checkpoint_for_resume)
-            except ApprovalConflict:
-                raise
+                envelope_updates: dict[str, object] = {}
+                if choice.selected_metric is not None:
+                    envelope_updates["clarified_metric"] = choice.selected_metric
+                payload = b1_result_payload(result, context, str(agent_checkpoint.get("question", run.get("question", ""))))
+                envelope_updates["last_agent_result"] = result.as_dict()
+                return self._commit(
+                    run_id,
+                    payload,
+                    agent=agent,
+                    tools=tools,
+                    context=context,
+                    sql_executions=counter.executions,
+                    writer=writer,
+                    envelope_updates=envelope_updates,
+                    metadata_record=metadata_record,
+                )
             except Exception as exc:  # noqa: BLE001 - as in a first execution, the run ends on the error's code
+                # A refusal before any step leaves the run as it was; after a step, waiting
+                # again would store those steps twice on the next resume.
+                if (
+                    isinstance(exc, _ResumeRefused)
+                    and writer.written == stored_steps
+                    and self.store.transition_run(run_id, "RUNNING", "WAITING_USER")
+                ):
+                    raise
                 return self._end_on_error(
                     run_id,
                     exc,
@@ -875,22 +914,6 @@ class RunService:
                     writer=writer,
                     model=counted,
                 )
-            envelope_updates: dict[str, object] = {}
-            if choice.selected_metric is not None:
-                envelope_updates["clarified_metric"] = choice.selected_metric
-            payload = b1_result_payload(result, context, str(agent_checkpoint.get("question", run.get("question", ""))))
-            envelope_updates["last_agent_result"] = result.as_dict()
-            return self._commit(
-                run_id,
-                payload,
-                agent=agent,
-                tools=tools,
-                context=context,
-                sql_executions=counter.executions,
-                writer=writer,
-                envelope_updates=envelope_updates,
-                metadata_record=metadata_record,
-            )
 
     def _resume_agent(
         self, agent: Any, tools: object, choice: ResumeChoice, context: ExecutionContext, answer: str, checkpoint: dict[str, object]
@@ -913,7 +936,7 @@ class RunService:
                 result = agent.resume_from_checkpoint(context, answer, checkpoint)
         except RunResumeError as exc:
             code = "not_found" if exc.code == "resume_context_mismatch" else "checkpoint_invalid"
-            raise ApprovalConflict(code, "resume checkpoint could not be restored") from exc
+            raise _ResumeRefused(code, "resume checkpoint could not be restored") from exc
         except Exception:
             # The run ends on this error; like a first execution, its MCP session record is kept.
             record = self._close_metadata(tools, metadata_written)
@@ -1024,13 +1047,18 @@ class RunService:
             now=self.clock(),
         )
         if decided.get("status") == "REJECTED":
-            self.store.append_event(run_id, "terminal", "DENIED", payload={"approval_id": approval_id})
-            self.store.update_run(run_id, status="DENIED")
+            # Only a run still waiting is denied: a cancel that came first stands.
+            self.store.transition_run(
+                run_id, "WAITING_APPROVAL", "DENIED", event=("terminal", "DENIED", {"approval_id": approval_id})
+            )
             return self.store.get_run(run_id)  # type: ignore[return-value]
         if decided.get("status") == "APPROVED":
             # The consumed record must still carry the exact bound digest.
             _require_bound_action(decided, run)
             try:
+                # Cancelled after the state check: the approved query never runs.
+                if not self.store.transition_run(run_id, "WAITING_APPROVAL", "RUNNING", cancel_requested=0):
+                    return self.store.get_run(run_id)  # type: ignore[return-value]
                 return self._execute_approved(run_id, run, decided)
             finally:
                 with self._active_lock:
@@ -1156,20 +1184,30 @@ class RunService:
         if run is None or run.get("tenant_id") != subject.tenant_id or run.get("principal_id") != subject.principal_id:
             raise ObjectNotFound()
         status = str(run["status"])
-        if status == "RUNNING":
-            self.store.update_run(run_id, status="CANCEL_REQUESTED", cancel_requested=1)
-            self.store.append_event(run_id, "step_finished", "CANCEL_REQUESTED", payload={"cancel_requested": True})
-            # The worker owns the final transition after its resource exits;
-            # a running request must never be reported as CANCELLED early.
-        elif status in {"WAITING_APPROVAL", "WAITING_USER"}:
+        if status in {"WAITING_APPROVAL", "WAITING_USER"}:
             # Nothing is executing; the waiting run ends here and cannot resume.
-            self.store.append_event(run_id, "terminal", "CANCELLED")
-            self.store.update_run(run_id, status="CANCELLED", cancel_requested=1)
-        elif status in {"CANCEL_REQUESTED"} | TERMINAL_STATUSES:
+            moved = self.store.transition_run(run_id, status, "CANCELLED", event=("terminal", "CANCELLED", None), cancel_requested=1)
+        elif status == "RUNNING":
+            # The execution owns the final transition after its resource exits;
+            # a running request must never be reported as CANCELLED early.
+            moved = self.store.transition_run(
+                run_id,
+                "RUNNING",
+                "CANCEL_REQUESTED",
+                event=("step_finished", "CANCEL_REQUESTED", {"cancel_requested": True}),
+                cancel_requested=1,
+            )
+        else:
+            # Already cancelling or ended: nothing moves.
             if status == "USAGE_UNKNOWN":
                 self.store.update_run(run_id, cancel_requested=1)
-        else:
-            raise ApprovalConflict("invalid_run_state", "run cannot be cancelled in its current state")
+            elif status not in {"CANCEL_REQUESTED"} | TERMINAL_STATUSES:
+                raise ApprovalConflict("invalid_run_state", "run cannot be cancelled in its current state")
+            return self.store.get_run(run_id)  # type: ignore[return-value]
+        if not moved:
+            # The run moved on between the read and the write (an execution started,
+            # paused or ended): decide again on what it is now.  An ended run is left as it is.
+            return self.cancel(run_id=run_id, identity=identity)
         return self.store.get_run(run_id)  # type: ignore[return-value]
 
     def visible_run(self, *, run_id: str, identity: Mapping[str, str], result: bool = False) -> dict[str, object]:
