@@ -21,6 +21,16 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $pythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $bootstrapScript = Join-Path $PSScriptRoot "bootstrap_demo_db.py"
 $touchedNames = @("QUERYSHIELD_DEMO_BOOTSTRAP_DATABASE_URL")
+function Set-EnvironmentValue {
+    # $null removes the variable: on current PowerShell, setting an empty string leaves it defined (empty).
+    param([string]$Name, $Value)
+    if ($null -eq $Value) {
+        Remove-Item -LiteralPath ("Env:" + $Name) -ErrorAction SilentlyContinue
+    }
+    else {
+        Set-Item -LiteralPath ("Env:" + $Name) -Value ([string]$Value)
+    }
+}
 $previousValues = @{}
 foreach ($name in $touchedNames) {
     $previousValues[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
@@ -71,7 +81,7 @@ finally {
     $password = $null
     $escaped = $null
     foreach ($name in $touchedNames) {
-        [Environment]::SetEnvironmentVariable($name, $previousValues[$name], "Process")
+        Set-EnvironmentValue $name $previousValues[$name]
     }
     Set-Location -LiteralPath $previousLocation.Path
 }

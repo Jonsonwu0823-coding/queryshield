@@ -381,7 +381,7 @@ def test_compose_real_demo_script_keeps_keys_in_the_process_and_has_a_bom_for_it
     assert b"\r" not in data
     if any(ord(char) > 127 for char in text):
         assert data.startswith(b"\xef\xbb\xbf"), "a .ps1 with non-ASCII characters needs a BOM for Windows PowerShell 5.1"
-    assert "-AsSecureString" in text and "SetEnvironmentVariable($name, $previousValues[$name]" in text
+    assert "-AsSecureString" in text and "Set-EnvironmentValue $name $previousValues[$name]" in text
     assert "Set-Content" not in text and "Out-File" not in text, "no key is ever written to a file"
     assert re.search(r"sk-[A-Za-z0-9]{6,}", text) is None
     assert "demo_run.py" in text and "--base-url" in text and "demo_walkthrough.py" in text

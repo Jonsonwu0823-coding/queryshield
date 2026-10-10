@@ -56,6 +56,16 @@ $touchedNames = @(
     "QUERYSHIELD_GATEWAY_BASE_URL",
     "QUERYSHIELD_GATEWAY_NETWORK"
 )
+function Set-EnvironmentValue {
+    # $null removes the variable: on current PowerShell, setting an empty string leaves it defined (empty).
+    param([string]$Name, $Value)
+    if ($null -eq $Value) {
+        Remove-Item -LiteralPath ("Env:" + $Name) -ErrorAction SilentlyContinue
+    }
+    else {
+        Set-Item -LiteralPath ("Env:" + $Name) -Value ([string]$Value)
+    }
+}
 $previousValues = @{}
 foreach ($name in $touchedNames) {
     $previousValues[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
@@ -152,7 +162,7 @@ try {
     [Environment]::SetEnvironmentVariable("QUERYSHIELD_PROVIDER_MODE", $mode, "Process")
     [Environment]::SetEnvironmentVariable("QUERYSHIELD_MODEL_PROTOCOL", $ModelProtocol, "Process")
     # Unset unless -Profile is given, so the app runs its default (B1) whatever this session holds.
-    [Environment]::SetEnvironmentVariable("QUERYSHIELD_AGENT_PROFILE", $Profile, "Process")
+    Set-EnvironmentValue "QUERYSHIELD_AGENT_PROFILE" $(if ($Profile) { $Profile } else { $null })
     # The demo run is judged against the local metadata tools unless you set the MCP setting yourself.
     if ($mode -eq 'real') {
         if ($gatewayMode) {
@@ -324,7 +334,7 @@ finally {
         [void](Invoke-Docker @("compose", "down"))
     }
     foreach ($name in $touchedNames) {
-        [Environment]::SetEnvironmentVariable($name, $previousValues[$name], "Process")
+        Set-EnvironmentValue $name $previousValues[$name]
     }
     Set-Location -LiteralPath $previousLocation.Path
 }

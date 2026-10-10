@@ -6,6 +6,7 @@ Runs the script's copy next to the fake docker of tests/test_container_files.py 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -52,3 +53,13 @@ def test_the_options_reach_the_app_and_the_demo_run(tmp_path) -> None:
     calls, up_env = _run(tmp_path, "-Profile", "b2", "-Questions", "composite")
     assert _demo_call(calls).endswith(DEMO_CALL + " --profile b2 --questions composite")
     assert "QUERYSHIELD_AGENT_PROFILE=b2" in up_env
+
+
+def test_no_script_restores_a_variable_with_the_dotnet_setter() -> None:
+    """The setter leaves a variable defined (empty) on newer PowerShell where none was; only compose-real-demo.ps1 is run
+    against a fake docker above, so this covers the restore in every script that touches the session."""
+
+    names = ("bootstrap-demo-db", "compose-real-demo", "demo-local", "eval-local-real", "http-local-smoke", "mcp-local-smoke")
+    for name in names:
+        text = (REAL_DEMO_PS1.parent / f"{name}.ps1").read_text(encoding="utf-8-sig")
+        assert "Set-EnvironmentValue" in text and not re.search(r"SetEnvironmentVariable\([^)]*\$previous", text), name

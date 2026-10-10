@@ -105,7 +105,7 @@ def test_the_demo_wrappers_only_touch_the_demo_database_and_restore_the_environm
         text = _ps1(name)
         assert "queryshield_test" not in text, name
         assert "Read-Host" in text and "-AsSecureString" in text  # hidden input
-        assert "finally" in text and "SetEnvironmentVariable($name, $previousValues[$name]" in text
+        assert "finally" in text and "Set-EnvironmentValue $name $previousValues[$name]" in text
         assert "Write-Output $env:QUERYSHIELD" not in text and "Write-Host $env:QUERYSHIELD" not in text
     boot = _ps1("bootstrap-demo-db.ps1")
     assert "EndsWith('_demo')" in boot and "bootstrap_demo_db.py" in boot

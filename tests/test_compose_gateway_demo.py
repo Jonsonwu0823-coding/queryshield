@@ -23,7 +23,7 @@ NETWORK = "shared-net.test_1"
 # Recognisable and without the sk- prefix a Bailian key has: it must never show up in output or docker's arguments.
 FAKE_KEY = "gw-issued-7c41e9d2"
 GATEWAY_NAMES = ("GATEWAY_BASE_URL", "GATEWAY_NETWORK")
-WATCHED = tuple(f"QUERYSHIELD_{name}" for name in (*GATEWAY_NAMES, "MODEL_API_KEY", "EMBEDDING_API_KEY", "PROVIDER_MODE", "MODEL_NAME"))
+WATCHED = tuple(f"QUERYSHIELD_{name}" for name in (*GATEWAY_NAMES, "MODEL_API_KEY", "EMBEDDING_API_KEY", "PROVIDER_MODE", "MODEL_NAME", "AGENT_PROFILE"))
 # Any Bailian address: the gateway mode refuses the combination before looking at it.
 BAILIAN_URL = "https://bailian.example/compatible-mode/v1"
 
@@ -32,8 +32,8 @@ def _run(tmp_path: Path, arguments: str, *, key: str | None = FAKE_KEY, evidence
     """Run the script's copy in a scratch project next to a fake docker, from a PowerShell session that then
     reports which watched variables differ from before the run (by name only, never the value).
 
-    Unset and empty count as the same: PowerShell passes $null to SetEnvironmentVariable as "", which on
-    .NET 9 leaves an empty variable where none was (the script restores every variable that way).
+    CHANGED compares values with unset and empty alike; LEFT_DEFINED is the strict check for a variable that
+    did not exist before the run but exists (even empty) after it.
     """
 
     project = tmp_path / "queryshield"
@@ -49,6 +49,7 @@ def _run(tmp_path: Path, arguments: str, *, key: str | None = FAKE_KEY, evidence
         f"$names = @({watched}); $before = @{{}}; foreach ($n in $names) {{ $before[$n] = [Environment]::GetEnvironmentVariable($n, 'Process') }}; "
         f"& '{project / 'scripts' / 'compose-real-demo.ps1'}' {arguments}; $code = $LASTEXITCODE; "
         "foreach ($n in $names) { if ([string][Environment]::GetEnvironmentVariable($n, 'Process') -ne [string]$before[$n]) { Write-Output ('CHANGED ' + $n) } }; "
+        "foreach ($n in $names) { if ($null -eq $before[$n] -and (Test-Path -LiteralPath ('Env:' + $n))) { Write-Output ('LEFT_DEFINED ' + $n) } }; "
         "exit $code"
     )
     env = {name: value for name, value in os.environ.items() if not name.startswith("QUERYSHIELD_")}
@@ -106,6 +107,17 @@ def test_the_gateway_mode_names_both_files_on_every_compose_call_and_runs_only_t
     }
     assert FAKE_KEY not in output and not any(FAKE_KEY in call for call in calls)
     assert "CHANGED" not in output, "every variable the script set is restored when it ends"
+
+
+@needs_powershell
+@needs_posix
+def test_variables_the_session_did_not_have_are_removed_again_not_left_empty(tmp_path) -> None:
+    """Newer PowerShell leaves a variable defined (empty) when it is set to "" or $null; the script must remove it."""
+
+    completed, _, _ = _run(tmp_path, GOOD)
+    output = completed.stdout + completed.stderr
+    assert completed.returncode == 0, output
+    assert "LEFT_DEFINED" not in output, output
 
 
 @needs_powershell

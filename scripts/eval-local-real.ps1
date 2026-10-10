@@ -41,6 +41,16 @@ else {
         "QUERYSHIELD_RERANK_MODEL_NAME"
     )
 }
+function Set-EnvironmentValue {
+    # $null removes the variable: on current PowerShell, setting an empty string leaves it defined (empty).
+    param([string]$Name, $Value)
+    if ($null -eq $Value) {
+        Remove-Item -LiteralPath ("Env:" + $Name) -ErrorAction SilentlyContinue
+    }
+    else {
+        Set-Item -LiteralPath ("Env:" + $Name) -Value ([string]$Value)
+    }
+}
 $previousValues = @{}
 foreach ($name in $requiredNames) {
     $previousValues[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
@@ -396,9 +406,9 @@ finally {
     $databasePassword = $null
     $escapedPassword = $null
     foreach ($name in $requiredNames) {
-        [Environment]::SetEnvironmentVariable($name, $previousValues[$name], "Process")
+        Set-EnvironmentValue $name $previousValues[$name]
     }
-    [Environment]::SetEnvironmentVariable("QUERYSHIELD_MODEL_PROTOCOL", $previousModelProtocol, "Process")
+    Set-EnvironmentValue "QUERYSHIELD_MODEL_PROTOCOL" $previousModelProtocol
     Set-Location -LiteralPath $previousLocation.Path
 }
 
