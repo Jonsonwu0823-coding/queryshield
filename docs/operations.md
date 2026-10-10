@@ -88,6 +88,7 @@ docker compose exec app python scripts/demo_run.py --mode fake --base-url http:/
 | `QUERYSHIELD_MODEL_MAX_TOKENS` | 模型单次输出上限 | 代码内 512 | 否 |
 | `QUERYSHIELD_MODEL_TIMEOUT_SECONDS` | 模型调用超时（秒） | 代码内 15 | 否 |
 | `QUERYSHIELD_EMBEDDING_BASE_URL`、`QUERYSHIELD_EMBEDDING_API_KEY`、`QUERYSHIELD_EMBEDDING_MODEL_NAME`、`QUERYSHIELD_EMBEDDING_MODEL_REVISION`、`QUERYSHIELD_EMBEDDING_DIMENSIONS` | 真实嵌入服务 | 未设置 | `QUERYSHIELD_EMBEDDING_API_KEY` 是 |
+| `QUERYSHIELD_AGENT_PROFILE` | Agent 配置，只由服务端选：`b1`（有界 Agent）、`b0`（单次对照基线）、`b2`（多 Agent：协调者加 2–3 个子 Agent，见[架构说明](architecture.md)的“多 Agent”一节）。`b2` 只支持 `json` 协议和本地元数据工具，配 `native` 或 `QUERYSHIELD_METADATA_TOOLS=mcp` 时在建 run 之前以 503 拒绝；不认识的值也以 503 结束 | 空（`b1`） | 否 |
 | `QUERYSHIELD_METADATA_TOOLS` | `mcp` 时，两个只读元数据工具走真实 MCP stdio 会话；不设或 `local` 为本地 | 未设置（本地） | 否 |
 
 Compose 里由文件固定、不要覆盖的：`QUERYSHIELD_DATABASE_URL`（只读角色，库名写明为 `queryshield_demo`）、`QUERYSHIELD_DEMO_DATASET=commerce-demo-v1`、`QUERYSHIELD_STATE_STORE_PATH`、`QUERYSHIELD_CALL_STORE_PATH`。

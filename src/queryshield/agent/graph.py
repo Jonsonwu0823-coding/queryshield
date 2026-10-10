@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import partial
 from hashlib import sha256
 import json
 from time import monotonic
@@ -55,6 +56,7 @@ from queryshield.mcp_metadata.schemas import MCP_ERROR_CODES
 from queryshield.agent.proposals import (
     ALLOWED_TABLES,
     AskUserAction,
+    DelegateAction,
     DenyAction,
     ExecutionContext,
     FinalAnswerAction,
@@ -86,6 +88,19 @@ from queryshield.agent.tool_execution import (
 )
 from queryshield.agent.tenant_scope import has_explicit_foreign_tenant
 from queryshield.agent.parallel import ParallelPlan, ParallelScheduler, ParallelValidationError
+from queryshield.agent.delegation import (
+    AFTER_DELEGATION_CODE,
+    SUBTASK_COMPLETE,
+    AgentRole,
+    DelegationBudgetError,
+    Subtask,
+    allocate,
+    delegation_outcome,
+    resolve_subtasks,
+    run_all,
+    subtask_question,
+    subtask_role,
+)
 
 
 MAX_MODEL_CALLS = 6
@@ -200,6 +215,10 @@ class _GraphState(TypedDict, total=False):
     facts: Mapping[str, object] | None
     context_version: str
     elapsed_ms: int
+    # Multi-agent profile only: a sub-agent's label (the server's step writer
+    # keeps its events apart) and the coordinator's checked delegation plan.
+    agent: str
+    delegation: Mapping[str, object] | None
 
 
 @dataclass(frozen=True)
@@ -269,6 +288,7 @@ class BoundedAgent:
         parallel_scheduler: ParallelScheduler | None = None,
         retrieval_available: bool = True,
         on_step: Callable[[Mapping[str, object]], None] | None = None,
+        role: AgentRole | None = None,
     ) -> None:
         if type(retrieval_available) is not bool:
             raise TypeError("retrieval_available must be a boolean")
@@ -286,6 +306,8 @@ class BoundedAgent:
         self.retrieval_available = retrieval_available
         # Told the state after every completed node, so the server can store the steps as they happen.
         self.on_step = on_step
+        # None for B1; the coordinator or a sub-agent of the multi-agent profile.
+        self.role = role
         self._waiting_checkpoints: dict[str, _GraphState] = {}
         self._compiled_graph = self._build_graph()
 
@@ -591,11 +613,15 @@ class BoundedAgent:
         builder.add_node("execute_parallel", self._execute_parallel)
         builder.add_node("finish", self._finish)
         builder.add_edge(START, "model_decision")
-        builder.add_conditional_edges(
-            "model_decision",
-            self._after_model,
-            {"tool": "execute_tool", "parallel": "execute_parallel", "finish": "finish", "retry": "model_decision"},
-        )
+        routes = {"tool": "execute_tool", "parallel": "execute_parallel", "finish": "finish", "retry": "model_decision"}
+        if self._can_delegate:
+            # Two nodes, so the delegation event is stored before any sub-agent step.
+            builder.add_node("delegate", self._delegate)
+            builder.add_node("run_subtasks", self._run_subtasks)
+            routes["delegate"] = "delegate"
+            builder.add_conditional_edges("delegate", self._after_delegate, {"subtasks": "run_subtasks", "model": "model_decision"})
+            builder.add_edge("run_subtasks", "model_decision")
+        builder.add_conditional_edges("model_decision", self._after_model, routes)
         builder.add_edge("execute_tool", "model_decision")
         builder.add_edge("execute_parallel", "model_decision")
         builder.add_conditional_edges(
@@ -636,7 +662,12 @@ class BoundedAgent:
             request_time_window=state.get("request_time_window"),
             parallel_available=self._parallel_available(state),
             retrieval_available=self.retrieval_available,
+            delegate_available=self._can_delegate,
         )
+
+    @property
+    def _can_delegate(self) -> bool:
+        return self.role is not None and self.role.can_delegate
 
     def _model_decision_step(self, state: _GraphState) -> dict[str, object]:
         if state.get("status") != "running":
@@ -688,6 +719,7 @@ class BoundedAgent:
                 action_text,
                 context=state["context"],
                 model_call_id=identity.model_call_id,
+                delegate=self._can_delegate,
             )
         except ProposalParseError as exc:
             validation_event = self._event(
@@ -698,6 +730,11 @@ class BoundedAgent:
                 return self._action_type_repair(state, exc, events=validation_event, step=step)
             return {"status": "failed", "reason": str(exc), "error_code": exc.code, "events": validation_event, **step}
 
+        if state.get("delegation") is not None and not isinstance(proposal.action, (FinalAnswerAction, DenyAction)):
+            failure = self._failure_update(
+                {**state, "events": event}, code=AFTER_DELEGATION_CODE, reason="after delegating, only an answer or a refusal is valid"
+            )
+            return {**failure, **step}
         return {"status": "running", "proposal": proposal, "events": event, **step}
 
     def _action_type_repair(
@@ -717,7 +754,11 @@ class BoundedAgent:
         hint = {
             "action": (
                 'Resend as {"type":"tool_call","name":<tool_name>,"arguments":{...}}; type is only one of: '
-                + ", ".join(available_action_types(parallel_available=self._parallel_available(state)))
+                + ", ".join(
+                    available_action_types(
+                        parallel_available=self._parallel_available(state), delegate_available=self._can_delegate
+                    )
+                )
                 + "."
             ),
             "tool_name": exc.tool_name,
@@ -778,7 +819,26 @@ class BoundedAgent:
             return self._approval_pause_update(state, exc, **outcome())
         except ToolError as exc:
             return self._tool_error_update(state, exc, **outcome())
-        return self._tool_success_update(state, output, **outcome())
+        update = self._tool_success_update(state, output, **outcome())
+        if self.role is not None and self.role.ends_when_bound:
+            return self._subtask_completion(state, update)
+        return update
+
+    def _subtask_completion(self, state: _GraphState, update: dict[str, object]) -> dict[str, object]:
+        """A sub-agent ends once every bound metric has a scalar result, checked by the answer's evidence rule.
+
+        It never answers: the coordinator's answer cites these results.
+        """
+
+        merged: _GraphState = {**state, **update}  # type: ignore[typeddict-item]
+        try:
+            run = self._collect_run_evidence(merged)
+        except FactResolutionError as exc:
+            return {**update, **self._failure_update(merged, code=exc.code, reason=str(exc))}
+        answered = {metric_id for _, metric_id in run.required_scalar}
+        if all(binding.metric_id.removeprefix("metric.") in answered for binding in state.get("metric_bindings", ())):
+            return {**update, "status": "succeeded", "final_action": {"type": SUBTASK_COMPLETE}}
+        return update
 
     def _approval_pause_update(
         self,
@@ -828,7 +888,8 @@ class BoundedAgent:
     ) -> dict[str, object]:
         """A refused or failed tool call: one repair for a repairable query error, else the run ends."""
 
-        repairable = tool_name == "query_readonly" and exc.code in _REPAIRABLE_QUERY_ERRORS
+        # A delegate's subtasks are query declarations: the same repair.
+        repairable = tool_name in {"query_readonly", "delegate"} and exc.code in _REPAIRABLE_QUERY_ERRORS
         next_repairs = state.get("repair_count", 0) + (1 if repairable else 0)
         failed_event = self._event(
             state,
@@ -1198,6 +1259,137 @@ class BoundedAgent:
                 "error_code": "parallel_branch_failed",
             }
         return {**update, "status": "running"}
+
+    def _delegate(self, state: _GraphState) -> dict[str, object]:
+        """Check the coordinator's subtasks like query declarations and split the budget left.
+
+        A declaration error uses the query repair; the phrase table can bounce the
+        model or wait for the user, as for a query.  Nothing runs here.
+        """
+
+        action = state["proposal"].action
+        declarable = declarable_metric_ids(self.tools.catalog)
+        failure = {
+            "tool_call_count": state.get("tool_call_count", 0),
+            "tool_name": "delegate",
+            # Only catalog metric ids the server knows, never other model text.
+            "input_summary": {
+                "subtask_count": len(action.subtasks),
+                "declared_metrics": [[m for m in item["metrics"] if _is_known(m, declarable)] for item in action.subtasks],
+            },
+            "elapsed_ms": 0,
+        }
+        try:
+            subtasks = resolve_subtasks(
+                action,
+                catalog=self.tools.catalog,
+                request_time_window=state.get("request_time_window"),
+                prebound=state.get("metric_bindings", ()),
+                clarifications=self._clarification_reading(state),
+            )
+        except MetricContradictsQuestionError as exc:
+            return self._contradiction_update(state, exc, **failure)
+        except (ClarificationRequiredError, ClarificationValueUnsupportedError) as exc:
+            return self._clarification_gate_update(state, exc, **failure)
+        except ToolError as exc:
+            return self._tool_error_update(state, exc, **failure)
+        try:
+            model_calls, tool_calls, seconds = allocate(
+                max_model_calls=self.limits.max_model_calls,
+                max_tool_calls=self.limits.max_tool_calls,
+                max_seconds=float(self.limits.max_wall_clock_seconds),
+                model_used=state.get("model_call_count", 0),
+                tool_used=state.get("tool_call_count", 0),
+                elapsed=self._elapsed_seconds(state),
+                count=len(subtasks),
+            )
+        except DelegationBudgetError as exc:
+            return self._limit_update(state, reason=str(exc), code=exc.code)
+        limits = GraphLimits(max_model_calls=model_calls, max_tool_calls=tool_calls, max_wall_clock_seconds=seconds)
+        event = _delegation_event(subtasks, limits)
+        return {"delegation": {"subtasks": subtasks, "limits": limits}, "events": self._event(state, event)}
+
+    def _after_delegate(self, state: _GraphState) -> str:
+        return "subtasks" if state.get("status") == "running" and state.get("delegation") is not None else "model"
+
+    def _run_subtasks(self, state: _GraphState) -> dict[str, object]:
+        """Run one sub-agent per subtask side by side; take in all their steps, and their results when all completed."""
+
+        plan = state["delegation"]
+        calls = [partial(self._run_subtask, state, subtask, plan["limits"]) for subtask in plan["subtasks"]]
+        return self._merge_subtasks(state, plan["subtasks"], run_all(calls))
+
+    def _run_subtask(self, state: _GraphState, subtask: Subtask, limits: GraphLimits) -> _GraphState:
+        """One sub-agent on the run's identity, tools, model and records; it sees only its own subtask."""
+
+        role = subtask_role(subtask.index)
+        agent = BoundedAgent(
+            self.model,
+            tools=self.tools,
+            call_store=self.call_store,
+            limits=limits,
+            clock=self._clock,
+            run_config=self.run_config,
+            retrieval_available=False,
+            on_step=self.on_step,
+            role=role,
+        )
+        return agent._invoke(
+            _new_state(
+                state["context"],
+                subtask_question(self.tools.catalog, subtask),
+                state["run_config"],
+                started_at=self._clock(),
+                metric_bindings=subtask.bindings,
+                request_time_window=_request_window(subtask.time_window),
+                agent=role.label,
+            )
+        )
+
+    def _merge_subtasks(
+        self, state: _GraphState, subtasks: Sequence[Subtask], finals: Sequence[Mapping[str, object]]
+    ) -> dict[str, object]:
+        """Every sub-agent's events, counts and call ids, in subtask order; one end event per subtask.
+
+        The successful query results join this state only when every subtask
+        completed, so the answer check requires citing all of them.  Otherwise the
+        run ends on the outcome ``delegation_outcome`` picks.
+        """
+
+        merged: _GraphState = {
+            **state,
+            "events": state.get("events", ()) + tuple(event for final in finals for event in final.get("events", ())),
+            "model_call_count": state.get("model_call_count", 0) + sum(int(final.get("model_call_count", 0)) for final in finals),
+            "tool_call_count": state.get("tool_call_count", 0) + sum(int(final.get("tool_call_count", 0)) for final in finals),
+            "model_call_ids": state.get("model_call_ids", ()) + tuple(i for final in finals for i in final.get("model_call_ids", ())),
+        }
+        results: list[Mapping[str, object]] = []
+        for subtask, final in zip(subtasks, finals):
+            queries = [
+                record
+                for record in final.get("tool_results", ())
+                if record.get("tool_name") == "query_readonly" and record.get("status") == "succeeded"
+            ]
+            results.extend(queries)
+            # Each subtask's end, by the same rule as the run's.
+            status, code = delegation_outcome([final]) or ("completed", None)
+            merged["events"] = self._event(
+                merged,
+                {
+                    "kind": "subtask",
+                    "status": status,
+                    "subtask_index": subtask.index,
+                    "error_code": code,
+                    "result_ids": [record["output"]["result_id"] for record in queries],
+                    "model_call_ids": list(final.get("model_call_ids", ())),
+                },
+            )
+        update = {name: merged[name] for name in ("events", "model_call_count", "tool_call_count", "model_call_ids")}
+        outcome = delegation_outcome(finals)
+        if outcome is None:
+            return {**update, "tool_results": state.get("tool_results", ()) + tuple(results)}
+        status, code = outcome
+        return {**update, "status": status, "reason": "a delegated subtask did not complete", "error_code": code}
 
     def _finish(self, state: _GraphState) -> dict[str, object]:
         elapsed_seconds = self._elapsed_seconds(state)
@@ -1660,6 +1852,8 @@ class BoundedAgent:
             return "tool"
         if proposal is not None and isinstance(proposal.action, ParallelReadonlyAction):
             return "parallel"
+        if proposal is not None and isinstance(proposal.action, DelegateAction):
+            return "delegate"
         return "finish"
 
     def _budget_update(self, state: _GraphState, *, kind: Literal["model", "tool"]) -> dict[str, object] | None:
@@ -1715,6 +1909,7 @@ class BoundedAgent:
             "tool_description_version": state["run_config"].tool_description_version,
             "catalog_version": state["run_config"].catalog_version,
             "knowledge_snapshot_id": state["run_config"].knowledge_snapshot_id,
+            **({"agent": self.role.label} if self.role is not None else {}),
             **dict(event),
         }
         return state.get("events", ()) + (record,)
@@ -2236,6 +2431,26 @@ def _proposal_validation_event(exc: ProposalParseError, action_text: str, model_
         "error_detail": parse_error_detail(exc),
         "action_shape": proposal_shape_summary(action_text),
         "model_call_id": model_call_id,
+    }
+
+
+def _delegation_event(subtasks: Sequence[Subtask], limits: GraphLimits) -> dict[str, object]:
+    """Each subtask's metrics, window and share of the budget (server-checked values only)."""
+
+    return {
+        "kind": "delegation",
+        "status": "started",
+        "subtasks": [
+            {
+                "subtask_index": item.index,
+                "metrics": item.metric_ids,
+                "time_window": item.time_window,
+                "max_model_calls": limits.max_model_calls,
+                "max_tool_calls": limits.max_tool_calls,
+            }
+            for item in subtasks
+        ],
+        "max_wall_clock_seconds": round(float(limits.max_wall_clock_seconds), 3),
     }
 
 

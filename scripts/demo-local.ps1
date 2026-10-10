@@ -5,7 +5,9 @@ param(
     [ValidateRange(1, 65535)][int]$PostgresPort = 5433,
     [switch]$FakeDryRun,
     [ValidateSet('json', 'native')][string]$ModelProtocol = 'json',
-    [switch]$NonInteractive
+    [switch]$NonInteractive,
+    [ValidateSet('b1', 'b2')][string]$Profile,
+    [ValidateSet('demo', 'composite')][string]$Questions = 'demo'
 )
 
 # Demo run: starts a real uvicorn process on the DEMO database
@@ -17,6 +19,8 @@ param(
 # not set in your session; an existing QUERYSHIELD_DATABASE_URL (the test database)
 # is ignored and restored.  Create the demo database first: docs/demo-data.md.
 # -FakeDryRun checks the wiring with the Fake model at no cost.
+# -Profile b1|b2 sets the server's Agent profile (default: the server's own, B1) and
+# -Questions composite runs the questions with 2-3 parts instead of the demo questions.
 
 $ErrorActionPreference = "Stop"
 $previousLocation = Get-Location
@@ -187,7 +191,10 @@ try {
         New-Item -ItemType Directory -Path $evidenceRoot -Force | Out-Null
         Set-Location -LiteralPath $projectRoot
         Write-Output "Running the demo questions ($mode) against a local uvicorn process on the demo database; output is question ids, verdicts and known gaps only. The raw file (demo-raw.json) holds answers and customer names: do not share it."
-        & $pythonPath $demoScript --mode $mode --model-protocol $ModelProtocol --evidence-dir $evidenceRoot
+        $demoArguments = @("--mode", $mode, "--model-protocol", $ModelProtocol, "--evidence-dir", $evidenceRoot)
+        if ($Profile) { $demoArguments += @("--profile", $Profile) }
+        if ($Questions -ne 'demo') { $demoArguments += @("--questions", $Questions) }
+        & $pythonPath $demoScript @demoArguments
         $demoExitCode = $LASTEXITCODE
         Write-Output "Evidence root: $evidenceRoot"
         $exitCode = if ($demoExitCode -eq 0) { 0 } elseif ($demoExitCode -eq 2) { 2 } else { 1 }

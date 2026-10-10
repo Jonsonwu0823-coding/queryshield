@@ -129,15 +129,25 @@ _PARALLEL_WORKFLOW_RULE = "Use parallel_readonly only for 2-3 requested independ
 _SEARCH_FIRST_CLAUSE = "search_catalog first is fine; "
 
 
-def available_action_types(*, parallel_available: bool) -> tuple[str, ...]:
-    """Action types the model may use in this run; parallel only with a server plan."""
+# The coordinator of the multi-agent profile, only: one delegate action per run.
+_DELEGATE_ACTION = {
+    "required_fields": ["type", "subtasks"],
+    "subtasks": "2-3 items {metrics,time_window} as in query_readonly; each metric+window once",
+    "after": "only final_answer citing every result, or deny",
+}
+_DELEGATE_WORKFLOW_RULE = "Use delegate once for 2-3 independent metrics or time windows."
+
+
+def available_action_types(*, parallel_available: bool, delegate_available: bool = False) -> tuple[str, ...]:
+    """Action types the model may use in this run; parallel only with a server plan, delegate only for a coordinator."""
 
     types = ("tool_call", "final_answer", "ask_user", "deny")
-    return types + ("parallel_readonly",) if parallel_available else types
+    types += ("parallel_readonly",) if parallel_available else ()
+    return types + ("delegate",) if delegate_available else types
 
 
-def action_type_rule(*, parallel_available: bool, retrieval_available: bool = True) -> str:
-    types = available_action_types(parallel_available=parallel_available)
+def action_type_rule(*, parallel_available: bool, retrieval_available: bool = True, delegate_available: bool = False) -> str:
+    types = available_action_types(parallel_available=parallel_available, delegate_available=delegate_available)
     listed = ", ".join(types[:-1]) + " or " + types[-1]
     tool_names = (
         "search_catalog, describe_tables and query_readonly" if retrieval_available else "describe_tables and query_readonly"
@@ -288,6 +298,7 @@ def _action_contract(
     parallel_available: bool,
     retrieval_available: bool = True,
     catalog: SemanticCatalog | None = None,
+    delegate_available: bool = False,
 ) -> dict[str, object]:
     """The static contract rendered for this request.
 
@@ -313,7 +324,11 @@ def _action_contract(
         for item in tool_call["valid_shape_examples"]
     ]
     tool_call["critical_wire_rules"] = [
-        action_type_rule(parallel_available=parallel_available, retrieval_available=retrieval_available)
+        action_type_rule(
+            parallel_available=parallel_available,
+            retrieval_available=retrieval_available,
+            delegate_available=delegate_available,
+        )
         if item == TYPE_RULE_PLACEHOLDER
         else item
         for item in tool_call["critical_wire_rules"]
@@ -337,6 +352,9 @@ def _action_contract(
         ]
         tool_call["tools"].pop("search_catalog", None)
         contract["workflow"] = [item.replace(_SEARCH_FIRST_CLAUSE, "") for item in contract["workflow"]]
+    if delegate_available:
+        contract["actions"]["delegate"] = dict(_DELEGATE_ACTION)
+        contract["workflow"].append(_DELEGATE_WORKFLOW_RULE)
     return contract
 
 
@@ -590,6 +608,7 @@ def _system_content(
     parallel_available: bool,
     request_time_window: dict[str, str] | None,
     retrieval_available: bool = True,
+    delegate_available: bool = False,
 ) -> str:
     # metric_intent imports NET_FEN_PLAN_ID from this module; import it lazily.
     from queryshield.agent.metric_intent import metric_declaration_contract
@@ -601,6 +620,7 @@ def _system_content(
         parallel_available=parallel_available,
         retrieval_available=retrieval_available,
         catalog=metric_catalog,
+        delegate_available=delegate_available,
     )
     payload = {
         "context_version": CONTEXT_VERSION,
@@ -747,6 +767,7 @@ def build_context(
     request_time_window: Mapping[str, object] | None = None,
     parallel_available: bool = True,
     retrieval_available: bool = True,
+    delegate_available: bool = False,
 ) -> ContextBuildResult:
     """Build a bounded context without allowing optional data to erase identity.
 
@@ -789,6 +810,7 @@ def build_context(
             request_time_window=normalized_request_window,
             parallel_available=parallel_available,
             retrieval_available=retrieval_available,
+            delegate_available=delegate_available,
         ),
         hard=True,
         source="server",

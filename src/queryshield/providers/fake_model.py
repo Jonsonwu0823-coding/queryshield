@@ -30,6 +30,10 @@ _MONTH_RE = re.compile(r"(?P<year>20\d{2})年(?P<month>1[0-2]|0?[1-9])月")
 _MONTH_RANGE_RE = re.compile(
     r"(?P<year>20\d{2})年(?P<first>1[0-2]|0?[1-9])月\s*(?:至|到|-|~|～)\s*(?P<last>1[0-2]|0?[1-9])月"
 )
+# The server's sentence for a delegated subtask names its window as "[start, end)".
+_ISO_WINDOW_RE = re.compile(
+    r"\[(?P<start>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z), (?P<end>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\)"
+)
 # The demo data lives in September 2026; a question without a month uses it.
 _DEFAULT_WINDOW = {"start": "2026-09-01T00:00:00Z", "end": "2026-10-01T00:00:00Z"}
 AMBIGUOUS_METRIC_QUESTION = "请说明按支付金额还是退款后净额计算。"
@@ -42,6 +46,10 @@ TIME_RANGE_QUESTION = "请问要查哪个时间范围的支付金额？"
 # question answered from this run's catalog search.
 NO_DATA_SMOKE_QUESTION = "你好，你能做什么？"
 KNOWLEDGE_SMOKE_QUESTION = "退款后净额是怎么算的？"
+# Composite demo questions ("…和…分别是多少？"): parts split on 、 and 和.
+_COMPOSITE_MARKER = "分别是多少"
+_PART_SEPARATOR = re.compile(r"[、和]")
+_AMBIGUOUS_WORDS = ("销售额", "营业额")
 
 
 def fen_to_yuan(fen: int | Decimal) -> str:
@@ -181,6 +189,9 @@ def _range_window(text: str) -> dict[str, str] | None:
 
 
 def _window(text: str, request_window: object) -> dict[str, str]:
+    iso = _ISO_WINDOW_RE.search(text)
+    if iso is not None:
+        return {"start": iso.group("start"), "end": iso.group("end")}
     ranged = _range_window(text)
     if ranged is not None:
         return ranged
@@ -218,10 +229,13 @@ def _query_call(question: str, clarification: str, request_window: object) -> di
     metrics = _metrics(question, clarification)
     if not metrics:
         return None
-    window = _window(text, request_window)
+    return _metric_call(metrics, _window(text, request_window), by_customer="按客户" in question)
+
+
+def _metric_call(metrics: list[str], window: dict[str, str], *, by_customer: bool = False) -> dict[str, object]:
     params = {"0": "paid", "1": window["start"], "2": window["end"]}
     time_filter = "o.status = %s AND o.created_at >= %s AND o.created_at < %s"
-    if "按客户" in question and metrics == ["gross_fen"]:
+    if by_customer and metrics == ["gross_fen"]:
         sql = (
             "SELECT o.customer_id, SUM(o.amount_fen) AS gross_fen FROM orders AS o "
             "INNER JOIN customers AS c ON o.tenant_id = c.tenant_id AND o.customer_id = c.customer_id "
@@ -240,10 +254,8 @@ def _query_call(question: str, clarification: str, request_window: object) -> di
     return {"sql": sql, "params": params, "metrics": metrics, "time_window": window}
 
 
-def _answer_from_query_result(tool_results: list[dict[str, object]]) -> str | None:
-    """A final answer citing the last successful query's verified metrics, if there is one."""
-
-    succeeded = [
+def _successful_queries(tool_results: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [
         record["output"]
         for record in tool_results
         if record.get("tool_name") == "query_readonly"
@@ -251,22 +263,101 @@ def _answer_from_query_result(tool_results: list[dict[str, object]]) -> str | No
         and isinstance(record.get("output"), dict)
         and isinstance(record["output"].get("result_id"), str)
     ]
+
+
+def _fact_refs(output: dict[str, object]) -> list[dict[str, str]]:
+    verified = output.get("verified_metrics") if isinstance(output.get("verified_metrics"), list) else []
+    return [
+        {"result_id": str(output["result_id"]), "metric_id": str(item["metric_id"])}
+        for item in verified
+        if isinstance(item, dict) and isinstance(item.get("metric_id"), str)
+    ]
+
+
+def _answer_from_query_result(tool_results: list[dict[str, object]]) -> str | None:
+    """A final answer citing the last successful query's verified metrics, if there is one."""
+
+    succeeded = _successful_queries(tool_results)
     if not succeeded:
         return None
     output = succeeded[-1]
-    verified = output.get("verified_metrics") if isinstance(output.get("verified_metrics"), list) else []
     rows = output.get("rows") if isinstance(output.get("rows"), list) else []
     grouped = any(isinstance(row, dict) and "customer_id" in row for row in rows)
     return _dump({
         "type": "final_answer",
         "answer": "customer_id row set verified" if grouped else "read-only result verified",
         "source_ids": [],
-        "fact_refs": [
-            {"result_id": output["result_id"], "metric_id": str(item["metric_id"])}
-            for item in verified
-            if isinstance(item, dict) and isinstance(item.get("metric_id"), str)
-        ],
+        "fact_refs": _fact_refs(output),
     })
+
+
+def _composite_parts(question: str, clarification: str, request_window: object) -> list[tuple[list[str], dict[str, str]]] | None:
+    """The (metrics, window) parts of a composite demo question; None for any other question.
+
+    A part without a month takes the previous part's window; a part without a
+    metric takes the next part's metrics ("2026年7月和2026年8月的已支付订单数").
+    The clarification answer only applies to the part with the ambiguous word.
+    """
+
+    if _COMPOSITE_MARKER not in question:
+        return None
+    pieces = [piece for piece in _PART_SEPARATOR.split(question.split(_COMPOSITE_MARKER)[0]) if piece.strip()]
+    if len(pieces) < 2:
+        return None
+    windows: list[dict[str, str] | None] = [
+        _window(piece, request_window) if _MONTH_RE.search(piece) else None for piece in pieces
+    ]
+    metrics = [
+        _metrics(piece, clarification if any(word in piece for word in _AMBIGUOUS_WORDS) else "") for piece in pieces
+    ]
+    for index in range(1, len(pieces)):
+        windows[index] = windows[index] or windows[index - 1]
+    for index in range(len(pieces) - 2, -1, -1):
+        metrics[index] = metrics[index] or metrics[index + 1]
+    if any(window is None for window in windows) or not all(metrics):
+        return None
+    return [(part_metrics, window) for part_metrics, window in zip(metrics, windows)]  # type: ignore[misc]
+
+
+def _query_plan(parts: list[tuple[list[str], dict[str, str]]]) -> list[tuple[list[str], dict[str, str]]]:
+    """B1's queries for a composite question: one per window, net_fen always alone."""
+
+    plan: list[tuple[list[str], dict[str, str]]] = []
+    shared: dict[tuple[str, str], list[str]] = {}
+    for metrics, window in parts:
+        for metric_id in metrics:
+            key = (window["start"], window["end"])
+            if metric_id == "net_fen":
+                plan.append((["net_fen"], window))
+            elif key in shared:
+                shared[key].append(metric_id)
+            else:
+                shared[key] = [metric_id]
+                plan.append((shared[key], window))
+    return plan
+
+
+def _composite_content(
+    parts: list[tuple[list[str], dict[str, str]]],
+    tool_results: list[dict[str, object]],
+    *,
+    coordinator: bool,
+    search: str | None,
+) -> str:
+    """B1 queries the parts one after another; a coordinator delegates them.  Both then cite every result."""
+
+    answered = _successful_queries(tool_results)
+    planned = len(parts) if coordinator else len(_query_plan(parts))
+    if answered and (coordinator or len(answered) >= planned):
+        refs = [ref for output in answered for ref in _fact_refs(output)]
+        return _dump({"type": "final_answer", "answer": "read-only results verified", "source_ids": [], "fact_refs": refs})
+    if search is not None and not answered:
+        return search
+    if coordinator:
+        subtasks = [{"metrics": metrics, "time_window": window} for metrics, window in parts]
+        return _dump({"type": "delegate", "subtasks": subtasks})
+    metrics, window = _query_plan(parts)[len(answered)]
+    return _dump({"type": "tool_call", "name": "query_readonly", "arguments": _metric_call(metrics, window)})
 
 
 def _retrieval_offered(context: dict[str, object], tools: list[dict[str, Any]] | None) -> bool:
@@ -285,6 +376,12 @@ def _searched(tool_results: list[dict[str, object]], messages: list[dict[str, st
     )
 
 
+def _ambiguous(question: str, clarification: str) -> bool:
+    return any(word in question for word in _AMBIGUOUS_WORDS) and not any(
+        word in clarification for word in ("支付金额", "支付", "净额", "退款后")
+    )
+
+
 def _fake_content(messages: list[dict[str, str]], tools: list[dict[str, Any]] | None = None) -> str:
     """Return one deterministic B1/B0 action from the server-built messages."""
 
@@ -300,6 +397,16 @@ def _fake_content(messages: list[dict[str, str]], tools: list[dict[str, Any]] | 
     retrieval_offered = _retrieval_offered(context, tools)
 
     tool_results = _data_payloads(messages, _TOOL_RESULT_PREFIX)
+    parts = None if baseline else _composite_parts(question, clarification, request_window)
+    if parts is not None and not _ambiguous(question, clarification):
+        searched = _searched(tool_results, messages)
+        search = (
+            _dump({"type": "tool_call", "name": "search_catalog", "arguments": {"query": question[:200], "top_k": 3}})
+            if retrieval_offered and not searched
+            else None
+        )
+        coordinator = '"delegate"' in json.dumps(context.get("action_contract", {}), ensure_ascii=False)
+        return _composite_content(parts, tool_results, coordinator=coordinator, search=search)
     answer = _answer_from_query_result(tool_results)
     if answer is not None:
         return answer
@@ -310,10 +417,7 @@ def _fake_content(messages: list[dict[str, str]], tools: list[dict[str, Any]] | 
     if question == NO_DATA_SMOKE_QUESTION:
         return _dump({"type": "final_answer", "answer": "fake reply", "source_ids": [], "fact_refs": [], "basis": "no_data"})
 
-    ambiguous = any(word in question for word in ("销售额", "营业额")) and not any(
-        word in clarification for word in ("支付金额", "支付", "净额", "退款后")
-    )
-    if ambiguous:
+    if _ambiguous(question, clarification):
         return _dump({"type": "ask_user", "clarification_id": "clarify.metric_basis", "question": AMBIGUOUS_METRIC_QUESTION})
 
     searched = _searched(tool_results, messages)

@@ -94,7 +94,7 @@ HTTP 接口都在 `src/queryshield/api/main.py`：
 
 ### 有界 Agent
 
-`src/queryshield/agent/graph.py` 的 `BoundedAgent` 用 LangGraph 的 `StateGraph`，四个节点：`model_decision`、`execute_tool`、`execute_parallel`、`finish`。模型每一步输出一个 JSON 动作（`src/queryshield/agent/proposals.py`），类型只有 `tool_call`、`parallel_readonly`、`ask_user`、`final_answer`、`deny`；工具只有 `search_catalog`、`describe_tables`、`query_readonly`。
+`src/queryshield/agent/graph.py` 的 `BoundedAgent` 用 LangGraph 的 `StateGraph`，四个节点：`model_decision`、`execute_tool`、`execute_parallel`、`finish`。模型每一步输出一个 JSON 动作（`src/queryshield/agent/proposals.py`），类型只有 `tool_call`、`parallel_readonly`、`ask_user`、`final_answer`、`deny`（B2 的协调者另有 `delegate`，见下面“多 Agent”一节）；工具只有 `search_catalog`、`describe_tables`、`query_readonly`。
 
 - **预算**（`src/queryshield/agent/runtime.py` 的 `build_b1_agent`，产品和评测共用这一个装配函数）：每个 run 最多 6 次模型调用、8 次工具调用、60 秒。另有三种各 1 次的机会，互不占用：SQL 修复（`MAX_QUERY_REPAIRS`）、追问退回（`MAX_CLARIFICATION_BOUNCES`）、回答退回（`MAX_ANSWER_BOUNCES`）。
 - **修复与退回。** 可修复的 SQL 错误（例如语法不在子集里、参数个数不对、没声明指标）给模型一次修复机会，用完以 502 `query_repair_limit` 结束；安全类拒绝直接以 DENIED 结束，不给修复。追问和回答的核对见下面的 catalog 和已核实事实两节。
@@ -159,12 +159,27 @@ HTTP 接口都在 `src/queryshield/api/main.py`：
 - 原生模式有自己的四个版本号（提示词、动作 schema、工具描述、适配器），记在事件和 checkpoint 里。一个 run 始终按开始时的协议继续；协议不同的 checkpoint 不能交给另一种协议的 Agent 恢复。
 - 事件只记函数名（不在提供列表里的记 `<other>`）、arguments 的长度和 sha256、`finish_reason`，不记原文。
 
+### 多 Agent（B2，对比实验）
+
+服务端设置 `QUERYSHIELD_AGENT_PROFILE=b2` 时，每个 run 由一个协调者和 2–3 个子 Agent 完成；客户端和模型都选不了，默认仍是 B1。代码在 `src/queryshield/agent/delegation.py` 和 `src/queryshield/agent/graph.py`，组装在 `src/queryshield/agent/runtime.py` 的 `build_b2_agent`。
+
+- **协调者就是 B1 的有界 Agent，多一个 `delegate` 动作**：`{"type":"delegate","subtasks":[{"metrics":[...],"time_window":{...}}, ...]}`，2–3 个子任务，每个只有指标和时间窗，没有 SQL、身份、预算或提示词。委派之前，协调者和 B1 完全一样（检索、看表、自己查询、追问、走审批）；每个 run 最多委派一次，之后只能作答或拒绝，别的动作以 502 `invalid_action_after_delegation` 结束。
+- **子任务的校验就是查询声明的校验**：每个子任务走 `resolve_query_declaration` 和说法表（核对的是用户原来的问题）。声明错误用掉那一次 SQL 修复；问题要追问的，像查询时一样停在 `WAITING_USER`。追问确认过的指标，所有子任务合起来必须保留（`check_confirmed_metrics`）；同一个（指标、时间窗）只能出现一次。
+- **子 Agent 只拿到自己的子任务**：问题是服务端按 catalog 写的一句话（指标名和时间窗），绑定已确认，检索关掉，不能再委派。它用这个 run 的身份、受控工具、模型和调用记录（每次调用都带根 run 的 `X-Run-Id`）。绑定的指标都有了标量结果，子 Agent 就结束，结束前用回答核对时同一条证据规则检查一遍；它不写回答。
+- **汇总**：子 Agent 都完成后，它们成功的查询结果并进协调者的状态，协调者再调一次模型作答，照旧由服务端核对：每个子任务的每个绑定结果都必须引用，数字由服务端渲染。有一个子任务没完成，run 就没有回答：被服务端安全规则拒绝的记 DENIED（403，沿用那个码）；否则超预算的记 LIMIT_REACHED；否则 FAILED，沿用子 Agent 的码（追问、等审批、自己作答或拒绝记 `subtask_incomplete`）。同一类取编号最小的子任务。
+- **预算共享，委派时一次分好**：整个 run 仍是 6 次模型调用、8 次工具调用、60 秒。剩下的模型调用先给协调者留 1 次作答，其余平均分给子 Agent（向下取整）；工具调用平均分；时间用 run 剩下的。分不到每个子 Agent 至少 1 次模型调用和 1 次工具调用时，以 `delegation_budget_insufficient` 结束（LIMIT_REACHED）。
+- **并行与事件**：子 Agent 在线程池里同时运行，全部结束后才汇总或抛出，所以终止事件之后不会再有子 Agent 的事件。每个 Agent 的步骤照旧边执行边写进 run 的事件流，事件带 `agent` 字段（`coordinator`、`subtask-1`…）；另有一条 `delegation` 事件（每个子任务的指标、时间窗和分到的预算）和每个子任务一条 `subtask` 事件。各 Agent 的 `sequence` 各自编号，事件流的顺序以状态库的 `event_id` 为准，`Last-Event-ID` 不受影响。run 的调用次数和用量包括所有 Agent，有一次调用的用量未知或没写进事件，合计就是 unknown。
+- **线程间共享的对象**：两个计数包装（模型调用、SQL 执行）在锁里计数；调用记录和状态库本来就带锁；受控工具按（run、结果编号）存结果，每次查询新开数据库连接；真实模型适配器每次调用自己开 HTTP 客户端，Fake 模型没有状态。步骤写入器有自己的锁：**先拿写入器的锁、再拿状态库的锁**，状态库从不回调写入器，没有反过来的路径。MCP 元数据会话不在线程间共用：B2 配 `QUERYSHIELD_METADATA_TOOLS=mcp` 在建 run 之前就以 503 拒绝；配 native 协议同样拒绝（B2 只支持 json）。
+- **恢复**只会发生在委派之前（协调者自己追问时），checkpoint 格式不变；B2 有自己的提示词和动作 schema 版本号，B1 和 B2 的 checkpoint 不能互相恢复。
+
 ### 评测
 
 `src/queryshield/evaluation/` 用同一个模型、同一组受控工具、同一个身份，成对运行两种配置：
 
 - **B0**（`run_b0_single_pass`）：一次模型生成、一次受控执行，不检索、不追问、不修复，作对照基线；
 - **B1**（`build_b1_agent`）：产品的有界 Agent。
+
+B2 不进这套评测：它和 B1 的对比用演示库上的复合题（见[演示数据](demo-data.md)第 3 节）。
 
 题目在 `evals/development/`：冻结的 20 道题（其中 8 道关键题，`state_cases.py` 要求关键题集合恰好是这 8 道）和 3 道补充题。安全违规按安全题的禁止副作用计数（`state_oracle.py`）。评测直接构造 `RunService`，走的是与 HTTP 相同的 Agent 装配和受控工具。
 
@@ -261,3 +276,4 @@ sequenceDiagram
 9. **只能单进程部署。** 审批的“检查再执行”靠进程内的锁。为什么：状态库是 SQLite，单进程足够演示和评测，跨进程的原子状态转换要先改状态库接口。代价：不能横向扩展；见[运维说明](operations.md)第 6 节。
 10. **Fake 与真实模型严格分开。** 缺配置时服务以 503 结束（检查脚本记为 blocked），不会退回 Fake；用量未知记 `unknown`，不补 0。为什么：“跑通了”必须能说明跑的是什么。代价：没有密钥时只能看 Fake 结果，Fake 只认演示和评测里写好的题。
 11. **原生 function calling 只换输出方式。** 原生模式下，上下文仍然每次由服务端重建，工具结果仍作为不可信数据放在 user 消息里；不回放模型上一轮的 `tool_calls`，也不加带 `tool_call_id` 的 tool 消息。为什么：与 json 协议对比时只改一个变量；服务端也从不回显模型自己的输出。代价：这不是标准的多轮工具消息形式，模型看不到自己上一轮调用的原文，只看到服务端记下的结果。
+12. **多 Agent 的协调者就是有界 Agent 加一个动作。** 委派只交出结构化的子任务（指标和时间窗），子 Agent 只看到服务端写的那一句话，预算从同一个 run 里分，委派之后不能再追问。为什么：子任务的校验、结果的核实、事实的渲染都复用单 Agent 已经验证过的规则，多 Agent 不多出一条信任路径；子 Agent 看不到原问题，就不会自己改题；共享预算让两种配置的对比只差“怎么分工”；委派之后不追问，等待中的 run 就不会带着子 Agent 的状态，checkpoint 格式不用改。代价：子 Agent 不能追问或走审批，遇到就算失败；协调者作答前必须等所有子 Agent；没做固定的专家角色和技能、委派之后的恢复、检索缓存。对比实验不要求 B2 比 B1 好，结论以复合题的数字为准。

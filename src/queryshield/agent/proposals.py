@@ -238,6 +238,26 @@ class ParallelReadonlyAction:
         return {"type": "parallel_readonly", "metric_ids": list(self.metric_ids)}
 
 
+# A coordinator's delegate action splits a question into this many subtasks.
+MIN_SUBTASKS = 2
+MAX_SUBTASKS = 3
+_SUBTASK_FIELDS = frozenset({"metrics", "time_window"})
+
+
+@dataclass(frozen=True)
+class DelegateAction:
+    """A coordinator's split of the question: each subtask is only a metric declaration.
+
+    Each item holds exactly ``metrics`` and ``time_window``; their content is
+    checked like a query_readonly declaration before any subtask runs.
+    """
+
+    subtasks: tuple[Mapping[str, object], ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return {"type": "delegate", "subtasks": [dict(item) for item in self.subtasks]}
+
+
 @dataclass(frozen=True)
 class AskUserAction:
     question: str
@@ -286,7 +306,7 @@ class DenyAction:
 
 
 ProposalAction: TypeAlias = (
-    ToolCallAction | ParallelReadonlyAction | AskUserAction | FinalAnswerAction | DenyAction
+    ToolCallAction | ParallelReadonlyAction | AskUserAction | FinalAnswerAction | DenyAction | DelegateAction
 )
 
 
@@ -341,13 +361,17 @@ def parse_query_proposal(
     *,
     context: ExecutionContext,
     model_call_id: str,
+    delegate: bool = False,
 ) -> QueryProposal:
-    """Parse one provider response without executing any model-selected action."""
+    """Parse one provider response without executing any model-selected action.
+
+    ``delegate`` is set only for a coordinator; everyone else parses exactly as before.
+    """
     if not isinstance(context, ExecutionContext):
         raise TypeError("context must be an ExecutionContext")
     _check_server_id(model_call_id, "model_call_id")
     payload = _load_json(raw_content)
-    action = _parse_action(payload)
+    action = _parse_delegate(payload) if delegate and payload.get("type") == "delegate" else _parse_action(payload)
     return QueryProposal(
         context=context,
         model_call_id=model_call_id,
@@ -630,6 +654,24 @@ def _parse_parallel_readonly(payload: Mapping[str, object]) -> ParallelReadonlyA
     if any(metric_id not in PARALLEL_METRICS for metric_id in metric_ids):
         raise ProposalParseError("invalid_field", "metric_ids contains an unsupported metric")
     return ParallelReadonlyAction(metric_ids=metric_ids)
+
+
+def _parse_delegate(payload: Mapping[str, object]) -> DelegateAction:
+    _require_fields(payload, required={"type", "subtasks"}, allowed={"type", "subtasks"})
+    subtasks = payload["subtasks"]
+    if type(subtasks) is not list or not MIN_SUBTASKS <= len(subtasks) <= MAX_SUBTASKS:
+        raise ProposalParseError("invalid_field", f"subtasks must list {MIN_SUBTASKS} to {MAX_SUBTASKS} items")
+    items: list[dict[str, object]] = []
+    for item in subtasks:
+        if type(item) is not dict:
+            raise ProposalParseError("invalid_field", "each subtask must be an object")
+        _require_fields(item, required=set(_SUBTASK_FIELDS), allowed=_SUBTASK_FIELDS)
+        if type(item["metrics"]) is not list:
+            raise ProposalParseError("invalid_field", "subtask metrics must be an array")
+        if type(item["time_window"]) is not dict:
+            raise ProposalParseError("invalid_field", "subtask time_window must be an object")
+        items.append({"metrics": list(item["metrics"]), "time_window": dict(item["time_window"])})
+    return DelegateAction(tuple(items))
 
 
 def _parse_fact_refs(value: object) -> tuple[FactRef, ...]:

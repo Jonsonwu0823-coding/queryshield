@@ -27,6 +27,14 @@ NATIVE_VERSIONS: Final = {
     "adapter_version": NATIVE_ADAPTER_VERSION,
 }
 
+# The multi-agent profile: its coordinator's contract adds the delegate action
+# and its subtask agents share the run's configuration, so a checkpoint of one
+# profile never resumes under the other.
+MULTI_AGENT_VERSIONS: Final = {
+    "prompt_version": "qs-system-prompt-multi-agent-v1",
+    "action_schema_version": "qs-action-schema-multi-agent-v1",
+}
+
 
 def _version_text(value: object, *, field: str) -> str:
     if type(value) is not str or not value.strip() or len(value) > 200:
@@ -92,6 +100,7 @@ __all__ = [
     "DEFAULT_PROFILE",
     "DEFAULT_RUN_CONFIG",
     "NATIVE_ADAPTER_VERSION",
+    "MULTI_AGENT_VERSIONS",
     "NATIVE_VERSIONS",
     "RUN_CONFIG_VERSION",
     "SYSTEM_PROMPT_VERSION",

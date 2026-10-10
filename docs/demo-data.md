@@ -106,6 +106,41 @@ QUERYSHIELD_DATABASE_URL="$QUERYSHIELD_DEMO_DATABASE_URL" \
 
 模型行为上的偏差（被退回一次才答对、自己定月份、没有给出已核实的值）一律记为已知缺口，口径与 HTTP 冒烟一致。
 
+### 复合题：B1 与 B2 的对比
+
+`fixtures/demo/demo-composite-questions-v1.json` 有 8 道复合题，每道问 2–3 个部分，每个部分的（指标、时间窗、值）都写明了。它由同一个生成器生成，预期值同样算两遍（第 5 节）。
+
+| 题 | 覆盖的情形 |
+|---|---|
+| CQ01 | 同一个时间窗的两个指标，其中一个是退款后净额 |
+| CQ02 | 同一个指标的两个时间窗 |
+| CQ03 | 指标和时间窗都不同 |
+| CQ04 | 三个部分 |
+| CQ05 | 含糊说法“销售额”：先追问，回答“按支付金额统计”后再查 |
+| CQ06 | 其中一部分是空窗口（2026 年 5 月） |
+| CQ07 | 用 A 的身份明确要查 B 租户：入口拒绝，B 的数值不得出现 |
+| CQ08 | 租户 B，同一个时间窗的两个指标 |
+
+判定：每个期望的部分都要有已核实的事实，值和时间窗都对；少一个（`missing_fact`）、值不对（`value_mismatch`）、多出不在期望里的事实（`unexpected_fact`）都是硬失败。每条记录另有 `fact_completeness`（找到的部分 / 期望的部分）。所有题共用的那条规则照旧适用。CQ07 按 Q12 的规则判。
+
+`demo_run.py` 的 `--questions composite` 换成复合题，`--profile b1|b2` 设服务的 Agent 配置（不给时是服务自己的默认 B1）。摘要顶层多了 `profile` 和 `questions_set`，每条记录多了 `profile`、`delegated`、`subtask_count`、`tool_call_count`、`elapsed_ms`（脚本端测得的耗时，包括追问后的恢复）；`profile` 取自状态库里这个 run 实际用的配置，与 `--profile` 不一致就是硬失败。原有字段不变。
+
+```bash
+# Linux / macOS（QUERYSHIELD_DATABASE_URL 指向演示库）
+QUERYSHIELD_DATABASE_URL="$QUERYSHIELD_DEMO_DATABASE_URL" \
+  python scripts/demo_run.py --mode fake --questions composite --profile b1 --evidence-dir <证据目录>/b1
+QUERYSHIELD_DATABASE_URL="$QUERYSHIELD_DEMO_DATABASE_URL" \
+  python scripts/demo_run.py --mode fake --questions composite --profile b2 --evidence-dir <证据目录>/b2
+python scripts/compare_demo_runs.py <证据目录>/b1/demo-summary.json <证据目录>/b2/demo-summary.json
+```
+
+```powershell
+# 本机：-Profile、-Questions 两个参数，不给时行为与原来相同
+.\scripts\demo-local.ps1 -FakeDryRun -Profile b2 -Questions composite
+```
+
+`scripts/compare_demo_runs.py` 读两份以上的摘要，按 run 实际用的配置分组，输出通过数、事实完整率、模型和工具调用数、输入和输出 token、耗时的中位数和最大值、委派率、失败码。记录里没有的项写 `"none"`（例如 Fake 没有 token 用量），不补 0。对比不要求 B2 比 B1 好。
+
 ### 演示里看到的已知缺口（2026-10-01 的本机 Real）
 
 这三条都是产品或模型的行为，不是演示脚本的问题；产品层面的修复不在本说明范围，留作后续修复：
@@ -144,7 +179,7 @@ QUERYSHIELD_DATABASE_URL="$QUERYSHIELD_DEMO_DATABASE_URL" \
 预期答案算两遍，两遍一致才写进清单，**互不共享代码**：
 
 1. **第一遍（生成器内）**：`expected_metrics`，直接遍历内存里的订单和退款元组，按 catalog 口径算：已支付订单、`created_at ∈ [start, end)`；退款自己的时间和它所属的已支付订单的时间都在窗内、同一租户。结果写进清单。
-2. **第二遍（对库手写 SQL）**：`scripts/verify_demo_expected.py`。不 import `queryshield`，也不 import 生成器；SQL 是手写的 CTE + `EXISTS`，不照搬产品的 `NET_FEN_*` JOIN 写法；读清单里的（租户、窗口、预期值），通过只读角色在每个租户的事务里绑定租户（强制行级权限生效）逐项比对。窗口以字面 UTC 字符串写在清单里，测试再断言窗口与问题里的月份一致。
+2. **第二遍（对库手写 SQL）**：`scripts/verify_demo_expected.py`（演示题和复合题两份清单都查）。不 import `queryshield`，也不 import 生成器；SQL 是手写的 CTE + `EXISTS`，不照搬产品的 `NET_FEN_*` JOIN 写法；读清单里的（租户、窗口、预期值），通过只读角色在每个租户的事务里绑定租户（强制行级权限生效）逐项比对。窗口以字面 UTC 字符串写在清单里，测试再断言窗口与问题里的月份一致。
 
 测试里还有第三种读法：`tests/test_demo_generator.py` 用正则直接解析已提交的 SQL 文件，按另一种写法重算所有数值题。独立验收可以另用自己的算法。
 

@@ -11,11 +11,13 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 import json
 import os
+from threading import Lock
 from time import perf_counter
 from typing import Any
 
-from queryshield.agent.config import NATIVE_VERSIONS, RunConfig
+from queryshield.agent.config import MULTI_AGENT_VERSIONS, NATIVE_VERSIONS, RunConfig
 from queryshield.agent.context import build_context
+from queryshield.agent.delegation import COORDINATOR
 from queryshield.agent.graph import CLARIFICATION_NOT_NEEDED_CODE, AgentRunResult, BoundedAgent, GraphLimits
 from queryshield.agent.proposals import (
     AskUserAction,
@@ -55,7 +57,13 @@ from queryshield.tools.semantic import ControlledTools, ToolError
 
 B0_PROFILE = "B0-single-pass"
 B1_PROFILE = "B1-bounded-agent"
+# The evaluation compares B0 and B1 only.
 PROFILES = (B0_PROFILE, B1_PROFILE)
+# The coordinator of B2 is the B1 agent with a delegate action; only the server picks it.
+B2_PROFILE = "B2-multi-agent"
+PRODUCT_PROFILES = PROFILES + (B2_PROFILE,)
+# The bounded-graph profiles: they retrieve and can wait for the user (B0 does neither).
+BOUNDED_PROFILES = (B1_PROFILE, B2_PROFILE)
 DEFAULT_PRODUCT_PROFILE = B1_PROFILE
 B0_MODEL_CALL_LIMIT = 1
 B1_MODEL_CALL_LIMIT = 6
@@ -561,6 +569,35 @@ def build_b1_agent(
         run_config = RunConfig(profile=B1_PROFILE)
     if not isinstance(run_config, RunConfig) or run_config.profile != B1_PROFILE:
         raise ValueError("B1 requires a server-owned evaluation RunConfig")
+    return _bounded_agent(model, tools, call_store, run_config, retrieval_available, on_step)
+
+
+def build_b2_agent(
+    model: ModelAdapter,
+    tools: ControlledTools,
+    *,
+    call_store: Any | None = None,
+    run_config: RunConfig,
+    retrieval_available: bool = True,
+    on_step: Callable[[Mapping[str, object]], None] | None = None,
+) -> BoundedAgent:
+    """Assemble the B2 coordinator: B1's agent and budgets, plus delegate; the only B2 assembly."""
+
+    if run_config.profile != B2_PROFILE:
+        raise ValueError("B2 requires its server-owned RunConfig")
+    return _bounded_agent(model, tools, call_store, run_config, retrieval_available, on_step, role=COORDINATOR)
+
+
+def build_bounded_agent(model: ModelAdapter, tools: ControlledTools, *, run_config: RunConfig, **options: Any) -> BoundedAgent:
+    """The B1 agent or the B2 coordinator, by the run's profile (a run and its resume use the same one)."""
+
+    builder = build_b2_agent if run_config.profile == B2_PROFILE else build_b1_agent
+    return builder(model, tools, run_config=run_config, **options)
+
+
+def _bounded_agent(model, tools, call_store, run_config, retrieval_available, on_step, *, role=None) -> BoundedAgent:
+    """B1's budgets: the whole run's, also for B2 (its sub-agents get shares of them)."""
+
     return BoundedAgent(
         model,
         tools=tools,
@@ -573,6 +610,7 @@ def build_b1_agent(
         run_config=run_config,
         retrieval_available=retrieval_available,
         on_step=on_step,
+        role=role,
     )
 
 
@@ -581,7 +619,7 @@ def b1_result_payload(
     context: ExecutionContext,
     question: str,
 ) -> dict[str, object]:
-    """Shape one B1 graph result; the only B1 result shaping."""
+    """Shape one bounded-graph result (B1, or B2's coordinator); the only such shaping."""
 
     payload = result.as_dict()
     facts = payload.get("facts")
@@ -601,7 +639,9 @@ def b1_result_payload(
         and payload.get("model_call_count") == 0
         and payload.get("tool_call_count") == 0
     )
-    return {"profile": B1_PROFILE, **payload}
+    # Only B2 is labelled by its configuration: B1's graph also runs under evaluation configurations.
+    profile = B2_PROFILE if result.run_config.profile == B2_PROFILE else B1_PROFILE
+    return {"profile": profile, **payload}
 
 
 # ---------------------------------------------------------------------------
@@ -617,7 +657,7 @@ class RuntimeConfigurationError(RuntimeError):
         super().__init__(f"{code}: {message}")
 
 
-_PROFILE_ALIASES = {"b0": B0_PROFILE, "b1": B1_PROFILE, B0_PROFILE.lower(): B0_PROFILE, B1_PROFILE.lower(): B1_PROFILE}
+_PROFILE_ALIASES = {"b0": B0_PROFILE, "b1": B1_PROFILE, "b2": B2_PROFILE} | {name.lower(): name for name in PRODUCT_PROFILES}
 
 
 def configured_profile() -> str:
@@ -737,10 +777,13 @@ class CountingExecutor:
     def __init__(self, delegate: Any) -> None:
         self.delegate = delegate
         self.executions = 0
+        # B2's sub-agents query from several threads.
+        self._lock = Lock()
 
     def execute(self, sql, *, context, params=(), metric_bindings=()):
         result = self.delegate.execute(sql, context=context, params=params, metric_bindings=metric_bindings)
-        self.executions += 1
+        with self._lock:
+            self.executions += 1
         return result
 
     def __getattr__(self, name: str) -> object:
@@ -753,9 +796,12 @@ class CountingModel:
     def __init__(self, delegate: Any) -> None:
         self.delegate = delegate
         self.calls = 0
+        # B2's sub-agents call the model from several threads.
+        self._lock = Lock()
 
     def complete(self, messages, **kwargs):
-        self.calls += 1
+        with self._lock:
+            self.calls += 1
         return self.delegate.complete(messages, **kwargs)
 
     def __getattr__(self, name: str) -> object:
@@ -783,6 +829,10 @@ def product_run_config(profile: str, *, catalog: Any, retriever: Any | None) -> 
         knowledge_snapshot_id=getattr(snapshot, "snapshot_id", DEFAULT_KNOWLEDGE_SNAPSHOT_ID),
     )
     protocol_config = with_model_protocol(config)  # read even for B0: a bad setting is blocked, not ignored
+    if profile == B2_PROFILE:
+        if protocol_config != config:
+            raise RuntimeConfigurationError("invalid_model_protocol", "the multi-agent profile runs the json protocol only")
+        return replace(config, **MULTI_AGENT_VERSIONS)
     return protocol_config if profile == B1_PROFILE else config
 
 
@@ -821,8 +871,8 @@ def product_tools(deps: RuntimeDependencies, *, executor: Any | None = None, met
     arguments = {
         "catalog": load_default_catalog(),
         "executor": executor if executor is not None else deps.executor,
-        # B0 never retrieves (the comparison rule); B1 uses the server retriever.
-        "retriever": tools_retriever(deps.retriever) if deps.profile == B1_PROFILE else None,
+        # B0 never retrieves (the comparison rule); B1 and B2 use the server retriever.
+        "retriever": tools_retriever(deps.retriever) if deps.profile in BOUNDED_PROFILES else None,
     }
     if metadata is None:
         return ControlledTools(**arguments)
@@ -842,17 +892,17 @@ def run_profile(
 ) -> ProfileRun:
     """Run the server-configured profile once; the product's only run entry.
 
-    ``on_step`` sees the agent state after every graph step (B1 only; B0 has no steps).
+    ``on_step`` sees the agent state after every graph step (B1 and B2; B0 has no steps).
     """
 
-    if deps.profile not in PROFILES:
+    if deps.profile not in PRODUCT_PROFILES:
         raise RuntimeConfigurationError("invalid_agent_profile", "the configured profile is not registered")
     tools = tools or product_tools(deps)
     run_config = product_run_config(deps.profile, catalog=tools.catalog, retriever=tools.retriever)
     if deps.profile == B0_PROFILE:
         payload = run_b0_single_pass(deps.model, tools, context, question, time_window=time_window, run_config=run_config)
         return ProfileRun(payload, None, tools, run_config)
-    agent = build_b1_agent(
+    agent = build_bounded_agent(
         deps.model,
         tools,
         call_store=deps.call_store,
@@ -885,14 +935,19 @@ __all__ = [
     "B0_PROFILE",
     "B0_SYSTEM_PROMPT",
     "B1_PROFILE",
+    "B2_PROFILE",
+    "BOUNDED_PROFILES",
     "DEFAULT_PRODUCT_PROFILE",
     "FAILED_ERROR_HTTP",
+    "PRODUCT_PROFILES",
     "PROFILES",
     "RUN_OUTCOMES",
     "RunOutcome",
     "b1_result_payload",
     "bind_facts_to_context",
     "build_b1_agent",
+    "build_b2_agent",
+    "build_bounded_agent",
     "outcome_for",
     "render_fact_records",
     "run_b0_single_pass",

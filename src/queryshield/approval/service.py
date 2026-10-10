@@ -33,14 +33,15 @@ from queryshield.agent.metric_intent import build_metric_binding
 from queryshield.agent.proposals import ExecutionContext, FactRef, MetricBinding, ResultEvidence
 from queryshield.agent.config import RunConfig
 from queryshield.agent.runtime import (
-    B1_PROFILE,
+    B2_PROFILE,
+    BOUNDED_PROFILES,
     CountingExecutor,
     CountingModel,
     RuntimeConfigurationError,
     RuntimeDependencies,
     b1_result_payload,
     bind_facts_to_context,
-    build_b1_agent,
+    build_bounded_agent,
     check_fake_database_boundary,
     configured_profile,
     model_for_mode,
@@ -484,7 +485,7 @@ class RunService:
         return RuntimeDependencies(
             model=model_for_mode(self.mode),
             executor=self._executor_factory(),
-            retriever=product_retriever(self.mode) if profile == B1_PROFILE else None,
+            retriever=product_retriever(self.mode) if profile in BOUNDED_PROFILES else None,
             call_store=None,
             profile=profile,
         )
@@ -506,7 +507,9 @@ class RunService:
         question: str,
         time_window: Mapping[str, str] | None,
         deps: RuntimeDependencies,
+        metadata: object | None = None,
     ) -> str:
+        _check_metadata_tools(deps.profile, metadata)
         if self._active_count() >= MAX_ACTIVE_RUNS:
             raise ApprovalConflict("run_capacity_reached", "active run capacity is full")
         run_id = f"run-{uuid4()}"
@@ -521,7 +524,7 @@ class RunService:
                 else DEFAULT_KNOWLEDGE_SNAPSHOT
             )
         catalog = load_default_catalog()
-        run_retriever = deps.retriever if deps.profile == B1_PROFILE else None
+        run_retriever = deps.retriever if deps.profile in BOUNDED_PROFILES else None
         agent_run_config = product_run_config(deps.profile, catalog=catalog, retriever=tools_retriever(run_retriever))
         checkpoint = {
             "state_schema_version": STATE_VERSION,
@@ -575,7 +578,7 @@ class RunService:
         subject = RunIdentity.from_mapping(identity)
         metadata = self.metadata_config()
         deps = deps or self.default_dependencies()
-        run_id = self._reserve_run(subject, question, time_window, deps)
+        run_id = self._reserve_run(subject, question, time_window, deps, metadata)
         return self._execute_run(run_id, subject, question, time_window, deps, metadata)
 
     def start_async(
@@ -589,7 +592,7 @@ class RunService:
         subject = RunIdentity.from_mapping(identity)
         metadata = self.metadata_config()
         deps = deps or self.default_dependencies()
-        run_id = self._reserve_run(subject, question, time_window, deps)
+        run_id = self._reserve_run(subject, question, time_window, deps, metadata)
         worker = Thread(
             target=self._execute_run,
             args=(run_id, subject, question, time_window, deps, metadata),
@@ -795,7 +798,7 @@ class RunService:
         run = self.store.get_run(run_id) or {}
         update: dict[str, object] = {"sql_exec_count": sql_exec_count}
         if writer is not None and writer.state is not None:
-            update.update(_step_counters(writer.state))
+            update.update(writer.counters())
         elif run.get("usage") is None:
             update["usage_json"] = _json(_usage_summary(()))
         if (model.calls if model is not None else 0) > (writer.model_calls_written if writer is not None else 0):
@@ -939,6 +942,7 @@ class RunService:
         metadata = self.metadata_config()
         with self._resume_lock, _executing(run_id):
             run, checkpoint_envelope, agent_checkpoint, run_config = self._load_waiting_run(run_id, subject)
+            _check_metadata_tools(run_config.profile, metadata)
             # Clarified values in the server checkpoint are authoritative.  A
             # user answer may supply a bounded month, but it cannot select or
             # replace the metric binding.
@@ -967,12 +971,12 @@ class RunService:
                     executor=counter,
                     retriever=retriever,
                     call_store=call_store,
-                    profile=B1_PROFILE,
+                    profile=run_config.profile,
                 )
                 tools = product_tools(deps, metadata=metadata)
                 for evidence in paused_results:
                     tools.restore_result_evidence(evidence, context=context)
-                agent = build_b1_agent(
+                agent = build_bounded_agent(
                     counted,  # type: ignore[arg-type]
                     tools,
                     call_store=call_store,
@@ -1077,7 +1081,7 @@ class RunService:
             run_config = RunConfig.from_dict(dict(config_value))
         except (TypeError, ValueError) as exc:
             raise ApprovalConflict("checkpoint_invalid", "waiting run profile is invalid") from exc
-        if run_config.profile != B1_PROFILE:
+        if run_config.profile not in BOUNDED_PROFILES:
             raise ApprovalConflict("not_supported", "the single-pass profile cannot resume a task")
         if agent_checkpoint.get("run_config") != run_config.as_dict():
             raise ApprovalConflict("checkpoint_invalid", "checkpoint profile differs from the stored run profile")
@@ -1461,6 +1465,15 @@ def _approved_fact_refs(prior: Sequence[ResultEvidence], evidence: ResultEvidenc
     return references
 
 
+def _check_metadata_tools(profile: str, metadata: object | None) -> None:
+    """B2 runs with the local metadata tools: one MCP session is not shared across its sub-agents' threads."""
+
+    if profile == B2_PROFILE and metadata is not None:
+        raise RuntimeConfigurationError(
+            "invalid_metadata_tools_configuration", "the multi-agent profile runs with the local metadata tools only"
+        )
+
+
 def _paused_evidences(envelope: Mapping[str, object], run: Mapping[str, object]) -> list[ResultEvidence]:
     """The results the run verified before it paused, rebuilt and checked against the stored run.
 
@@ -1498,19 +1511,53 @@ class _StepWriter:
 
     ``written`` counts the run's events already stored (a resume starts after the
     checkpoint's).  ``state`` is the last agent state whose events are all stored.
+
+    B2's sub-agents report their own states (marked ``agent``) from their threads.
+    Their events are counted per sub-agent and also in ``written``: the
+    coordinator's next state takes them in right after the events already stored,
+    so the coordinator's writing skips them.  Lock order: this writer's lock, then
+    the state store's; the store never calls back into the writer.
     """
 
     def __init__(self, store: StateStore, run_id: str, *, written: int = 0) -> None:
         self.store, self.run_id, self.written = store, run_id, written
         self.model_calls_written = 0
         self.state: Mapping[str, object] | None = None
+        self._lock = Lock()
+        self._subtask_written: dict[str, int] = {}
+        self._subtask_states: dict[str, Mapping[str, object]] = {}
 
     def __call__(self, state: Mapping[str, object]) -> None:
-        self.write(state.get("events") or ())
-        self.state = state
+        events = state.get("events") or ()
+        label = state.get("agent")
+        with self._lock:
+            if label is None:
+                self._store(events[self.written:])
+                self.state = state
+                # Any delegation before this state is part of it now.
+                self._subtask_written.clear()
+                self._subtask_states.clear()
+                return
+            self._store(events[self._subtask_written.get(label, 0):], label=str(label))
+            self._subtask_states[str(label)] = state
 
     def write(self, events: Sequence[Mapping[str, object]]) -> None:
-        for event in events[self.written:]:
+        with self._lock:
+            self._store(events[self.written:])
+
+    def counters(self) -> dict[str, object]:
+        """What a run that raised stores: the last stored state's counts and usage, with B2's running sub-agents'."""
+
+        with self._lock:
+            states = [state for state in (self.state, *self._subtask_states.values()) if state is not None]
+        return {
+            "model_call_count": sum(int(state.get("model_call_count", 0)) for state in states),
+            "tool_call_count": sum(int(state.get("tool_call_count", 0)) for state in states),
+            "usage_json": _json(_usage_summary([event for state in states for event in state.get("events", ())])),
+        }
+
+    def _store(self, events: Sequence[Mapping[str, object]], *, label: str | None = None) -> None:
+        for event in events:
             self.store.append_event(
                 self.run_id,
                 "agent_step",
@@ -1519,18 +1566,10 @@ class _StepWriter:
                 payload=dict(event),
             )
             self.written += 1
+            if label is not None:
+                self._subtask_written[label] = self._subtask_written.get(label, 0) + 1
             if event.get("kind") == "model_call":
                 self.model_calls_written += 1
-
-
-def _step_counters(state: Mapping[str, object]) -> dict[str, object]:
-    """What a commit stores from an agent state: the graph's own counters and the usage of its events."""
-
-    return {
-        "model_call_count": int(state.get("model_call_count", 0)),
-        "tool_call_count": int(state.get("tool_call_count", 0)),
-        "usage_json": _json(_usage_summary(state.get("events", ()))),
-    }
 
 
 def _commit_counters(current: Mapping[str, object], payload: Mapping[str, object], sql_executions: int) -> dict[str, object]:

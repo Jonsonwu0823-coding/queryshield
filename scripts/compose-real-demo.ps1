@@ -7,7 +7,9 @@ param(
     [ValidateSet('json', 'native')][string]$ModelProtocol = 'json',
     [switch]$NonInteractive,
     [string]$GatewayBaseUrl,
-    [string]$GatewayNetwork
+    [string]$GatewayNetwork,
+    [ValidateSet('b1', 'b2')][string]$Profile,
+    [ValidateSet('demo', 'composite')][string]$Questions = 'demo'
 )
 
 # The demo questions and the walkthrough against the Docker Compose stack with the REAL model.
@@ -29,6 +31,9 @@ param(
 # demo questions run (no walkthrough), so each run in the gateway's ledger is one run_id in
 # demo-summary.json, the only file copied. The gateway must accept the same model names.
 #
+# -Profile b1|b2 sets the app's Agent profile (QUERYSHIELD_AGENT_PROFILE; default: B1) and
+# -Questions composite runs the questions with 2-3 parts instead of the demo questions.
+#
 # The summaries hold ids, status codes, terminal states and numbers only. The raw demo file
 # (demo-raw.json, answers and customer names) stays inside the container and is not copied.
 
@@ -38,6 +43,7 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $touchedNames = @(
     "QUERYSHIELD_PROVIDER_MODE",
     "QUERYSHIELD_MODEL_PROTOCOL",
+    "QUERYSHIELD_AGENT_PROFILE",
     "QUERYSHIELD_MODEL_BASE_URL",
     "QUERYSHIELD_MODEL_API_KEY",
     "QUERYSHIELD_MODEL_NAME",
@@ -145,6 +151,8 @@ try {
     if ($gatewayMode) { $script:composeFiles = @("-f", "compose.yaml", "-f", "compose.model-gateway.yaml") }
     [Environment]::SetEnvironmentVariable("QUERYSHIELD_PROVIDER_MODE", $mode, "Process")
     [Environment]::SetEnvironmentVariable("QUERYSHIELD_MODEL_PROTOCOL", $ModelProtocol, "Process")
+    # Unset unless -Profile is given, so the app runs its default (B1) whatever this session holds.
+    [Environment]::SetEnvironmentVariable("QUERYSHIELD_AGENT_PROFILE", $Profile, "Process")
     # The demo run is judged against the local metadata tools unless you set the MCP setting yourself.
     if ($mode -eq 'real') {
         if ($gatewayMode) {
@@ -276,7 +284,10 @@ try {
     }
 
     Write-Output "Running the demo questions ($mode) inside the app container; output is question ids, verdicts and known gaps only."
-    $demoExit = Invoke-Docker @("compose", "exec", "-T", "app", "python", "scripts/demo_run.py", "--mode", $mode, "--base-url", "http://127.0.0.1:8000", "--model-protocol", $ModelProtocol, "--evidence-dir", "/tmp/demo-run")
+    $demoArguments = @("compose", "exec", "-T", "app", "python", "scripts/demo_run.py", "--mode", $mode, "--base-url", "http://127.0.0.1:8000", "--model-protocol", $ModelProtocol, "--evidence-dir", "/tmp/demo-run")
+    if ($Profile) { $demoArguments += @("--profile", $Profile) }
+    if ($Questions -ne 'demo') { $demoArguments += @("--questions", $Questions) }
+    $demoExit = Invoke-Docker $demoArguments
     $copies = @(@{ From = "/tmp/demo-run/demo-summary.json"; To = "demo-summary.json" })
     $walkExit = 0
     # Through the gateway only the demo runs: every run in the gateway's ledger is then a run_id in demo-summary.json.

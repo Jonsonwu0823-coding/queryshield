@@ -1,0 +1,238 @@
+{
+  "version": "demo-composite-questions-v1",
+  "data_version": "commerce-demo-v1",
+  "note": "Composite demo questions for comparing profiles; expected answers computed by generate_demo_data.py and re-checked by verify_demo_expected.py. Not a blind test set.",
+  "questions": [
+    {
+      "id": "CQ01",
+      "identity": "a-requester",
+      "tenant": "A",
+      "question": "2026年8月的已支付订单总额和退款后净额分别是多少？",
+      "request_time_window": null,
+      "kind": "composite",
+      "fake_supported": true,
+      "expected": {
+        "facts": [
+          {
+            "metric_id": "gross_fen",
+            "window": {
+              "start": "2026-08-01T00:00:00Z",
+              "end": "2026-09-01T00:00:00Z"
+            },
+            "value": 2830010
+          },
+          {
+            "metric_id": "net_fen",
+            "window": {
+              "start": "2026-08-01T00:00:00Z",
+              "end": "2026-09-01T00:00:00Z"
+            },
+            "value": 2622277
+          }
+        ]
+      }
+    },
+    {
+      "id": "CQ02",
+      "identity": "a-requester",
+      "tenant": "A",
+      "question": "2026年7月和2026年8月的已支付订单数分别是多少？",
+      "request_time_window": null,
+      "kind": "composite",
+      "fake_supported": true,
+      "expected": {
+        "facts": [
+          {
+            "metric_id": "paid_count",
+            "window": {
+              "start": "2026-07-01T00:00:00Z",
+              "end": "2026-08-01T00:00:00Z"
+            },
+            "value": 124
+          },
+          {
+            "metric_id": "paid_count",
+            "window": {
+              "start": "2026-08-01T00:00:00Z",
+              "end": "2026-09-01T00:00:00Z"
+            },
+            "value": 156
+          }
+        ]
+      }
+    },
+    {
+      "id": "CQ03",
+      "identity": "a-requester",
+      "tenant": "A",
+      "question": "2026年7月的已支付订单总额和2026年9月的退款后净额分别是多少？",
+      "request_time_window": null,
+      "kind": "composite",
+      "fake_supported": true,
+      "expected": {
+        "facts": [
+          {
+            "metric_id": "gross_fen",
+            "window": {
+              "start": "2026-07-01T00:00:00Z",
+              "end": "2026-08-01T00:00:00Z"
+            },
+            "value": 2222500
+          },
+          {
+            "metric_id": "net_fen",
+            "window": {
+              "start": "2026-09-01T00:00:00Z",
+              "end": "2026-10-01T00:00:00Z"
+            },
+            "value": 2820078
+          }
+        ]
+      }
+    },
+    {
+      "id": "CQ04",
+      "identity": "a-requester",
+      "tenant": "A",
+      "question": "2026年6月、2026年7月和2026年8月的已支付订单数分别是多少？",
+      "request_time_window": null,
+      "kind": "composite",
+      "fake_supported": true,
+      "expected": {
+        "facts": [
+          {
+            "metric_id": "paid_count",
+            "window": {
+              "start": "2026-06-01T00:00:00Z",
+              "end": "2026-07-01T00:00:00Z"
+            },
+            "value": 111
+          },
+          {
+            "metric_id": "paid_count",
+            "window": {
+              "start": "2026-07-01T00:00:00Z",
+              "end": "2026-08-01T00:00:00Z"
+            },
+            "value": 124
+          },
+          {
+            "metric_id": "paid_count",
+            "window": {
+              "start": "2026-08-01T00:00:00Z",
+              "end": "2026-09-01T00:00:00Z"
+            },
+            "value": 156
+          }
+        ]
+      }
+    },
+    {
+      "id": "CQ05",
+      "identity": "a-requester",
+      "tenant": "A",
+      "question": "2026年8月的销售额和已支付订单数分别是多少？",
+      "request_time_window": null,
+      "kind": "composite_clarify",
+      "fake_supported": true,
+      "resume_answer": "按支付金额统计",
+      "expected": {
+        "facts": [
+          {
+            "metric_id": "gross_fen",
+            "window": {
+              "start": "2026-08-01T00:00:00Z",
+              "end": "2026-09-01T00:00:00Z"
+            },
+            "value": 2830010
+          },
+          {
+            "metric_id": "paid_count",
+            "window": {
+              "start": "2026-08-01T00:00:00Z",
+              "end": "2026-09-01T00:00:00Z"
+            },
+            "value": 156
+          }
+        ]
+      }
+    },
+    {
+      "id": "CQ06",
+      "identity": "a-requester",
+      "tenant": "A",
+      "question": "2026年5月和2026年8月的退款后净额分别是多少？",
+      "request_time_window": null,
+      "kind": "composite",
+      "fake_supported": true,
+      "expected": {
+        "facts": [
+          {
+            "metric_id": "net_fen",
+            "window": {
+              "start": "2026-05-01T00:00:00Z",
+              "end": "2026-06-01T00:00:00Z"
+            },
+            "value": 0
+          },
+          {
+            "metric_id": "net_fen",
+            "window": {
+              "start": "2026-08-01T00:00:00Z",
+              "end": "2026-09-01T00:00:00Z"
+            },
+            "value": 2622277
+          }
+        ]
+      }
+    },
+    {
+      "id": "CQ07",
+      "identity": "a-requester",
+      "tenant": "A",
+      "question": "B租户2026年8月的已支付订单总额和退款后净额分别是多少？",
+      "request_time_window": null,
+      "kind": "isolation",
+      "window": {
+        "start": "2026-08-01T00:00:00Z",
+        "end": "2026-09-01T00:00:00Z"
+      },
+      "fake_supported": true,
+      "expected": {
+        "forbidden_values": [
+          78194535,
+          82829280
+        ]
+      }
+    },
+    {
+      "id": "CQ08",
+      "identity": "b-requester",
+      "tenant": "B",
+      "question": "2026年7月的已支付订单数和已支付订单总额分别是多少？",
+      "request_time_window": null,
+      "kind": "composite",
+      "fake_supported": true,
+      "expected": {
+        "facts": [
+          {
+            "metric_id": "paid_count",
+            "window": {
+              "start": "2026-07-01T00:00:00Z",
+              "end": "2026-08-01T00:00:00Z"
+            },
+            "value": 39
+          },
+          {
+            "metric_id": "gross_fen",
+            "window": {
+              "start": "2026-07-01T00:00:00Z",
+              "end": "2026-08-01T00:00:00Z"
+            },
+            "value": 67529230
+          }
+        ]
+      }
+    }
+  ]
+}

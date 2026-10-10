@@ -2,7 +2,7 @@
 
 This is the second, independent computation of the expected answers (the first
 is the in-memory algorithm in scripts/generate_demo_data.py).  It imports nothing
-from queryshield or from the generator: it reads the committed question list
+from queryshield or from the generator: it reads the committed question lists (demo and composite)
 (tenant, window, expected value), runs hand-written SQL on the database and
 compares.  Exit code 0 when every value agrees, 1 on any difference, 2 when it
 cannot run (no URL, wrong database name, database unreachable).
@@ -22,6 +22,7 @@ import sys
 from urllib.parse import unquote, urlsplit
 
 QUESTIONS_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "demo" / "demo-questions-v1.json"
+COMPOSITE_PATH = QUESTIONS_PATH.with_name("demo-composite-questions-v1.json")
 
 # Hand-written; deliberately not the product's join-based plan.  A refund counts
 # when its own time and its paid order's time are both inside [lo, hi).
@@ -84,14 +85,18 @@ def verify(conn, document: dict) -> list[tuple[str, bool, str]]:
     def record(qid: str, ok: bool, detail: str = "") -> None:
         verdicts.append((qid, ok, detail))
 
-    for tenant, expected in sorted(document["table_counts"].items()):
+    for tenant, expected in sorted(document.get("table_counts", {}).items()):
         for table, count in expected.items():
             ((actual,),) = _run(conn, tenant, COUNT_SQL[table])
             record(f"rows:{tenant}:{table}", int(actual) == count, f"expected {count}, got {int(actual)}")
 
     for q in document["questions"]:
-        qid, kind, tenant, window, expected = q["id"], q["kind"], q["tenant"], q["window"], q["expected"]
-        if kind in {"metric", "empty_window", "clarify_resume"}:
+        qid, kind, tenant, window, expected = q["id"], q["kind"], q["tenant"], q.get("window"), q["expected"]
+        if kind in {"composite", "composite_clarify"}:
+            for fact in expected["facts"]:
+                actual = metrics(conn, tenant, fact["window"])[fact["metric_id"]]
+                record(f"{qid}:{fact['metric_id']}:{fact['window']['start'][:7]}", actual == fact["value"], f"expected {fact['value']}, got {actual}")
+        elif kind in {"metric", "empty_window", "clarify_resume"}:
             actual = metrics(conn, tenant, window)[expected["metric_id"]]
             record(qid, actual == expected["value"], f"{expected['metric_id']}: expected {expected['value']}, got {actual}")
         elif kind == "observe_refund":
@@ -143,12 +148,12 @@ def main() -> int:
     if not name.endswith("_demo"):
         print("verify_demo_expected blocked: the database name must end with _demo")
         return 2
-    document = json.loads(QUESTIONS_PATH.read_text(encoding="utf-8"))
+    documents = [json.loads(path.read_text(encoding="utf-8")) for path in (QUESTIONS_PATH, COMPOSITE_PATH)]
     import psycopg
 
     try:
         with psycopg.connect(url, connect_timeout=5, options="-c default_transaction_read_only=on") as conn:
-            verdicts = verify(conn, document)
+            verdicts = [verdict for document in documents for verdict in verify(conn, document)]
     except psycopg.Error as exc:
         print(f"verify_demo_expected blocked: {type(exc).__name__}")
         return 2

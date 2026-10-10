@@ -28,6 +28,7 @@
 | Fake 与真实模型分开；用量未知不补 0 | `src/queryshield/providers/openai_compatible.py`、`src/queryshield/providers/fake_model.py`；`src/queryshield/agent/runtime.py` 的 `model_for_mode` | `tests/test_model_adapters.py`、`tests/test_usage_checks.py` | `python -m pytest tests/test_model_adapters.py` | CI 全量通过（2026-10-03） |
 | 演示答案独立复算 | `scripts/generate_demo_data.py`、`scripts/verify_demo_expected.py`；判定在 `scripts/demo_run.py`、`scripts/demo_walkthrough.py` | `tests/test_demo_expected_answers.py`、`tests/test_demo_judge.py`、`tests/test_demo_walkthrough.py` | `python scripts/generate_demo_data.py --check`；演示脚本 | 见下文“演示题与演示脚本” |
 | 一条命令运行；本机与 CI 同一入口 | `Dockerfile`、`compose.yaml`、`scripts/new_env.py`、`scripts/setup_databases.py`、`scripts/check-all.ps1` | `tests/test_container_files.py`、`tests/test_check_all.py`、`tests/test_setup_databases.py` | 见[运维说明](operations.md)第 1、4 节 | CI 两个任务都通过（2026-10-03） |
+| 多 Agent（B2）：协调者把问题拆成 2–3 个子任务交给子 Agent，共享一个 run 的预算，服务端核实全部子任务的结果 | `src/queryshield/agent/delegation.py` 的 `resolve_subtasks`、`allocate`、`delegation_outcome`；`src/queryshield/agent/graph.py` 的 `_delegate`、`_run_subtasks`、`_merge_subtasks`；`src/queryshield/agent/runtime.py` 的 `build_b2_agent` | `tests/test_delegate_action.py`、`tests/test_multi_agent_runs.py`、`tests/test_multi_agent_http.py`、`tests/test_composite_demo.py` | `python -m pytest tests/test_delegate_action.py tests/test_multi_agent_runs.py tests/test_multi_agent_http.py`；在演示库上 `python scripts/demo_run.py --mode fake --questions composite --profile b2 --evidence-dir <目录>`，再用 `python scripts/compare_demo_runs.py` 比较两份摘要 | 见下文“多 Agent 对比（复合题与演示题，2026-10-10）” |
 | 文档本身：链接、路径、编号、用语 | `tests/test_docs.py` | 同左 | `python -m pytest tests/test_docs.py` | 随全量测试运行 |
 
 ## 评测结果
@@ -102,6 +103,71 @@
 | Compose + Real | 14 道判定通过（0 个硬失败，已知缺口见下） | 7 条，0 条不一致 | 全部通过，比对 4 条，0 条不一致 |
 
 Real 那次记录的已知缺口：Q04b 退款总额 502 `query_repair_limit`；Q09 `knowledge_after_send_back`；Q07 模型自己拒绝（403 `run_failed`），没走审批；演示脚本场景 3 模型自己定了月份（`time_window_guessed_by_model`），那条事实照样比对了。同日更早的一次 Real 里，Q06b 输出被截断（`invalid_json`），这一次没有截断。
+
+### 多 Agent 对比（复合题与演示题，2026-10-10）
+
+对比的是 B1（有界 Agent）和 B2（协调者加 2–3 个子 Agent，见[架构说明](architecture.md)的“多 Agent”一节）。
+
+条件：
+- 同一个代码版本，同一天；本机 Compose 的演示库。
+- 经模型网关调用真实模型 `qwen-plus`（嵌入 `text-embedding-v4`），json 协议，输出上限 512 token。
+- 7 次运行：复合题按 B1、B2、B1、B2 各一次；演示题 B2 一次；之后又加跑演示题 B1、B2 各一次。
+  - 共 67 个 run、209 次聊天调用；
+  - 用量已知的 66 个 run 合计 684,339 tokens（输入 655,067、输出 29,272）。
+- 比较用 `scripts/compare_demo_runs.py` 读各次的 `demo-summary.json`，按 run 实际用的配置分组。
+- **复合题和演示题都是开发材料，不是盲测。** 题少（复合题 8 道、演示题 14 道），每种配置只跑了一两次，数字只说明这几次运行。
+
+**复合题**（每种配置 2 次 × 8 题；题目和判定见[演示数据说明](demo-data.md)第 3 节）：
+
+| | B1 | B2 |
+|---|---|---|
+| 通过 | 8/16 | 15/16 |
+| 事实完整率 | 0.6 | 0.967 |
+| 已核实事实与独立算出的值比对 | 18 条，0 条不一致 | 29 条，0 条不一致 |
+| 每个 run 的模型调用 / 工具调用 | 3.29 / 2.14 | 4.0 / 2.21 |
+| 输入 / 输出 tokens（两次合计） | 150,854 / 6,037 | 172,466 / 9,375 |
+| 每题耗时：中位数 / 最长 | 11.7 秒 / 28.1 秒 | 15.9 秒 / 28.4 秒 |
+| 委派 | 无 | 14 个 run 里 7 个 |
+
+每个 run 的数字按建了 run 的 14 道计算（隔离题在入口被拒，没有 run）。逐题规律：
+- **B1 两次逐题相同：**
+  - CQ02、CQ03、CQ06 只答了两个部分里的一个；
+  - CQ04（三个月份）只发了一条查询，用了不允许的函数，被服务端拒绝（403 `function_not_allowed`）。
+- **B2 委派的 7 个 run 正好是 B1 答不全的题**：CQ02（只有第 1 次）、CQ03、CQ04、CQ06，都答全了。
+- CQ01、CQ05、CQ08 在 B2 下由协调者自己查询，没有委派，结果和 B1 一样。
+- B2 唯一没通过的是第 2 次的 CQ02：没有委派，只答了一个指标。
+- CQ07（用 A 的身份问 B 租户）四次都在入口被拒（403），B 的数值没有出现，算通过。
+
+**演示题**（14 道单个问题；B1 一次、B2 两次，另有 2026-10-08 同一模型网关下 B1 的一次作对照）：
+
+| 运行 | 判定 | 已核实事实比对 | 委派 |
+|---|---|---|---|
+| B1（10-10） | 14/14 | 7 条，0 条不一致 | 无 |
+| B2 第 1 次 | 13/14（Q07 硬失败） | 7 条，0 条不一致 | 无 |
+| B2 第 2 次 | 14/14（Q07 记已知缺口） | 7 条，0 条不一致 | 无 |
+| B1（10-08，对照） | 14/14 | 7 条，0 条不一致 | 无 |
+
+- 单个问题 B2 一次都没委派。每个 run 的模型调用：B1 2.77、B2 2.73（两次合计）；耗时中位数：B1 11.0 秒、B2 10.8 秒。
+- **Q07**（7 月已支付金额最高的客户姓名；查姓名要审批）：
+  - B1 两次（10-08、10-10）都在第一次查询时进入审批，审批后成功。
+  - B2 两次都没走到审批。两次的第一条查询都声明 `gross_fen`，SQL 278 个字符，不需要审批；B1 的是 294 个字符、要审批，看来 B2 这条查询没有查姓名。
+    - 第 1 次：之后的追问被服务端退回，又查了一次，最后回答的 `basis` 不是服务端认识的值，502 `invalid_field`。
+    - 第 2 次：模型自己拒绝，403；演示判定记已知缺口 `not_completed:DENIED`。
+    - 两次都由服务端兜住，没有给出回答。
+  - 两种配置的上下文只差委派的说明：第一次调用的输入 tokens，B1 2,703，B2 2,768 和 2,770（多约 66 个）；之后两边增长相同，没有裁剪。
+  - 2026-10-03 的 Real 里 B1 也出现过一次 Q07 模型自己拒绝（见上文）。所以只能说：B2 下 Q07 两次都没走到审批，可能是委派的说明影响了模型写查询，样本太少，没有定论。
+- **Q06b**（按客户的全量汇总，观察题）：B1 这次成功；B2 一次是模型网关的上游超时（502 `upstream_http_error`），一次最终回答写到 512 token 被截断（502 `invalid_json`）。这和以前记过的已知缺口相同，不算 B2 特有。
+
+**模型网关对账**（网关按 `X-Run-Id` 记的账本，逐个 run 和演示摘要比对）：
+- 用量已知的 66 个 run：聊天调用次数和三个用量数（输入、输出、合计）都相等。
+- 1 个 run 跳过：演示题 Q06b 那次模型网关的上游超时，用量 unknown；两边记的聊天调用都是 3 次。
+- 所有聊天调用都带 `X-Run-Id`；B2 子 Agent 并行发出的调用都记在原来那个 run 下，账本里没有不属于这些 run 的调用。
+
+**代价和结论：**
+- 复合题上 B2 答得更全：通过 15/16 对 8/16，事实完整率 0.967 对 0.6。代价是每个 run 多约 0.7 次模型调用、约 14% 的输入 tokens、约 55% 的输出 tokens，耗时中位数多约 4 秒。
+- 单个问题 B2 不委派，调用次数和耗时与 B1 相当；但要审批的 Q07 在 B2 下两次都没走通。
+- 两种配置的已核实事实都与独立算出的值一致，安全拒绝（隔离题、不允许的函数）照常生效。
+- 默认仍是 B1；B2 留作服务端可选的配置。
 
 ### 测试与 CI
 

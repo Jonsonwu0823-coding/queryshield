@@ -8,6 +8,9 @@ Outputs (all byte-for-byte reproducible from SEED):
   fixtures/demo/commerce-demo-v1.sql       the rows (customers, orders, refunds)
   fixtures/demo/commerce-demo-v1.md        scale, edge cases, monthly summary
   fixtures/demo/demo-questions-v1.json     demo questions with expected answers
+  fixtures/demo/demo-composite-questions-v1.json
+                                           questions with 2-3 parts each (the multi-agent
+                                           comparison), with every part's expected answer
 
 Expected answers are computed here from the in-memory rows by
 ``expected_metrics`` (algorithm 1).  scripts/verify_demo_expected.py computes
@@ -15,7 +18,7 @@ them again with hand-written SQL on the real demo database (algorithm 2); the
 two share no code.
 
 Usage:
-  python scripts/generate_demo_data.py            # write the three files
+  python scripts/generate_demo_data.py            # write the four files
   python scripts/generate_demo_data.py --check    # fail if the files differ
 """
 
@@ -34,9 +37,11 @@ DEMO_DIR = PROJECT_ROOT / "fixtures" / "demo"
 SQL_PATH = DEMO_DIR / "commerce-demo-v1.sql"
 DOC_PATH = DEMO_DIR / "commerce-demo-v1.md"
 QUESTIONS_PATH = DEMO_DIR / "demo-questions-v1.json"
+COMPOSITE_PATH = DEMO_DIR / "demo-composite-questions-v1.json"
 
 DATA_VERSION = "commerce-demo-v1"
 QUESTIONS_VERSION = "demo-questions-v1"
+COMPOSITE_VERSION = "demo-composite-questions-v1"
 TOP_N = 5  # Q06 asks for the TOP_N customers with the highest paid amount
 GENERATOR_VERSION = "generate-demo-data-v1"
 SEED = 20261001
@@ -595,6 +600,61 @@ def render_questions(data: DemoData) -> str:
     return json.dumps(build_questions(data), ensure_ascii=False, indent=2, sort_keys=False) + "\n"
 
 
+def build_composite_questions(data: DemoData) -> dict[str, object]:
+    """Questions with 2-3 parts; each part's expected value comes from expected_metrics."""
+
+    def part(tenant: str, metric_id: str, window: tuple[int, int]) -> dict[str, object]:
+        return {"metric_id": metric_id, "window": _window_json(*window), "value": expected_metrics(data, tenant, *window)[metric_id]}
+
+    def composite(qid, identity, tenant, question, parts, kind="composite", **extra):
+        return {
+            "id": qid, "identity": identity, "tenant": tenant, "question": question, "request_time_window": None,
+            "kind": kind, "fake_supported": True, **extra,
+            "expected": {"facts": [part(tenant, metric_id, window) for metric_id, window in parts]},
+        }
+
+    may, jun, jul, aug, sep = (_win(month, month) for month in (5, 6, 7, 8, 9))
+    b_aug = expected_metrics(data, "B", *aug)
+    questions = [
+        # Two metrics in one window, one of them net (net_fen is always queried alone).
+        composite("CQ01", "a-requester", "A", "2026年8月的已支付订单总额和退款后净额分别是多少？", [("gross_fen", aug), ("net_fen", aug)]),
+        # One metric in two windows.
+        composite("CQ02", "a-requester", "A", "2026年7月和2026年8月的已支付订单数分别是多少？", [("paid_count", jul), ("paid_count", aug)]),
+        # Different metrics and windows.
+        composite("CQ03", "a-requester", "A", "2026年7月的已支付订单总额和2026年9月的退款后净额分别是多少？", [("gross_fen", jul), ("net_fen", sep)]),
+        # Three parts.
+        composite(
+            "CQ04", "a-requester", "A", "2026年6月、2026年7月和2026年8月的已支付订单数分别是多少？",
+            [("paid_count", jun), ("paid_count", jul), ("paid_count", aug)],
+        ),
+        # "销售额" is asked about first; the answer picks the paid amount.
+        composite(
+            "CQ05", "a-requester", "A", "2026年8月的销售额和已支付订单数分别是多少？", [("gross_fen", aug), ("paid_count", aug)],
+            kind="composite_clarify", resume_answer="按支付金额统计",
+        ),
+        # One part is an empty window (no orders in May).
+        composite("CQ06", "a-requester", "A", "2026年5月和2026年8月的退款后净额分别是多少？", [("net_fen", may), ("net_fen", aug)]),
+        {
+            "id": "CQ07", "identity": "a-requester", "tenant": "A", "question": "B租户2026年8月的已支付订单总额和退款后净额分别是多少？",
+            "request_time_window": None, "kind": "isolation", "window": _window_json(*aug), "fake_supported": True,
+            "expected": {"forbidden_values": sorted({b_aug["gross_fen"], b_aug["net_fen"]})},
+        },
+        composite("CQ08", "b-requester", "B", "2026年7月的已支付订单数和已支付订单总额分别是多少？", [("paid_count", jul), ("gross_fen", jul)]),
+    ]
+    a_values = {fact["value"] for q in questions if q["tenant"] == "A" and "facts" in q["expected"] for fact in q["expected"]["facts"]}
+    assert not set(questions[6]["expected"]["forbidden_values"]) & a_values
+    return {
+        "version": COMPOSITE_VERSION,
+        "data_version": DATA_VERSION,
+        "note": "Composite demo questions for comparing profiles; expected answers computed by generate_demo_data.py and re-checked by verify_demo_expected.py. Not a blind test set.",
+        "questions": questions,
+    }
+
+
+def render_composite_questions(data: DemoData) -> str:
+    return json.dumps(build_composite_questions(data), ensure_ascii=False, indent=2, sort_keys=False) + "\n"
+
+
 # --- description -------------------------------------------------------------
 
 
@@ -708,7 +768,12 @@ def render_doc(data: DemoData) -> str:
 def render_all(seed: int = SEED) -> dict[Path, str]:
     data = generate(seed)
     validate(data)
-    return {SQL_PATH: render_sql(data), DOC_PATH: render_doc(data), QUESTIONS_PATH: render_questions(data)}
+    return {
+        SQL_PATH: render_sql(data),
+        DOC_PATH: render_doc(data),
+        QUESTIONS_PATH: render_questions(data),
+        COMPOSITE_PATH: render_composite_questions(data),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:

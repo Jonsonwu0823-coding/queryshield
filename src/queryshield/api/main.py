@@ -17,7 +17,7 @@ from queryshield.providers.contracts import (
     usage_is_consistent,
 )
 from queryshield.agent.runtime import (
-    B1_PROFILE,
+    BOUNDED_PROFILES,
     FAILED_ERROR_HTTP,
     RuntimeConfigurationError,
     RuntimeDependencies,
@@ -489,7 +489,7 @@ def _event_cursor(
 
 
 # What a client sees of one agent step: no text, ids, hashes or versions.
-_STEP_FIELDS = ("kind", "status", "error_code", "tool_name", "elapsed_ms", "model", "usage_status")
+_STEP_FIELDS = ("kind", "status", "error_code", "tool_name", "elapsed_ms", "model", "usage_status", "agent")
 
 
 def _step_summary(payload: Mapping[str, object]) -> dict[str, object]:
@@ -678,7 +678,7 @@ def create_query(
         model=model,
         executor=executor,
         # Resolved only after authentication; B0 never retrieves.
-        retriever=retriever_source() if profile == B1_PROFILE else None,
+        retriever=retriever_source() if profile in BOUNDED_PROFILES else None,
         call_store=call_store,
         profile=profile,
     )

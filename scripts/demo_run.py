@@ -1,7 +1,10 @@
 """Demo run: start a real uvicorn process on the demo database and drive the demo questions over HTTP.
 
 Fake mode (free): the Fake model answers the questions it knows; the others are
-``not_applicable``.  Verified values are still compared with the expected answers,
+``not_applicable``.  ``--questions composite`` runs the questions with 2-3 parts
+(fixtures/demo/demo-composite-questions-v1.json) instead of the demo questions, and
+``--profile b1|b2`` sets the server's Agent profile (default: the server's own, B1);
+every record says which profile its run actually used, read from the state store.  Verified values are still compared with the expected answers,
 so this is the product's own verification path computing the answers again.
 Every question also gets one rule: each verified fact must equal the value the
 generator computes for the question's tenant and the fact's metric and window.
@@ -50,6 +53,7 @@ from scripts import http_smoke as smoke  # noqa: E402  (reuses its HTTP helpers 
 from scripts import generate_demo_data as gen  # noqa: E402
 
 QUESTIONS_PATH = PROJECT_ROOT / "fixtures" / "demo" / "demo-questions-v1.json"
+COMPOSITE_PATH = PROJECT_ROOT / "fixtures" / "demo" / "demo-composite-questions-v1.json"
 DEMO_KNOWLEDGE_REGISTRY = PROJECT_ROOT / "fixtures" / "demo" / "knowledge" / "source_registry.json"
 DEMO_DATASET = "commerce-demo-v1"
 TOKEN_ENVIRONMENT = {
@@ -231,6 +235,56 @@ def judge_metric(question: Mapping[str, object], obs: Mapping[str, object]) -> d
     if question["kind"] == "empty_window" and outcome["bounced"] and not hard:
         gaps.append("empty_window_answered_after_bounce")  # The "query first" bounce
     outcome["hard_failures"], outcome["known_gaps"] = hard, gaps
+    return outcome
+
+
+def _window_of(fact: Mapping[str, object]) -> tuple[str, str] | None:
+    window = fact.get("time_window")
+    return (str(window.get("start")), str(window.get("end"))) if isinstance(window, Mapping) else None
+
+
+def judge_composite(question: Mapping[str, object], obs: Mapping[str, object]) -> dict:
+    """A question with 2-3 parts passes only when every expected fact is there, right, and nothing else is.
+
+    Each expected (metric, window) needs a verified fact with the expected value;
+    a fact for any other (metric, window) is a hard failure too.
+    """
+
+    expected = question["expected"]["facts"]
+    hard, gaps = _common_failures(obs)
+    facts = obs.get("facts") or []
+    wanted = {(item["metric_id"], item["window"]["start"], item["window"]["end"]): item["value"] for item in expected}
+    found = 0
+    for (metric_id, start, end), value in wanted.items():
+        values = [item.get("value") for item in facts if item.get("metric_id") == metric_id and _window_of(item) == (start, end)]
+        if not values:
+            hard.append(f"missing_fact:{metric_id}")
+        elif values != [value]:
+            hard.append(f"value_mismatch:{metric_id}")
+        else:
+            found += 1
+    if any((item.get("metric_id"), *(_window_of(item) or ("", ""))) not in wanted for item in facts):
+        hard.append("unexpected_fact")
+    if facts and obs.get("answer_status") != "verified":
+        hard.append("answer_status")
+    return _outcome(
+        expected={"fact_count": len(wanted)},
+        actual={"fact_count": len(facts), "found": found},
+        fact_completeness=round(found / len(wanted), 3),
+        hard_failures=sorted(set(hard)),
+        known_gaps=gaps,
+    )
+
+
+def judge_composite_clarify(question: Mapping[str, object], obs: Mapping[str, object]) -> dict:
+    """An ambiguous word in a composite question: the server asks the catalog question first, then every part is judged."""
+
+    first = obs.get("first") or {}
+    outcome = judge_composite(question, obs)
+    if not (first.get("http_status") == 202 and first.get("status") == "WAITING_USER"):
+        outcome["hard_failures"] = sorted({*outcome["hard_failures"], "clarify_not_triggered"})
+    elif not first.get("pending_is_catalog_question"):
+        outcome["hard_failures"] = sorted({*outcome["hard_failures"], "clarify_question_not_from_catalog"})
     return outcome
 
 
@@ -489,6 +543,10 @@ def _judge_kind(question: Mapping[str, object], obs: Mapping[str, object], demo_
         return judge_isolation(question, obs)
     if kind == "observe_refund":
         return judge_observe_refund(question, obs)
+    if kind == "composite":
+        return judge_composite(question, obs)
+    if kind == "composite_clarify":
+        return judge_composite_clarify(question, obs)
     raise ValueError(f"unknown question kind: {kind}")
 
 
@@ -525,6 +583,13 @@ def summary_record(question: Mapping[str, object], obs: Mapping[str, object], ju
         "hard_failures": hard,
         "known_gaps": list(judgement["known_gaps"]),
         "verdict": "fail" if hard else "pass",
+        # Which profile the run used (from the state store), whether it delegated, and the client's wall time.
+        "profile": obs.get("profile"),
+        "delegated": obs.get("subtask_count") is not None,
+        "subtask_count": obs.get("subtask_count"),
+        "tool_call_count": obs.get("tool_call_count"),
+        "elapsed_ms": obs.get("elapsed_ms"),
+        **({"fact_completeness": judgement["fact_completeness"]} if "fact_completeness" in judgement else {}),
     }
 
 
@@ -588,12 +653,28 @@ def _observe(code: int, body: Mapping[str, object], state_path: Path, fixed_no_d
         "source_ids": [item for item in source_ids if isinstance(item, str)] if isinstance(source_ids, list) else [],
         "sql_exec_count": body.get("sql_exec_count"),
         "model_call_count": body.get("model_call_count"),
+        "tool_call_count": body.get("tool_call_count"),
         "trace": smoke._action_trace(state_path, run_id) if isinstance(run_id, str) else [],
         "completion_tokens": _completion_tokens(state_path, run_id) if isinstance(run_id, str) else [],
         "max_output_tokens": max_output_tokens(),
         "run_id": run_id,
         "usage_total": body.get("usage_total"),
     }
+
+
+def _run_shape(state_path: Path, run_id: str) -> dict:
+    """The profile the run used and, if it delegated, how many subtasks (from the server's state store)."""
+
+    from queryshield.db.state_store import StateStore
+
+    with StateStore(state_path) as store:
+        run = store.get_run(run_id) or {}
+        subtasks = [
+            len(payload.get("subtasks") or [])
+            for event in store.events(run_id)
+            if event.get("type") == "agent_step" and (payload := event.get("payload") or {}).get("kind") == "delegation"
+        ]
+    return {"profile": (run.get("run_config") or {}).get("profile"), "subtask_count": subtasks[0] if subtasks else None}
 
 
 def _run_question(base: str, tokens: Mapping[str, str], question: Mapping[str, object], state_path: Path, no_data_reply: str, catalog_question: str) -> tuple[dict, dict]:
@@ -606,7 +687,7 @@ def _run_question(base: str, tokens: Mapping[str, str], question: Mapping[str, o
     code, response = smoke._http(base, "/queries", token=token, method="POST", body=body, timeout=300)
     obs = _observe(code, response, state_path, no_data_reply)
     raw = {"question": question["question"], "steps": []}
-    if question["kind"] == "clarify_resume":
+    if question["kind"] in {"clarify_resume", "composite_clarify"}:
         obs["first"] = {
             "http_status": code,
             "status": response.get("status"),
@@ -704,6 +785,18 @@ def demo_source_ids() -> frozenset[str]:
 # --- main ---------------------------------------------------------------------------
 
 
+def run_profile_check(records: list[dict], requested: str | None) -> tuple[str | None, list[str]]:
+    """The one profile the runs used (from the state store), and failures when they differ or are not the requested one."""
+
+    from queryshield.agent.runtime import B1_PROFILE, B2_PROFILE
+
+    used = sorted({str(r["profile"]) for r in records if r.get("profile")})
+    failures = ["mixed_profiles"] if len(used) > 1 else []
+    wanted = {"b1": B1_PROFILE, "b2": B2_PROFILE}.get(requested or "")
+    failures += sorted(f"{r['id']}:profile_mismatch" for r in records if wanted and r.get("profile") and r["profile"] != wanted)
+    return (used[0] if len(used) == 1 else None), failures
+
+
 def tokens_from_environment(environ: Mapping[str, str]) -> tuple[dict[str, str] | None, list[str]]:
     """The four identity tokens a RUNNING service was started with (--base-url), and the names missing or repeated."""
 
@@ -737,6 +830,14 @@ def main(argv: list[str] | None = None) -> int:
         "tokens come from the QUERYSHIELD_TOKEN_* variables and the action trace from "
         f"{STATE_PATH_ENV}, so run it where the service's state store is readable",
     )
+    parser.add_argument("--questions", choices=("demo", "composite"), default="demo", help="the demo questions, or the questions with 2-3 parts")
+    parser.add_argument(
+        "--profile",
+        choices=("b1", "b2"),
+        default=None,
+        help="the server's Agent profile (default: the server's own); with --base-url, the running service's setting. "
+        "A run that used another profile fails",
+    )
     args = parser.parse_args(argv)
 
     missing = [name for name in smoke.required_names(args.mode) if not os.getenv(name, "").strip()]
@@ -764,7 +865,8 @@ def main(argv: list[str] | None = None) -> int:
     args.evidence_dir.mkdir(parents=True, exist_ok=True)
 
     document = json.loads(QUESTIONS_PATH.read_text(encoding="utf-8"))
-    questions = document["questions"]
+    question_document = json.loads(COMPOSITE_PATH.read_text(encoding="utf-8")) if args.questions == "composite" else document
+    questions = question_document["questions"]
     setup: list[dict] = []
     counts = database_counts(os.environ["QUERYSHIELD_DATABASE_URL"], sorted(document["table_counts"]))
     setup.append({"check": "table_counts", "ok": counts == document["table_counts"], "counts": counts})
@@ -803,6 +905,8 @@ def main(argv: list[str] | None = None) -> int:
                 "PYTHONPATH": str(SRC_ROOT) + os.pathsep + env.get("PYTHONPATH", ""),
             }
         )
+        if args.profile is not None:
+            env["QUERYSHIELD_AGENT_PROFILE"] = args.profile
         port = smoke._free_port()
         base = f"http://127.0.0.1:{port}"
         process = subprocess.Popen(
@@ -832,7 +936,11 @@ def main(argv: list[str] | None = None) -> int:
                 records.append(not_applicable_record(question))
                 continue
             try:
+                started = time.monotonic()
                 obs, raw = _run_question(base, tokens, question, state_path, no_data_reply, catalog_question)
+                obs["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+                if isinstance(obs.get("run_id"), str):
+                    obs.update(_run_shape(state_path, obs["run_id"]))
                 judgement = judge_question(question, obs, demo_ids)
                 if isinstance(obs.get("run_id"), str):
                     run_ids.append(obs["run_id"])
@@ -871,11 +979,15 @@ def main(argv: list[str] | None = None) -> int:
     hard_failures += [f"setup:{item['check']}" for item in setup if not item.get("ok")]
     model_names, failures = smoke.model_labels(args.mode, state_path, run_ids, os.environ)
     hard_failures += failures
+    profile, failures = run_profile_check(records, args.profile)
+    hard_failures += failures
     summary = {
         "mode": args.mode,
         "model_protocol": args.model_protocol,
+        "profile": profile,
+        "questions_set": args.questions,
         "data_version": document["data_version"],
-        "questions_version": document["version"],
+        "questions_version": question_document["version"],
         "status": "pass" if not hard_failures else "fail",
         "hard_failures": hard_failures,
         "known_gaps": sorted({f"{r['id']}:{item}" for r in records for item in r.get("known_gaps", [])}),

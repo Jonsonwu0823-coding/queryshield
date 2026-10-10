@@ -10,7 +10,7 @@ bindings built here still have to pass the SQL projection check in
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import json
@@ -210,6 +210,24 @@ def _declared_metric_ids(value: object, catalog: SemanticCatalog) -> tuple[str, 
     return tuple(value)
 
 
+def check_confirmed_metrics(catalog: SemanticCatalog, confirmed: Iterable[str], metric_ids: Iterable[str]) -> None:
+    """Declared metrics keep every user-confirmed metric and add no other option of its clarification."""
+
+    confirmed, declared = set(confirmed), set(metric_ids)
+    if not confirmed <= declared:
+        raise MetricDeclarationError(
+            "metric_declaration_mismatch",
+            "declared metrics must keep every server-confirmed metric",
+        )
+    for rule in catalog.clarifications:
+        options = {value.value for value in rule.values if value.metric == value.value}
+        if options & confirmed and (options & declared) - confirmed:
+            raise MetricDeclarationError(
+                "metric_declaration_mismatch",
+                "declared metrics replace a server-confirmed clarification choice",
+            )
+
+
 def resolve_query_declaration(
     arguments: Mapping[str, object],
     *,
@@ -264,18 +282,7 @@ def resolve_query_declaration(
 
     if prebound:
         confirmed = {binding.metric_id.removeprefix("metric."): binding for binding in prebound}
-        if not set(confirmed) <= set(metric_ids):
-            raise MetricDeclarationError(
-                "metric_declaration_mismatch",
-                "declared metrics must keep every server-confirmed metric",
-            )
-        for rule in catalog.clarifications:
-            options = {value.value for value in rule.values if value.metric == value.value}
-            if options & set(confirmed) and (options & set(metric_ids)) - set(confirmed):
-                raise MetricDeclarationError(
-                    "metric_declaration_mismatch",
-                    "declared metrics replace a server-confirmed clarification choice",
-                )
+        check_confirmed_metrics(catalog, confirmed, metric_ids)
         bindings = tuple(
             confirmed[metric_id] if metric_id in confirmed else build_metric_binding(catalog, metric_id, window)
             for metric_id in metric_ids
@@ -527,5 +534,6 @@ __all__ = [
     "answer_without_query_hint",
     "metric_declaration_contract",
     "normalize_time_window",
+    "check_confirmed_metrics",
     "resolve_query_declaration",
 ]
