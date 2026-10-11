@@ -67,6 +67,28 @@ def _headers(request: httpx.Request, names: tuple[str, ...]) -> list[tuple[str, 
     return [(name, request.headers[name]) for name in names if name in request.headers]
 
 
+def _no_wait(seconds: float) -> None:
+    """The adapters' injected wait before a retry; these tests never really wait."""
+
+
+def _attempts(error_code: str | None, extra: dict[str, object]) -> list[dict[str, object]]:
+    """The one attempt of a call that was not retried: failed with the call's own code, or a 2xx whose body failed."""
+
+    if error_code not in {"upstream_timeout", "upstream_request_error"} and "http_status" not in extra:
+        return [{"request_id": "local-request", "status": "succeeded"}]
+    fields = {key: extra[key] for key in ("http_status", "provider_error_code") if key in extra}
+    return [{"request_id": "local-request", "status": "failed", "error_code": error_code, **fields}]
+
+
+def _sent_attempts(recorder: _Recorder, error_code: str) -> list[dict[str, object]]:
+    """One failed attempt per request the recorder saw, under the request id that request carried."""
+
+    return [
+        {"request_id": request.headers["x-client-request-id"], "status": "failed", "error_code": error_code}
+        for request in recorder.requests
+    ]
+
+
 # --- Chat completions --------------------------------------------------------
 
 
@@ -74,7 +96,7 @@ def _chat(response=None, *, error=None, tools=None, config=CHAT_CONFIG):
     recorder = _Recorder(response, error=error)
     with httpx.Client(transport=httpx.MockTransport(recorder)) as client:
         try:
-            result = OpenAICompatibleModel(config, client=client).complete(
+            result = OpenAICompatibleModel(config, client=client, sleep=_no_wait).complete(
                 MESSAGES, request_id="local-request", model_call_id="server-call", tools=tools
             )
         except ModelProviderError as exc:
@@ -93,7 +115,7 @@ def _chat_body(**overrides):
     return body
 
 
-def _failed_chat_record(error_code: str, **extra) -> list[tuple[str, object]]:
+def _failed_chat_record(error_code: str, attempts=None, **extra) -> list[tuple[str, object]]:
     record = [
         ("status", "failed"),
         ("mode", "real"),
@@ -109,7 +131,7 @@ def _failed_chat_record(error_code: str, **extra) -> list[tuple[str, object]]:
         ("usage_status", "unknown"),
         ("error_code", error_code),
     ]
-    return record + list(extra.items())
+    return record + list(extra.items()) + [("attempts", attempts or _attempts(error_code, extra))]
 
 
 def test_chat_request_url_headers_and_payload_are_fixed() -> None:
@@ -198,6 +220,7 @@ def test_chat_json_success_result_and_record() -> None:
         ("content_sha256", "f3f512648742020fbd700fa8f0576babd8f7ec8e56d3dcd38e28be5b99287db3"),
         ("usage", {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}),
         ("usage_status", "known"),
+        ("attempts", [{"request_id": "local-request", "status": "succeeded"}]),
     ]
 
 
@@ -326,9 +349,11 @@ def test_chat_native_reply_without_tool_calls_and_a_non_string_finish_reason() -
     ],
 )
 def test_chat_transport_failures(error, code) -> None:
-    result, _ = _chat(error=error)
+    result, recorder = _chat(error=error)
     assert result.code == code and str(result) == f"model provider call failed: {code}"
-    assert list(result.record.items()) == _failed_chat_record(code)
+    # Only a connection that was never made is sent once more (tests/test_model_call_retry.py).
+    assert len(recorder.requests) == (2 if isinstance(error, httpx.ConnectError) else 1)
+    assert list(result.record.items()) == _failed_chat_record(code, attempts=_sent_attempts(recorder, code))
     assert result.__cause__ is not None
 
 
@@ -463,7 +488,7 @@ def _embed(response=None, *, error=None, inputs=("a", "b")):
     recorder = _Recorder(response, error=error)
     with httpx.Client(transport=httpx.MockTransport(recorder)) as client:
         try:
-            result = OpenAICompatibleEmbedding(EMBED_CONFIG, client=client).embed(
+            result = OpenAICompatibleEmbedding(EMBED_CONFIG, client=client, sleep=_no_wait).embed(
                 list(inputs), request_id="local-request", model_call_id="server-call"
             )
         except EmbeddingProviderError as exc:
@@ -481,7 +506,7 @@ def _embed_body(**overrides):
     return body
 
 
-def _failed_embed_record(error_code: str, **extra) -> list[tuple[str, object]]:
+def _failed_embed_record(error_code: str, attempts=None, **extra) -> list[tuple[str, object]]:
     record = [
         ("status", "failed"),
         ("mode", "real"),
@@ -497,7 +522,7 @@ def _failed_embed_record(error_code: str, **extra) -> list[tuple[str, object]]:
         ("usage", None),
         ("error_code", error_code),
     ]
-    return record + list(extra.items())
+    return record + list(extra.items()) + [("attempts", attempts or _attempts(error_code, extra))]
 
 
 def test_embedding_request_url_headers_and_payload_are_fixed() -> None:
@@ -608,9 +633,10 @@ def test_embedding_body_that_is_not_json_is_an_invalid_response() -> None:
     [(httpx.ReadTimeout("slow"), "upstream_timeout"), (httpx.ConnectError("refused"), "upstream_request_error")],
 )
 def test_embedding_transport_failures(error, code) -> None:
-    result, _ = _embed(error=error)
+    result, recorder = _embed(error=error)
     assert result.code == code
-    assert list(result.record.items()) == _failed_embed_record(code)
+    assert len(recorder.requests) == (2 if isinstance(error, httpx.ConnectError) else 1)
+    assert list(result.record.items()) == _failed_embed_record(code, attempts=_sent_attempts(recorder, code))
 
 
 @pytest.mark.parametrize("status", [503, 300, 199])

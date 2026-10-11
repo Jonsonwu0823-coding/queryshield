@@ -122,6 +122,12 @@ def _load_json(raw_content: str) -> dict[str, object]:
         raise ProposalParseError("duplicate_field", "duplicate JSON field") from exc
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ProposalParseError("invalid_json", "model content is not strict JSON") from exc
+    try:
+        json.dumps(decoded, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError as exc:
+        # An escape such as \ud800 is valid JSON syntax, but the string it decodes to has no
+        # UTF-8 form: every later hash, stored event or request would fail on it.
+        raise ProposalParseError("invalid_json", "model content has a lone surrogate escape") from exc
 
     if type(decoded) is not dict:
         raise ProposalParseError("invalid_shape", "proposal must be a JSON object")
@@ -400,8 +406,8 @@ def native_action_text(tool_calls: Sequence[NativeToolCall]) -> str:
         raise ProposalParseError("unknown_field", "function arguments cannot set the action type")
     else:
         payload = {"type": call.name, **arguments}
-    # ASCII escapes keep the text encodable even for a lone surrogate the model escaped,
-    # which json mode accepts too.
+    # _load_json has already refused a lone surrogate; the default ASCII escapes stay so the
+    # text, and the content hash recorded from it, are what they always were.
     return json.dumps(payload, separators=(",", ":"))
 
 

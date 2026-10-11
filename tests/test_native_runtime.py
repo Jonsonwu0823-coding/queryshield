@@ -303,11 +303,11 @@ def test_native_events_record_call_shape_never_arguments_or_content() -> None:
     assert result.status == "waiting_approval" and result.action["tool_call"]["tool"] == "query_readonly"
 
 
-def test_native_lone_surrogate_escape_is_denied_like_json() -> None:
+def test_native_lone_surrogate_escape_fails_validation_like_json() -> None:
     call = NativeToolCall("a", "deny", '{"reason":"\\ud800"}')
     native = _agent(_Native([("", (call,))]), NATIVE).run(CONTEXT, "2026年9月已支付订单总额")
     json_run = _agent(_Scripted(['{"type":"deny","reason":"\\ud800"}']), DEFAULT_RUN_CONFIG).run(CONTEXT, "2026年9月已支付订单总额")
-    assert native.status == json_run.status == "denied"
+    assert (native.status, native.error_code) == (json_run.status, json_run.error_code) == ("failed", "invalid_json")
 
 
 class _Scripted(FakeModel):

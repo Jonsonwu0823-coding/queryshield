@@ -302,6 +302,12 @@ def _b0_pre_model_denial() -> dict[str, object]:
     )
 
 
+def _b0_attempts(attempts: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    """The HTTP attempts of B0's one model call, when an HTTP adapter made any."""
+
+    return {"model_call_attempts": [dict(attempt) for attempt in attempts]} if attempts else {}
+
+
 def _b0_failed_call(
     status: str,
     error_code: str,
@@ -309,6 +315,7 @@ def _b0_failed_call(
     usage: Mapping[str, object],
     model_call_id: str,
     started: float,
+    attempts: Sequence[Mapping[str, object]],
 ) -> dict[str, object]:
     """The record of a model call whose proposal never reached the tools."""
 
@@ -326,6 +333,7 @@ def _b0_failed_call(
             "side_effects": _b0_side_effects(),
             "usage": usage,
             "model_call_ids": [model_call_id],
+            **_b0_attempts(attempts),
             "elapsed_ms": max(0, int((perf_counter() - started) * 1000)),
         },
     )
@@ -457,14 +465,18 @@ def run_b0_single_pass(
     except ModelProviderError as exc:
         usage = {"usage_status": "unknown", "prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
         status = "timeout" if exc.code == "upstream_timeout" else "failed"
-        return _b0_failed_call(status, exc.code, usage=usage, model_call_id=model_call_id, started=started)
+        return _b0_failed_call(
+            status, exc.code, usage=usage, model_call_id=model_call_id, started=started, attempts=exc.record.get("attempts", ())
+        )
 
     # 3. Parse its proposal with the same parser as B1.
     usage = usage_record(call)
     try:
         proposal = parse_query_proposal(call.content, context=context, model_call_id=model_call_id)
     except ProposalParseError as exc:
-        return _b0_failed_call("failed", exc.code, usage=usage, model_call_id=model_call_id, started=started)
+        return _b0_failed_call(
+            "failed", exc.code, usage=usage, model_call_id=model_call_id, started=started, attempts=call.attempts
+        )
 
     # 4. Act on the proposal: a query runs through the shared tool facade, the other actions end the run.
     action = proposal.action
@@ -544,6 +556,7 @@ def run_b0_single_pass(
             "side_effects": _b0_side_effects(readonly_queries=readonly_queries if succeeded else 0, fact_count=len(facts)),
             "usage": usage,
             "model_call_ids": [model_call_id],
+            **_b0_attempts(call.attempts),
             "elapsed_ms": max(0, int((perf_counter() - started) * 1000)),
         },
     )

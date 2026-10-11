@@ -60,6 +60,9 @@ USAGE_FIELDS = (
 )
 # D7: the embedded snapshot id (the embedding model name and revision are in the index hash).
 SNAPSHOT_FIELDS = ("knowledge_snapshot_id",)
+# D8: a model_call event's HTTP attempts.  Only an HTTP adapter makes attempts, so the key exists on
+# the upstream side alone; it is removed before comparing and checked on its own below.
+ATTEMPTS_FIELD = "attempts"
 # The adapter passes its timeout to the injected client; TestClient ignores it and warns.
 pytestmark = pytest.mark.filterwarnings("ignore:You should not use the 'timeout' argument")
 _UUID_OR_HEX = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|result-[0-9a-f]{32}")
@@ -144,6 +147,8 @@ def _set_aside(value: object, key: str | None = None) -> object:
     if isinstance(value, dict):
         out = {}
         for name, item in value.items():
+            if value.get("kind") == "model_call" and name == ATTEMPTS_FIELD:
+                continue
             allowed = (
                 (value.get("kind") == "model_call" and name in CALL_FIELDS)
                 or (key == "usage_summary" and name in USAGE_FIELDS)
@@ -183,6 +188,7 @@ def test_each_step_and_the_result_match_the_in_process_fake(client, retrievers, 
 
     # The set-aside fields hold exactly the documented values.
     for event in _model_call_events(fake):
+        assert ATTEMPTS_FIELD not in event
         assert (event["provider"], event["model"], event["usage_status"], event["usage"]) == ("fake", "fake-model", "unknown", None)
         assert event["provider_call_id"] is None and event["provider_request_id"] is None
     upstream_events = _model_call_events(upstream)
@@ -191,6 +197,7 @@ def test_each_step_and_the_result_match_the_in_process_fake(client, retrievers, 
         assert (event["provider"], event["model"], event["usage_status"]) == ("openai_compatible", FAKE_UPSTREAM_MODEL, "known")
         assert re.fullmatch(r"fake-chatcmpl-[0-9a-f]{32}", event["provider_call_id"])
         assert re.fullmatch(r"fake-req-[0-9a-f]{32}", event["provider_request_id"])
+        assert event[ATTEMPTS_FIELD] == [{"request_id": event["request_id"], "status": "succeeded"}]
         usage = event["usage"]
         assert usage_is_consistent(usage["prompt_tokens"], usage["completion_tokens"], usage["total_tokens"]) and usage["completion_tokens"] > 0
     last = upstream.get("resumed") or upstream["result"]

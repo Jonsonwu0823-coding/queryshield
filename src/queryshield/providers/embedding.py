@@ -8,25 +8,19 @@ chat model or a local vector when real configuration is missing.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from hashlib import sha256
 import json
 import math
 import os
+import time
 from typing import Any, Literal
 
 import httpx
 
 from queryshield.providers.contracts import finite_float, new_local_call_id, new_request_id
-from queryshield.providers.http import (
-    base_url_is_valid,
-    endpoint_url,
-    http_error_codes,
-    json_headers,
-    post_json,
-    response_model,
-)
+from queryshield.providers.http import base_url_is_valid, endpoint_url, response_model, send_json
 
 
 EmbeddingMode = Literal["fake", "real"]
@@ -101,6 +95,8 @@ class EmbeddingCallResult:
     vectors: tuple[tuple[float, ...], ...]
     dimensions: int
     usage: OperationUsage
+    # One record per HTTP attempt (providers.http); empty for a local adapter.
+    attempts: tuple[Mapping[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -336,9 +332,11 @@ class OpenAICompatibleEmbedding:
         config: EmbeddingConfig,
         *,
         client: httpx.Client | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.config = config
         self._client = client
+        self._sleep = sleep
 
     @classmethod
     def from_env(
@@ -371,32 +369,37 @@ class OpenAICompatibleEmbedding:
         normalized = _normalize_inputs(inputs)
         local_request_id = request_id or new_request_id()
         server_call_id = model_call_id or new_local_call_id()
-
-        def fail(code: str, **record_fields: Any) -> EmbeddingProviderError:
-            return EmbeddingProviderError(code, _failed_record(self, local_request_id, server_call_id, code, **record_fields))
-
         payload = {
             "model": self.config.model,
             "input": list(normalized),
             "dimensions": self.config.dimensions,
         }
-        headers = json_headers(self.config.api_key, local_request_id, run_id)
-        try:
-            response = post_json(self._client, self.config.endpoint, payload, headers, self.config.timeout_seconds)
-        except httpx.TimeoutException as exc:
-            raise fail("upstream_timeout") from exc
-        except httpx.RequestError as exc:
-            raise fail("upstream_request_error") from exc
+        sent = send_json(
+            self._client,
+            self.config.endpoint,
+            payload,
+            api_key=self.config.api_key,
+            request_id=local_request_id,
+            model_call_id=server_call_id,
+            run_id=run_id,
+            timeout=self.config.timeout_seconds,
+            sleep=self._sleep,
+        )
 
-        provider_request_id = response.headers.get("x-request-id") or None
-        if response.status_code < 200 or response.status_code >= 300:
-            code, provider_error_code = http_error_codes(response)
+        def fail(code: str, **record_fields: Any) -> EmbeddingProviderError:
+            record = _failed_record(self, local_request_id, server_call_id, code, attempts=sent.attempts, **record_fields)
+            return EmbeddingProviderError(code, record)
+
+        response = sent.response
+        provider_request_id = (response.headers.get("x-request-id") or None) if response is not None else None
+        last = sent.attempts[-1]
+        if last["status"] == "failed":
             raise fail(
-                code,
+                last["error_code"],
                 provider_request_id=provider_request_id,
-                http_status=response.status_code,
-                provider_error_code=provider_error_code,
-            )
+                http_status=last.get("http_status"),
+                provider_error_code=last.get("provider_error_code"),
+            ) from sent.error
         try:
             body = response.json()
             provider_call_id, vectors, total_tokens = _parse_embedding_response(
@@ -430,6 +433,7 @@ class OpenAICompatibleEmbedding:
             vectors=vectors,
             dimensions=self.config.dimensions,
             usage=usage,
+            attempts=sent.attempts,
         )
 
 
@@ -491,6 +495,7 @@ def _failed_record(
     model_call_id: str,
     error_code: str,
     *,
+    attempts: Sequence[Mapping[str, object]],
     provider_request_id: str | None = None,
     http_status: int | None = None,
     provider_error_code: str | None = None,
@@ -514,6 +519,7 @@ def _failed_record(
         record["http_status"] = http_status
     if provider_error_code is not None:
         record["provider_error_code"] = provider_error_code
+    record["attempts"] = [dict(attempt) for attempt in attempts]
     return record
 
 

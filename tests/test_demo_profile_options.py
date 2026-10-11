@@ -62,4 +62,4 @@ def test_no_script_restores_a_variable_with_the_dotnet_setter() -> None:
     names = ("bootstrap-demo-db", "compose-real-demo", "demo-local", "eval-local-real", "http-local-smoke", "mcp-local-smoke")
     for name in names:
         text = (REAL_DEMO_PS1.parent / f"{name}.ps1").read_text(encoding="utf-8-sig")
-        assert "Set-EnvironmentValue" in text and not re.search(r"SetEnvironmentVariable\([^)]*\$previous", text), name
+        assert "Set-EnvironmentValue $name $previousValues[$name]" in text and not re.search(r"SetEnvironmentVariable\([^)]*\$previous", text), name

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 import math
 import os
+import time
 from typing import Any, Mapping, Sequence
 
 import httpx
@@ -16,14 +18,7 @@ from queryshield.providers.contracts import (
     new_request_id,
     usage_is_consistent,
 )
-from queryshield.providers.http import (
-    base_url_is_valid,
-    endpoint_url,
-    http_error_codes,
-    json_headers,
-    post_json,
-    response_model,
-)
+from queryshield.providers.http import base_url_is_valid, endpoint_url, response_model, send_json
 
 
 @dataclass(frozen=True)
@@ -33,7 +28,7 @@ class OpenAICompatibleConfig:
     base_url: str
     api_key: str = field(repr=False)
     model: str
-    timeout_seconds: float = 15.0
+    timeout_seconds: float = 30.0
     max_tokens: int = 512
 
     def __post_init__(self) -> None:
@@ -60,7 +55,7 @@ class OpenAICompatibleConfig:
         if any(not (os.getenv(name) or "").strip() for name in required):
             raise _configuration_error("missing_model_configuration")
 
-        timeout_text = os.getenv("QUERYSHIELD_MODEL_TIMEOUT_SECONDS", "15")
+        timeout_text = os.getenv("QUERYSHIELD_MODEL_TIMEOUT_SECONDS", "30")
         max_tokens_text = os.getenv("QUERYSHIELD_MODEL_MAX_TOKENS", "512")
         try:
             timeout_seconds = float(timeout_text)
@@ -84,7 +79,7 @@ class OpenAICompatibleConfig:
 
 
 class OpenAICompatibleModel:
-    """One non-streaming provider call with no SDK retry policy."""
+    """One non-streaming provider call; providers.http decides the one retry."""
 
     mode = "real"
     provider = "openai_compatible"
@@ -94,9 +89,11 @@ class OpenAICompatibleModel:
         config: OpenAICompatibleConfig,
         *,
         client: httpx.Client | None = None,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.config = config
         self._client = client
+        self._sleep = sleep
 
     @classmethod
     def from_env(
@@ -118,33 +115,41 @@ class OpenAICompatibleModel:
         normalized_messages = _normalize_messages(messages)
         local_request_id = request_id or new_request_id()
         server_call_id = model_call_id or new_local_call_id()
+        sent = send_json(
+            self._client,
+            self.config.endpoint,
+            self._payload(normalized_messages, tools),
+            api_key=self.config.api_key,
+            request_id=local_request_id,
+            model_call_id=server_call_id,
+            run_id=run_id,
+            timeout=self.config.timeout_seconds,
+            sleep=self._sleep,
+        )
 
         def fail(code: str, **record_fields: Any) -> ModelProviderError:
             return ModelProviderError(
                 code,
                 _failed_record(
-                    self.config, request_id=local_request_id, model_call_id=server_call_id, error_code=code, **record_fields
+                    self.config,
+                    request_id=local_request_id,
+                    model_call_id=server_call_id,
+                    error_code=code,
+                    attempts=sent.attempts,
+                    **record_fields,
                 ),
             )
 
-        payload = self._payload(normalized_messages, tools)
-        headers = json_headers(self.config.api_key, local_request_id, run_id)
-        try:
-            response = post_json(self._client, self.config.endpoint, payload, headers, self.config.timeout_seconds)
-        except httpx.TimeoutException as exc:
-            raise fail("upstream_timeout") from exc
-        except httpx.RequestError as exc:
-            raise fail("upstream_request_error") from exc
-
-        provider_request_id = _header_value(response, "x-request-id")
-        if response.status_code < 200 or response.status_code >= 300:
-            code, provider_error_code = http_error_codes(response)
+        response = sent.response
+        provider_request_id = _header_value(response, "x-request-id") if response is not None else None
+        last = sent.attempts[-1]
+        if last["status"] == "failed":
             raise fail(
-                code,
+                last["error_code"],
                 provider_request_id=provider_request_id,
-                http_status=response.status_code,
-                provider_error_code=provider_error_code,
-            )
+                http_status=last.get("http_status"),
+                provider_error_code=last.get("provider_error_code"),
+            ) from sent.error
         try:
             body = response.json()
             provider_call_id, content, usage, tool_calls, finish_reason = _parse_response(body, native=tools is not None)
@@ -166,6 +171,7 @@ class OpenAICompatibleModel:
             usage_status="known" if usage is not None else "unknown",
             tool_calls=tool_calls,
             finish_reason=finish_reason,
+            attempts=sent.attempts,
         )
 
     def _payload(
@@ -288,6 +294,7 @@ def _failed_record(
     request_id: str,
     model_call_id: str,
     error_code: str,
+    attempts: Sequence[Mapping[str, object]],
     provider_request_id: str | None = None,
     http_status: int | None = None,
     provider_error_code: str | None = None,
@@ -311,6 +318,7 @@ def _failed_record(
         record["http_status"] = http_status
     if provider_error_code is not None:
         record["provider_error_code"] = provider_error_code
+    record["attempts"] = [dict(attempt) for attempt in attempts]
     return record
 
 

@@ -75,6 +75,23 @@ def test_a_connection_failure_prints_the_error_type_only(monkeypatch, capsys) ->
     assert SECRET not in out and "127.0.0.1" not in out and "postgresql" not in out
 
 
+def test_the_connection_gives_up_after_five_seconds(monkeypatch, capsys) -> None:
+    # Without a timeout a refused port waits for the OS's own retries (about 130 s on Windows).
+    import psycopg
+
+    seen: dict[str, object] = {}
+
+    def refuse(url: str, **options: object) -> None:
+        seen.update(options)
+        raise psycopg.OperationalError("refused")
+
+    monkeypatch.setattr(psycopg, "connect", refuse)
+    monkeypatch.setenv(bootstrap.URL_ENV, _url("queryshield_demo"))
+    assert bootstrap.main() == 1
+    assert seen["connect_timeout"] == 5
+    assert capsys.readouterr().out == "bootstrap_demo_db_failed: OperationalError\n"
+
+
 def test_the_script_never_creates_a_role_or_sets_a_password() -> None:
     source = open(bootstrap.__file__, encoding="utf-8").read().upper()
     for word in ("CREATE ROLE", "CREATE USER", "ALTER ROLE", "PASSWORD", "CREATE DATABASE", "DROP DATABASE"):

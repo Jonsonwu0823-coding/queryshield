@@ -176,11 +176,13 @@ def test_each_function_becomes_the_same_action_as_its_json(name, arguments, json
     assert native_call_for(json_payload) == (name, arguments)
 
 
-def test_a_lone_surrogate_escape_parses_the_same_in_both_protocols() -> None:
-    # The converted text must stay encodable: json mode accepts this escape as a deny reason.
-    native = _native_parse(NativeToolCall("c", "deny", '{"reason":"\\ud800"}'))
-    json_mode = parse_query_proposal('{"type":"deny","reason":"\\ud800"}', context=CONTEXT, model_call_id="model-call-1")
-    assert type(native.action).__name__ == "DenyAction" and native.action == json_mode.action
+def test_a_lone_surrogate_escape_is_rejected_the_same_in_both_protocols() -> None:
+    # The decoded string has no UTF-8 form, so both protocols reject it as content that is not strict JSON.
+    with pytest.raises(ProposalParseError) as native:
+        _native_parse(NativeToolCall("c", "deny", '{"reason":"\\ud800"}'))
+    with pytest.raises(ProposalParseError) as json_mode:
+        parse_query_proposal('{"type":"deny","reason":"\\ud800"}', context=CONTEXT, model_call_id="model-call-1")
+    assert native.value.code == json_mode.value.code == "invalid_json"
 
 
 def test_redacted_record_never_carries_the_call_text() -> None:

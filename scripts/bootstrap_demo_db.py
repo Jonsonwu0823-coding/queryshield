@@ -87,7 +87,7 @@ def bootstrap(url: str) -> dict[str, dict[str, int]]:
         raise BootstrapRefused("a migration or the demo data file is empty")
     expected = expected_counts()
 
-    with psycopg.connect(url, cursor_factory=psycopg.ClientCursor) as conn:
+    with psycopg.connect(url, connect_timeout=5, cursor_factory=psycopg.ClientCursor) as conn:
         # The URL is only a name: confirm which database this really is.
         if conn.execute("SELECT current_database()").fetchone()[0] != name:
             raise BootstrapRefused("the connected database is not the one named in the URL")

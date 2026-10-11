@@ -1,17 +1,22 @@
 """HTTP plumbing shared by the OpenAI-compatible chat and embedding adapters.
 
-These helpers build the request, send it once (no retry) and read what both
-adapters read the same way from a response; each adapter keeps its own records.
+These helpers build the request, send it (once more only when the first attempt
+certainly never reached an upstream model) and read what both adapters read the
+same way from a response; each adapter keeps its own records.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
+import json
 import re
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+
+from queryshield.providers.contracts import new_request_id
 
 
 def base_url_is_valid(url: str) -> bool:
@@ -33,8 +38,13 @@ def endpoint_url(base_url: str, path: str) -> str:
     return base if base.endswith(path) else f"{base}{path}"
 
 
-def json_headers(api_key: str, request_id: str, run_id: str | None) -> dict[str, str]:
-    """The request headers; ``X-Run-Id`` only for a call made inside a run, so a gateway can bill per run."""
+def json_headers(api_key: str, request_id: str, run_id: str | None, model_call_id: str) -> dict[str, str]:
+    """The request headers.
+
+    Only a call made inside a run carries ``X-Run-Id`` (so a gateway can bill per run) and
+    ``Idempotency-Key``: calls outside a run, such as building the knowledge index, reuse the
+    same ids on every start, and a gateway would refuse a reused key for a changed body.
+    """
 
     headers = {
         "Accept": "application/json",
@@ -44,22 +54,83 @@ def json_headers(api_key: str, request_id: str, run_id: str | None) -> dict[str,
     }
     if run_id is not None:
         headers["X-Run-Id"] = run_id
+        headers["Idempotency-Key"] = model_call_id
     return headers
 
 
-def post_json(
+RETRY_WAIT_SECONDS = 1.0
+# The gateway's HTTP 503 codes that, by its contract, it sends without having called the upstream model.
+_NOT_SENT_UPSTREAM = frozenset({"ledger_unavailable", "rate_limiter_unavailable"})
+
+
+@dataclass(frozen=True)
+class Sent:
+    """What a logical call got: the last attempt's response or transport error, and every attempt's record."""
+
+    response: httpx.Response | None
+    error: httpx.RequestError | None
+    attempts: tuple[dict[str, object], ...]
+    retryable: bool = False
+
+
+def send_json(
     client: httpx.Client | None,
     url: str,
     payload: Mapping[str, object],
-    headers: Mapping[str, str],
+    *,
+    api_key: str,
+    request_id: str,
+    model_call_id: str,
+    run_id: str | None,
     timeout: float,
-) -> httpx.Response:
+    sleep: Callable[[float], None],
+) -> Sent:
+    """POST ``payload``; once more, after RETRY_WAIT_SECONDS, when the first attempt never reached an upstream.
+
+    Both attempts send the same bytes and the same Idempotency-Key, each its own X-Client-Request-Id.
+    Anything else is the call's result; docs/operations.md gives the reason for each kind of failure.
+    """
+
+    # Exactly what httpx's json= sends, serialized once so a retry cannot differ.
+    body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    first = _attempt(client, url, body, json_headers(api_key, request_id, run_id, model_call_id), timeout)
+    if not first.retryable:
+        return first
+    sleep(RETRY_WAIT_SECONDS)
+    second = _attempt(client, url, body, json_headers(api_key, new_request_id(), run_id, model_call_id), timeout)
+    return replace(second, attempts=first.attempts + second.attempts)
+
+
+def _attempt(client: httpx.Client | None, url: str, body: bytes, headers: Mapping[str, str], timeout: float) -> Sent:
+    """One POST and its record (never a message text); the one place that decides whether it may be retried."""
+
+    record: dict[str, object] = {"request_id": headers["X-Client-Request-Id"]}
+    try:
+        response = _post(client, url, body, headers, timeout)
+    except httpx.TimeoutException as exc:
+        # A read or write timeout may follow a request the upstream executed.  A ConnectTimeout sent
+        # nothing, but it already waited the full timeout: another try could take a call past 60 s.
+        return Sent(None, exc, ({**record, "status": "failed", "error_code": "upstream_timeout"},))
+    except httpx.RequestError as exc:
+        # httpx raises ConnectError only before any byte of the request is written.
+        failed = {**record, "status": "failed", "error_code": "upstream_request_error"}
+        return Sent(None, exc, (failed,), retryable=isinstance(exc, httpx.ConnectError))
+    if 200 <= response.status_code < 300:
+        return Sent(response, None, ({**record, "status": "succeeded"},))
+    code, provider_code = http_error_codes(response)
+    failed = {**record, "status": "failed", "error_code": code, "http_status": response.status_code}
+    if provider_code is not None:
+        failed["provider_error_code"] = provider_code
+    return Sent(response, None, (failed,), retryable=response.status_code == 503 and provider_code in _NOT_SENT_UPSTREAM)
+
+
+def _post(client: httpx.Client | None, url: str, body: bytes, headers: Mapping[str, str], timeout: float) -> httpx.Response:
     """One POST through the injected client, or through a client made for this call."""
 
     if client is not None:
-        return client.post(url, headers=headers, json=payload, timeout=timeout)
+        return client.post(url, headers=headers, content=body, timeout=timeout)
     with httpx.Client(timeout=timeout) as one_off:
-        return one_off.post(url, headers=headers, json=payload)
+        return one_off.post(url, headers=headers, content=body)
 
 
 _PROVIDER_ERROR_CODE = re.compile(r"[A-Za-z0-9_.-]{1,64}")

@@ -86,7 +86,7 @@ docker compose exec app python scripts/demo_run.py --mode fake --base-url http:/
 | `QUERYSHIELD_MODEL_BASE_URL`、`QUERYSHIELD_MODEL_NAME` | 真实模型（OpenAI 兼容）的地址和名字 | 未设置 | 地址不算敏感，见下 |
 | `QUERYSHIELD_MODEL_API_KEY` | 真实模型的密钥 | 未设置 | **是** |
 | `QUERYSHIELD_MODEL_MAX_TOKENS` | 模型单次输出上限 | 代码内 512 | 否 |
-| `QUERYSHIELD_MODEL_TIMEOUT_SECONDS` | 模型调用超时（秒） | 代码内 15 | 否 |
+| `QUERYSHIELD_MODEL_TIMEOUT_SECONDS` | 模型调用超时（秒） | 代码内 30 | 否 |
 | `QUERYSHIELD_EMBEDDING_BASE_URL`、`QUERYSHIELD_EMBEDDING_API_KEY`、`QUERYSHIELD_EMBEDDING_MODEL_NAME`、`QUERYSHIELD_EMBEDDING_MODEL_REVISION`、`QUERYSHIELD_EMBEDDING_DIMENSIONS` | 真实嵌入服务 | 未设置 | `QUERYSHIELD_EMBEDDING_API_KEY` 是 |
 | `QUERYSHIELD_AGENT_PROFILE` | Agent 配置，只由服务端选：`b1`（有界 Agent）、`b0`（单次对照基线）、`b2`（多 Agent：协调者加 2–3 个子 Agent，见[架构说明](architecture.md)的“多 Agent”一节）。`b2` 只支持 `json` 协议和本地元数据工具，配 `native` 或 `QUERYSHIELD_METADATA_TOOLS=mcp` 时在建 run 之前以 503 拒绝；不认识的值也以 503 结束 | 空（`b1`） | 否 |
 | `QUERYSHIELD_METADATA_TOOLS` | `mcp` 时，两个只读元数据工具走真实 MCP stdio 会话；不设或 `local` 为本地 | 未设置（本地） | 否 |
@@ -210,10 +210,28 @@ docker compose -f compose.yaml -f compose.fake-upstream.yaml -f compose.model-ga
 - `compose.model-gateway.yaml` 只改 `app`：接入外部网络、`QUERYSHIELD_PROVIDER_MODE=real`、两个地址都是 `QUERYSHIELD_GATEWAY_BASE_URL`、两个 key 都是 `QUERYSHIELD_MODEL_API_KEY`。`compose.fake-upstream-gateway.yaml` 只让 `fake-upstream` 也接入这个网络；单独接真实网关时不用它，也不用假上游的文件。
 - 哪个变量没设，Compose 就停下并报出它的名字；不向本机发布新端口。
 - 回到默认的进程内 Fake：`docker compose up -d --remove-orphans`。
-- rerank 不经网关（产品路径建检索时不用 rerank）。服务端每次模型调用默认 15 秒超时（嵌入 30 秒），网关的上游超时要更短；适配器不重试，也不读 `Retry-After`。
+- rerank 不经网关（产品路径建检索时不用 rerank）。服务端每次聊天调用默认 30 秒超时（嵌入也是 30 秒），网关的上游超时要更短，这样超时时拿到的是网关的 504，而不是本服务自己先放弃。重试规则见下面的“幂等键和重试”；适配器不读 `Retry-After`。
 - CI 的 `compose` 任务在一个外部网络上起一个“假网关”（第二个假上游容器，不在本项目里），`app` 经 `compose.model-gateway.yaml` 指向它跑演示题，并检查网络上只有 `app` 和假网关、`db` 和 `setup` 不在。
 
 **每次调用带上 run 编号。** run 里的每次聊天调用（B0；B1 的 JSON 和原生协议；追问后恢复；评测的运行）和查询嵌入，都带请求头 `X-Run-Id: <run 编号>`，值就是 run 编号本身（产品里是 `run-` 加 UUID），网关可以按 run 汇总用量。run 之外的调用（启动后第一次检索时建知识索引、`scripts/model_probe.py` 这类探针）不带。审批后继续只执行被批准的 SQL，不调模型。`X-Client-Request-Id` 照旧是每次调用一个新值。
+
+**幂等键和重试。** 带 `X-Run-Id` 的调用（run 里的聊天调用和查询嵌入）同时带请求头 `Idempotency-Key`，值是这次逻辑调用的 `model_call_id`（`local-` 加 UUID；查询嵌入是 `retrieval-<UUID>-embedding`）。建知识索引、探针这类 run 之外的调用不带：建索引用的编号每次启动都一样，知识库改了以后再用同一个键，网关会以请求体不同为由拒绝。
+
+一次逻辑调用最多发两次请求。只有第一次属于下面两种之一时，才等 1 秒，用同一个键、逐字节相同的请求体再发一次（`X-Client-Request-Id` 换新值），第二次的结果就是这次调用的结果：
+
+- 连接没建立（`httpx.ConnectError`：连接被拒、解析不了地址、TLS 握手失败），请求一个字节都没发出；
+- 网关返回 HTTP 503，错误码是 `ledger_unavailable` 或 `rate_limiter_unavailable`：按网关的约定，回这两个错误时它没有调上游。
+
+其余一律不重试，理由分几种：
+
+- 读写超时、请求发出后断开、其它 5xx 和所有 409：上游可能已经执行并计费；直连提供方时重发可能计费两次，经网关时结果未知的调用用同一个键重发只会拿到 409。网关的 5xx 里也有确定没执行的（例如上游被限流时的 503 `upstream_rate_limited`），本服务不逐个区分，一律不重试；
+- 连接超时：请求一个字节都没发出，但已经等满了超时，再试一次会让单次调用超过 run 的 60 秒总时限；
+- 429：额度用完在一个 run 的时间里不会恢复，被限流本来就该退让（见下面的“额度用完、被限流”）；
+- 其它 4xx：请求本身被拒，原样重发结果一样。
+
+直连提供方时 `Idempotency-Key` 没有作用，但可重试的那两种情况下第一次请求都没到上游，所以重试也不会重复计费。重试的规则只写在 `src/queryshield/providers/http.py` 的 `send_json` 里，聊天和嵌入共用。
+
+重试不改计数和对账的口径：一次逻辑调用仍然只算一次 `model_call_count`、只有一条 `model_call` 事件，用量取第二次的响应。两种可重试的情况下第一次都没有调上游：重试成功的调用，网关那边只有一次结算；重试拿到 409 的，调用失败、用量 `unknown`，本来就不参与对账。所以网关按 `X-Run-Id` 汇总的条数和用量与 run 的两个数照样对得上。每次尝试都留痕（不记错误消息原文）：`model_call` 事件和调用记录的 `attempts` 逐条写 `request_id`、`status` 和失败时的 `error_code`、`http_status`、`provider_error_code`，事件顶层的 `request_id` 是第一次尝试的；B0 的记录写在 `model_call_attempts`；调用身份库里每次重试多一行 `transport_retry`，`model_call_id` 不变。查询嵌入的尝试只留在适配器的结果和失败记录里，run 的检索证据里看不到。开了 MCP 元数据工具时，查询嵌入在子进程里按同样的规则重试；等待的 1 秒可能让子进程的单次调用超过上限，结果是 `mcp_timeout`，不会多计费。SSE 的步骤摘要不含 `attempts`。
 
 **按 run 对账。** 网关按 `X-Run-Id` 汇总的数，和 `GET /runs/{id}` 返回的 run 对：聊天调用的条数对 `model_call_count`，聊天调用的用量对 `usage_total`（`status` 是 `known` 时三个数是合计；`unknown` 时三个数是 `null`，表示合计不完整，不能当 0 对；`not_run` 时是 0）。嵌入不按 run 计：run 里的查询嵌入带 `X-Run-Id`，但不进这两个数；建知识索引的嵌入调用不带 `X-Run-Id`。只对已经停下（等待中或已结束）的 run 对账：执行期间（`RUNNING`、`CANCEL_REQUESTED`，包括追问后恢复和审批后执行）`usage_total` 一律是 `unknown`。被取消的 run 也可以对账：执行停下后只写一条终止事件，终态之后计数和合计不再变。返回了 202 的取消，run 一定以 `CANCELLED` 结束，计数和合计按这次执行算；取消正好落在执行结束之后，返回 200 和结束时的 run，不写任何东西。执行中途抛异常结束的 run，出错前已经记下的调用都在这两个数里；只有一次调用发出了、它所在的步骤却没完成时，网关会比 `model_call_count` 多这一次，这时 `usage_total` 是 `unknown`。进程在执行中退出、重启时被结束的 run（`FAILED` 加 `execution_interrupted`，或请求过取消的 `CANCELLED`）：计数是中断前存下的值（首次执行是 0，恢复和审批后执行是暂停时的），用量是 `unknown`，不能拿计数和网关比，跳过这种 run。
 

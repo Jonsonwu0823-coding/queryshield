@@ -164,10 +164,14 @@ def test_building_the_index_and_a_probe_call_carry_no_run_id(upstream) -> None:
 
     assert upstream.sent("embeddings") and upstream.sent("chat/completions")
     assert _run_ids(upstream.requests) == [None] * len(upstream.requests)
+    # The index ids repeat on every start, so a reused key would be refused once the knowledge changed.
+    assert all("idempotency-key" not in request.headers for request in upstream.requests)
 
 
 def test_the_header_is_the_run_id_unchanged_and_only_when_given() -> None:
-    assert "X-Run-Id" not in json_headers("k", "request-1", None)
-    headers = json_headers("k", "request-1", "eval-b1-0123456789abcdef0123456789abcdef-state-alias")
+    outside = json_headers("k", "request-1", None, "local-call-1")
+    assert "X-Run-Id" not in outside and "Idempotency-Key" not in outside
+    headers = json_headers("k", "request-1", "eval-b1-0123456789abcdef0123456789abcdef-state-alias", "local-call-1")
     assert headers["X-Run-Id"] == "eval-b1-0123456789abcdef0123456789abcdef-state-alias"
     assert headers["X-Client-Request-Id"] == "request-1"
+    assert headers["Idempotency-Key"] == "local-call-1"

@@ -120,7 +120,7 @@
   "deny_blank": ["error", "ProposalParseError", "invalid_field", "invalid_field: reason must not be blank", "reason must not be blank"],
   "deny_long": ["error", "ProposalParseError", "invalid_field", "invalid_field: reason is too long", "reason is too long"],
   "deny_extra": ["error", "ProposalParseError", "unknown_field", "unknown_field: proposal contains unknown field(s): question", "proposal contains unknown field(s)"],
-  "lone_surrogate": ["ok", {"run_id": "run", "tenant_id": "A", "principal_id": "p", "role": "requester", "model_call_id": "m", "action": {"type": "deny", "reason": "\ud800"}, "content_sha256": "8e0ca1b9e16092db44501e8693231cfaa88212d38475fc5570ff2b4d67e9eb2f"}],
+  "lone_surrogate": ["error", "ProposalParseError", "invalid_json", "invalid_json: model content has a lone surrogate escape", "model content has a lone surrogate escape"],
   "native_search": ["ok", {"text": "{\"type\":\"tool_call\",\"name\":\"search_catalog\",\"arguments\":{\"query\":\"\\u51c0\\u989d\",\"top_k\":2}}", "proposal": {"run_id": "run", "tenant_id": "A", "principal_id": "p", "role": "requester", "model_call_id": "m", "action": {"type": "tool_call", "name": "search_catalog", "arguments": {"query": "\u51c0\u989d", "top_k": 2}}, "content_sha256": "b1be37332060582212676d86cf69dbc808c467cb8f6d5ea23f378baafb981219"}}],
   "native_query": ["ok", {"text": "{\"type\":\"tool_call\",\"name\":\"query_readonly\",\"arguments\":{\"sql\":\"SELECT COUNT(*) AS paid_count FROM orders AS o WHERE o.status = %s\",\"params\":{\"0\":\"paid\"}}}", "proposal": {"run_id": "run", "tenant_id": "A", "principal_id": "p", "role": "requester", "model_call_id": "m", "action": {"type": "tool_call", "name": "query_readonly", "arguments": {"sql": "SELECT COUNT(*) AS paid_count FROM orders AS o WHERE o.status = %s", "params": {"0": "paid"}}}, "content_sha256": "1ec85c08fb4a267b657adfd1b69623cbc200bfa4287ecb31c4877fda32e8af2e"}}],
   "native_deny": ["ok", {"text": "{\"type\":\"deny\",\"reason\":\"x\"}", "proposal": {"run_id": "run", "tenant_id": "A", "principal_id": "p", "role": "requester", "model_call_id": "m", "action": {"type": "deny", "reason": "x"}, "content_sha256": "556c3c947538d67cf1b45e9e1e959b4b0e332e15577b94dc2ee613a233efc643"}}],
@@ -133,7 +133,7 @@
   "native_arguments_duplicate": ["error", "ProposalParseError", "duplicate_field", "duplicate_field: duplicate JSON field", "duplicate JSON field"],
   "native_arguments_empty": ["error", "ProposalParseError", "invalid_json", "invalid_json: model content is empty", "model content is empty"],
   "native_bad_tool_arguments": ["error", "ProposalParseError", "invalid_field", "invalid_field: tables must be in the server allowlist", "tables must be in the server allowlist"],
-  "native_lone_surrogate": ["ok", {"text": "{\"type\":\"deny\",\"reason\":\"\\ud800\"}", "proposal": {"run_id": "run", "tenant_id": "A", "principal_id": "p", "role": "requester", "model_call_id": "m", "action": {"type": "deny", "reason": "\ud800"}, "content_sha256": "8e0ca1b9e16092db44501e8693231cfaa88212d38475fc5570ff2b4d67e9eb2f"}}]
+  "native_lone_surrogate": ["error", "ProposalParseError", "invalid_json", "invalid_json: model content has a lone surrogate escape", "model content has a lone surrogate escape"]
  },
  "shapes": [
   {"json": "valid", "top_level": "null"},

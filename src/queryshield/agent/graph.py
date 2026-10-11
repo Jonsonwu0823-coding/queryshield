@@ -700,6 +700,7 @@ class BoundedAgent:
                 **options,
             )
         except ModelProviderError as exc:
+            self._record_retries(identity, exc.record.get("attempts", ()))
             return {
                 "status": "failed",
                 "reason": "model provider call failed",
@@ -708,6 +709,7 @@ class BoundedAgent:
                 **step,
             }
 
+        self._record_retries(identity, result.attempts)
         event = self._event(state, _model_call_event(result, identity, native=native))
         # Native: the one function call becomes the json action it stands for,
         # so both protocols go through the same parser; any content is ignored.
@@ -736,6 +738,12 @@ class BoundedAgent:
             )
             return {**failure, **step}
         return {"status": "running", "proposal": proposal, "events": event, **step}
+
+    def _record_retries(self, identity: ModelCallIdentity, attempts: Sequence[Mapping[str, object]]) -> None:
+        """Every attempt after the first is a transport retry of the same logical call, under its own request id."""
+
+        for attempt in attempts[1:]:
+            self.call_store.transport_retry(identity, request_id=attempt["request_id"])
 
     def _action_type_repair(
         self,
@@ -2400,6 +2408,7 @@ def _model_call_event(result: ModelCallResult, identity: ModelCallIdentity, *, n
         "provider_request_id": result.provider_request_id,
         "usage_status": result.usage_status,
         "usage": result.usage.as_dict() if result.usage is not None else None,
+        **({"attempts": [dict(attempt) for attempt in result.attempts]} if result.attempts else {}),
         "content_length": len(content),
         "content_sha256": sha256(content).hexdigest(),
         **(
@@ -2480,6 +2489,7 @@ def _provider_failure_fields(record: Mapping[str, object]) -> dict[str, object]:
         "usage",
         "http_status",
         "provider_error_code",
+        "attempts",
     )
     return {key: record[key] for key in allowed if key in record}
 

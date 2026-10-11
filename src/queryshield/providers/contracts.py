@@ -67,6 +67,8 @@ class ModelCallResult:
     # None for a json-protocol call; a tuple (maybe empty) when tools were sent.
     tool_calls: tuple[NativeToolCall, ...] | None = None
     finish_reason: str | None = None
+    # One record per HTTP attempt (providers.http); empty when nothing was sent over HTTP.
+    attempts: tuple[Mapping[str, object], ...] = ()
 
     def to_redacted_record(self) -> dict[str, object]:
         content_bytes = self.content.encode("utf-8")
@@ -86,6 +88,8 @@ class ModelCallResult:
             "usage": self.usage.as_dict() if self.usage is not None else None,
             "usage_status": self.usage_status,
         }
+        if self.attempts:
+            record["attempts"] = [dict(attempt) for attempt in self.attempts]
         if self.tool_calls is not None:
             record["finish_reason"] = self.finish_reason
             record["tool_call_count"] = len(self.tool_calls)
