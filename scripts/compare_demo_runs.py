@@ -7,7 +7,7 @@ Each summary is grouped by the profile its runs actually used (the summary's
 ``profile``, read from the server's state store by scripts/demo_run.py).  Per
 profile: runs, questions, passes, fact completeness (composite questions), model
 and tool calls, input and output tokens, wall time (median and maximum), how
-often the run delegated, and the error codes.  Anything the records do not have
+often the run delegated, how often it loaded a Skill and which, and the error codes.  Anything the records do not have
 is reported as "none", never as 0.  Only the summaries are read, never raw
 evidence.
 """
@@ -50,10 +50,21 @@ def _completeness(records: Sequence[Mapping[str, object]]) -> float | str:
     return round(found / expected, 3) if expected else NONE
 
 
+def _skill_loads(runs: Sequence[Mapping[str, object]]) -> tuple[float | str, dict[str, int] | str]:
+    """The share of runs that loaded a Skill, and each Skill's loads; "none" when a summary predates the field."""
+
+    loads = [r.get("skills_loaded") for r in runs]
+    if not runs or any(type(item) is not list for item in loads):
+        return NONE, NONE
+    rate = round(sum(1 for item in loads if item) / len(runs), 3)
+    return rate, dict(sorted(Counter(str(name) for item in loads for name in item).items()))
+
+
 def profile_report(summaries: Sequence[Mapping[str, object]]) -> dict[str, object]:
     records = [r for s in summaries for r in s.get("records", []) if r.get("verdict") != "not_applicable"]
     runs = [r for r in records if r.get("run_id")]
     elapsed = _ints(records, "elapsed_ms")
+    skill_load_rate, skills_loaded = _skill_loads(runs)
     return {
         "runs": len(summaries),
         "questions_sets": sorted({str(s.get("questions_set")) for s in summaries}),
@@ -66,6 +77,8 @@ def profile_report(summaries: Sequence[Mapping[str, object]]) -> dict[str, objec
         "output_tokens": _tokens(runs, "completion_tokens"),
         "elapsed_ms": {"median": median(elapsed), "max": max(elapsed)} if elapsed else NONE,
         "delegation_rate": round(sum(1 for r in runs if r.get("delegated")) / len(runs), 3) if runs else NONE,
+        "skill_load_rate": skill_load_rate,
+        "skills_loaded": skills_loaded,
         "error_codes": dict(sorted(Counter(str(r["error_code"]) for r in records if r.get("error_code")).items())),
     }
 

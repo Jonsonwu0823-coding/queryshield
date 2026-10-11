@@ -547,7 +547,8 @@ try {
         @{ Name = "smoke-http-native"; Dir = "smoke-http-native"; Script = "http_smoke.py"; Args = @("--mode", "fake", "--model-protocol", "native"); Demo = $false },
         @{ Name = "smoke-mcp"; Dir = "smoke-mcp"; Script = "mcp_smoke.py"; Args = @("--mode", "fake", "--part", "all"); Demo = $false },
         @{ Name = "demo-run"; Dir = "demo-run"; Script = "demo_run.py"; Args = @("--mode", "fake"); Demo = $true },
-        @{ Name = "demo-run-composite-b2"; Dir = "demo-run-composite-b2"; Script = "demo_run.py"; Args = @("--mode", "fake", "--questions", "composite", "--profile", "b2"); Demo = $true }
+        @{ Name = "demo-run-composite-b2"; Dir = "demo-run-composite-b2"; Script = "demo_run.py"; Args = @("--mode", "fake", "--questions", "composite", "--profile", "b2"); Demo = $true },
+        @{ Name = "demo-run-composite-b1s"; Dir = "demo-run-composite-b1s"; Script = "demo_run.py"; Args = @("--mode", "fake", "--questions", "composite", "--profile", "b1s"); Demo = $true }
     )
     foreach ($smoke in $smokes) {
         $dir = Join-Path $EvidenceDir $smoke.Dir

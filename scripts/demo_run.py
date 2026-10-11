@@ -3,8 +3,8 @@
 Fake mode (free): the Fake model answers the questions it knows; the others are
 ``not_applicable``.  ``--questions composite`` runs the questions with 2-3 parts
 (fixtures/demo/demo-composite-questions-v1.json) instead of the demo questions, and
-``--profile b1|b2`` sets the server's Agent profile (default: the server's own, B1);
-every record says which profile its run actually used, read from the state store.  Verified values are still compared with the expected answers,
+``--profile b1|b2|b1s`` sets the server's Agent profile (default: the server's own, B1);
+every record says which profile its run actually used and which Skills it loaded, read from the state store.  Verified values are still compared with the expected answers,
 so this is the product's own verification path computing the answers again.
 Every question also gets one rule: each verified fact must equal the value the
 generator computes for the question's tenant and the fact's metric and window.
@@ -587,6 +587,8 @@ def summary_record(question: Mapping[str, object], obs: Mapping[str, object], ju
         "profile": obs.get("profile"),
         "delegated": obs.get("subtask_count") is not None,
         "subtask_count": obs.get("subtask_count"),
+        # The Skills the run loaded, by name (server-checked ids only; null without a run).
+        "skills_loaded": obs.get("skills_loaded"),
         "tool_call_count": obs.get("tool_call_count"),
         "elapsed_ms": obs.get("elapsed_ms"),
         **({"fact_completeness": judgement["fact_completeness"]} if "fact_completeness" in judgement else {}),
@@ -663,18 +665,19 @@ def _observe(code: int, body: Mapping[str, object], state_path: Path, fixed_no_d
 
 
 def _run_shape(state_path: Path, run_id: str) -> dict:
-    """The profile the run used and, if it delegated, how many subtasks (from the server's state store)."""
+    """The profile the run used, how many subtasks if it delegated, and the Skills it loaded (from the server's state store)."""
 
     from queryshield.db.state_store import StateStore
 
     with StateStore(state_path) as store:
         run = store.get_run(run_id) or {}
-        subtasks = [
-            len(payload.get("subtasks") or [])
-            for event in store.events(run_id)
-            if event.get("type") == "agent_step" and (payload := event.get("payload") or {}).get("kind") == "delegation"
-        ]
-    return {"profile": (run.get("run_config") or {}).get("profile"), "subtask_count": subtasks[0] if subtasks else None}
+        steps = [event.get("payload") or {} for event in store.events(run_id) if event.get("type") == "agent_step"]
+    subtasks = [len(step.get("subtasks") or []) for step in steps if step.get("kind") == "delegation"]
+    return {
+        "profile": (run.get("run_config") or {}).get("profile"),
+        "subtask_count": subtasks[0] if subtasks else None,
+        "skills_loaded": [str(step["skill_id"]) for step in steps if step.get("kind") == "skill_load" and step.get("status") == "succeeded"],
+    }
 
 
 def _run_question(base: str, tokens: Mapping[str, str], question: Mapping[str, object], state_path: Path, no_data_reply: str, catalog_question: str) -> tuple[dict, dict]:
@@ -788,11 +791,11 @@ def demo_source_ids() -> frozenset[str]:
 def run_profile_check(records: list[dict], requested: str | None) -> tuple[str | None, list[str]]:
     """The one profile the runs used (from the state store), and failures when they differ or are not the requested one."""
 
-    from queryshield.agent.runtime import B1_PROFILE, B2_PROFILE
+    from queryshield.agent.runtime import B1_PROFILE, B1S_PROFILE, B2_PROFILE
 
     used = sorted({str(r["profile"]) for r in records if r.get("profile")})
     failures = ["mixed_profiles"] if len(used) > 1 else []
-    wanted = {"b1": B1_PROFILE, "b2": B2_PROFILE}.get(requested or "")
+    wanted = {"b1": B1_PROFILE, "b2": B2_PROFILE, "b1s": B1S_PROFILE}.get(requested or "")
     failures += sorted(f"{r['id']}:profile_mismatch" for r in records if wanted and r.get("profile") and r["profile"] != wanted)
     return (used[0] if len(used) == 1 else None), failures
 
@@ -833,7 +836,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--questions", choices=("demo", "composite"), default="demo", help="the demo questions, or the questions with 2-3 parts")
     parser.add_argument(
         "--profile",
-        choices=("b1", "b2"),
+        choices=("b1", "b2", "b1s"),
         default=None,
         help="the server's Agent profile (default: the server's own); with --base-url, the running service's setting. "
         "A run that used another profile fails",

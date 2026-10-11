@@ -8,7 +8,7 @@ param(
     [switch]$NonInteractive,
     [string]$GatewayBaseUrl,
     [string]$GatewayNetwork,
-    [ValidateSet('b1', 'b2')][string]$Profile,
+    [ValidateSet('b1', 'b2', 'b1s')][string]$Profile,
     [ValidateSet('demo', 'composite')][string]$Questions = 'demo'
 )
 
@@ -31,7 +31,7 @@ param(
 # demo questions run (no walkthrough), so each run in the gateway's ledger is one run_id in
 # demo-summary.json, the only file copied. The gateway must accept the same model names.
 #
-# -Profile b1|b2 sets the app's Agent profile (QUERYSHIELD_AGENT_PROFILE; default: B1) and
+# -Profile b1|b2|b1s sets the app's Agent profile (QUERYSHIELD_AGENT_PROFILE; default: B1) and
 # -Questions composite runs the questions with 2-3 parts instead of the demo questions.
 #
 # The summaries hold ids, status codes, terminal states and numbers only. The raw demo file

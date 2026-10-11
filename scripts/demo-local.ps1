@@ -6,7 +6,7 @@ param(
     [switch]$FakeDryRun,
     [ValidateSet('json', 'native')][string]$ModelProtocol = 'json',
     [switch]$NonInteractive,
-    [ValidateSet('b1', 'b2')][string]$Profile,
+    [ValidateSet('b1', 'b2', 'b1s')][string]$Profile,
     [ValidateSet('demo', 'composite')][string]$Questions = 'demo'
 )
 
@@ -19,7 +19,7 @@ param(
 # not set in your session; an existing QUERYSHIELD_DATABASE_URL (the test database)
 # is ignored and restored.  Create the demo database first: docs/demo-data.md.
 # -FakeDryRun checks the wiring with the Fake model at no cost.
-# -Profile b1|b2 sets the server's Agent profile (default: the server's own, B1) and
+# -Profile b1|b2|b1s sets the server's Agent profile (default: the server's own, B1) and
 # -Questions composite runs the questions with 2-3 parts instead of the demo questions.
 
 $ErrorActionPreference = "Stop"

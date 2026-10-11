@@ -9,13 +9,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from functools import cache
 import json
 import os
 from threading import Lock
 from time import perf_counter
 from typing import Any
 
-from queryshield.agent.config import MULTI_AGENT_VERSIONS, NATIVE_VERSIONS, RunConfig
+from queryshield.agent.config import MULTI_AGENT_VERSIONS, NATIVE_VERSIONS, SKILLS_VERSIONS, RunConfig
 from queryshield.agent.context import build_context
 from queryshield.agent.delegation import COORDINATOR
 from queryshield.agent.graph import CLARIFICATION_NOT_NEEDED_CODE, AgentRunResult, BoundedAgent, GraphLimits
@@ -31,6 +32,7 @@ from queryshield.agent.proposals import (
     ToolCallAction,
     parse_query_proposal,
 )
+from queryshield.agent.skills import SkillFileError, SkillLibrary, load_skill_library
 from queryshield.agent.tenant_scope import has_explicit_foreign_tenant
 from queryshield.agent.tool_execution import (
     CLARIFICATION_VALUE_UNSUPPORTED_CODE,
@@ -61,9 +63,11 @@ B1_PROFILE = "B1-bounded-agent"
 PROFILES = (B0_PROFILE, B1_PROFILE)
 # The coordinator of B2 is the B1 agent with a delegate action; only the server picks it.
 B2_PROFILE = "B2-multi-agent"
-PRODUCT_PROFILES = PROFILES + (B2_PROFILE,)
+# B1 plus Skills the model loads on demand; only the server picks it.
+B1S_PROFILE = "B1S-agent-skills"
+PRODUCT_PROFILES = PROFILES + (B2_PROFILE, B1S_PROFILE)
 # The bounded-graph profiles: they retrieve and can wait for the user (B0 does neither).
-BOUNDED_PROFILES = (B1_PROFILE, B2_PROFILE)
+BOUNDED_PROFILES = (B1_PROFILE, B2_PROFILE, B1S_PROFILE)
 DEFAULT_PRODUCT_PROFILE = B1_PROFILE
 B0_MODEL_CALL_LIMIT = 1
 B1_MODEL_CALL_LIMIT = 6
@@ -601,14 +605,33 @@ def build_b2_agent(
     return _bounded_agent(model, tools, call_store, run_config, retrieval_available, on_step, role=COORDINATOR)
 
 
-def build_bounded_agent(model: ModelAdapter, tools: ControlledTools, *, run_config: RunConfig, **options: Any) -> BoundedAgent:
-    """The B1 agent or the B2 coordinator, by the run's profile (a run and its resume use the same one)."""
+def build_skills_agent(
+    model: ModelAdapter,
+    tools: ControlledTools,
+    *,
+    call_store: Any | None = None,
+    run_config: RunConfig,
+    retrieval_available: bool = True,
+    on_step: Callable[[Mapping[str, object]], None] | None = None,
+) -> BoundedAgent:
+    """Assemble the skills profile: B1's agent and budgets, plus the deployed Skills; the only such assembly."""
 
-    builder = build_b2_agent if run_config.profile == B2_PROFILE else build_b1_agent
+    if run_config.profile != B1S_PROFILE:
+        raise ValueError("the skills profile requires its server-owned RunConfig")
+    return _bounded_agent(model, tools, call_store, run_config, retrieval_available, on_step, skills=product_skills())
+
+
+_BUILDERS = {B2_PROFILE: build_b2_agent, B1S_PROFILE: build_skills_agent}
+
+
+def build_bounded_agent(model: ModelAdapter, tools: ControlledTools, *, run_config: RunConfig, **options: Any) -> BoundedAgent:
+    """The B1 agent, the B2 coordinator or the skills agent, by the run's profile (a run and its resume use the same one)."""
+
+    builder = _BUILDERS.get(run_config.profile, build_b1_agent)
     return builder(model, tools, run_config=run_config, **options)
 
 
-def _bounded_agent(model, tools, call_store, run_config, retrieval_available, on_step, *, role=None) -> BoundedAgent:
+def _bounded_agent(model, tools, call_store, run_config, retrieval_available, on_step, *, role=None, skills=None) -> BoundedAgent:
     """B1's budgets: the whole run's, also for B2 (its sub-agents get shares of them)."""
 
     return BoundedAgent(
@@ -624,6 +647,7 @@ def _bounded_agent(model, tools, call_store, run_config, retrieval_available, on
         retrieval_available=retrieval_available,
         on_step=on_step,
         role=role,
+        skills=skills,
     )
 
 
@@ -652,8 +676,8 @@ def b1_result_payload(
         and payload.get("model_call_count") == 0
         and payload.get("tool_call_count") == 0
     )
-    # Only B2 is labelled by its configuration: B1's graph also runs under evaluation configurations.
-    profile = B2_PROFILE if result.run_config.profile == B2_PROFILE else B1_PROFILE
+    # Only B2 and the skills profile are labelled by their configuration: B1's graph also runs under evaluation configurations.
+    profile = result.run_config.profile if result.run_config.profile in {B2_PROFILE, B1S_PROFILE} else B1_PROFILE
     return {"profile": profile, **payload}
 
 
@@ -670,7 +694,9 @@ class RuntimeConfigurationError(RuntimeError):
         super().__init__(f"{code}: {message}")
 
 
-_PROFILE_ALIASES = {"b0": B0_PROFILE, "b1": B1_PROFILE, "b2": B2_PROFILE} | {name.lower(): name for name in PRODUCT_PROFILES}
+_PROFILE_ALIASES = {"b0": B0_PROFILE, "b1": B1_PROFILE, "b2": B2_PROFILE, "b1s": B1S_PROFILE} | {
+    name.lower(): name for name in PRODUCT_PROFILES
+}
 
 
 def configured_profile() -> str:
@@ -683,6 +709,20 @@ def configured_profile() -> str:
     if profile is None:
         raise RuntimeConfigurationError("invalid_agent_profile", "QUERYSHIELD_AGENT_PROFILE is not a registered profile")
     return profile
+
+
+@cache
+def product_skills() -> SkillLibrary:
+    """The deployed Skills, read and checked once; a bad file blocks the service (503) and is never skipped.
+
+    The service reads them at startup whatever its profile: a run resumes under
+    its stored profile, so a service set to B1 still resumes a skills run.
+    """
+
+    try:
+        return load_skill_library()
+    except SkillFileError as exc:
+        raise RuntimeConfigurationError(exc.code, str(exc)) from exc
 
 
 def provider_mode() -> str:
@@ -846,6 +886,10 @@ def product_run_config(profile: str, *, catalog: Any, retriever: Any | None) -> 
         if protocol_config != config:
             raise RuntimeConfigurationError("invalid_model_protocol", "the multi-agent profile runs the json protocol only")
         return replace(config, **MULTI_AGENT_VERSIONS)
+    if profile == B1S_PROFILE:
+        if protocol_config != config:
+            raise RuntimeConfigurationError("invalid_model_protocol", "the skills profile runs the json protocol only")
+        return replace(config, **SKILLS_VERSIONS, skill_versions=product_skills().versions)
     return protocol_config if profile == B1_PROFILE else config
 
 
@@ -939,6 +983,7 @@ __all__ = [
     "model_for_mode",
     "product_retriever",
     "product_run_config",
+    "product_skills",
     "product_tools",
     "retrieval_label",
     "tools_retriever",
@@ -948,6 +993,7 @@ __all__ = [
     "B0_PROFILE",
     "B0_SYSTEM_PROMPT",
     "B1_PROFILE",
+    "B1S_PROFILE",
     "B2_PROFILE",
     "BOUNDED_PROFILES",
     "DEFAULT_PRODUCT_PROFILE",
@@ -961,6 +1007,7 @@ __all__ = [
     "build_b1_agent",
     "build_b2_agent",
     "build_bounded_agent",
+    "build_skills_agent",
     "outcome_for",
     "render_fact_records",
     "run_b0_single_pass",

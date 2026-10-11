@@ -1,7 +1,8 @@
 """Deterministic offline model for demos and checks; a test double, not product logic.
 
 It speaks the B1 action protocol (search_catalog, query_readonly with declared
-metrics and time_window, final_answer with fact_refs, ask_user) and reads only
+metrics and time_window, final_answer with fact_refs, ask_user; load_skill when
+the server offers Skills) and reads only
 the messages the server sent it.  Its question rules are its own; whatever it
 declares is still verified by the server against the catalog, the SQL
 projection and the executed evidence.
@@ -50,6 +51,9 @@ KNOWLEDGE_SMOKE_QUESTION = "退款后净额是怎么算的？"
 _COMPOSITE_MARKER = "分别是多少"
 _PART_SEPARATOR = re.compile(r"[、和]")
 _AMBIGUOUS_WORDS = ("销售额", "营业额")
+# The skills profile: a composite question first loads this Skill (the server's index names it).
+COMPOSITE_SKILL = "composite-question"
+_SKILL_MESSAGE = f"QUERYSHIELD_SKILL name={COMPOSITE_SKILL};"
 
 
 def fen_to_yuan(fen: int | Decimal) -> str:
@@ -360,6 +364,16 @@ def _composite_content(
     return _dump({"type": "tool_call", "name": "query_readonly", "arguments": _metric_call(metrics, window)})
 
 
+def _composite_skill_load(context: dict[str, object], messages: list[dict[str, str]]) -> str | None:
+    """Under the skills profile, the load_skill action for a composite question, until the Skill's text is there."""
+
+    offered = '"load_skill"' in json.dumps(context.get("action_contract", {}), ensure_ascii=False)
+    loaded = any(
+        message.get("role") == "system" and str(message.get("content", "")).startswith(_SKILL_MESSAGE) for message in messages
+    )
+    return _dump({"type": "load_skill", "skill_id": COMPOSITE_SKILL}) if offered and not loaded else None
+
+
 def _retrieval_offered(context: dict[str, object], tools: list[dict[str, Any]] | None) -> bool:
     """Whether this call may search the catalog: a native tool, or the json action contract."""
 
@@ -398,6 +412,9 @@ def _fake_content(messages: list[dict[str, str]], tools: list[dict[str, Any]] | 
 
     tool_results = _data_payloads(messages, _TOOL_RESULT_PREFIX)
     parts = None if baseline else _composite_parts(question, clarification, request_window)
+    skill_load = _composite_skill_load(context, messages) if parts is not None else None
+    if skill_load is not None:
+        return skill_load
     if parts is not None and not _ambiguous(question, clarification):
         searched = _searched(tool_results, messages)
         search = (

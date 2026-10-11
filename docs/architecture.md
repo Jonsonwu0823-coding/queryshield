@@ -172,6 +172,26 @@ HTTP 接口都在 `src/queryshield/api/main.py`：
 - **线程间共享的对象**：两个计数包装（模型调用、SQL 执行）在锁里计数；调用记录和状态库本来就带锁；受控工具按（run、结果编号）存结果，每次查询新开数据库连接；真实模型适配器每次调用自己开 HTTP 客户端，Fake 模型没有状态。步骤写入器有自己的锁：**先拿写入器的锁、再拿状态库的锁**，状态库从不回调写入器，没有反过来的路径。MCP 元数据会话不在线程间共用：B2 配 `QUERYSHIELD_METADATA_TOOLS=mcp` 在建 run 之前就以 503 拒绝；配 native 协议同样拒绝（B2 只支持 json）。
 - **恢复**只会发生在委派之前（协调者自己追问时），checkpoint 格式不变；B2 有自己的提示词和动作 schema 版本号，B1 和 B2 的 checkpoint 不能互相恢复。
 
+### 业务 Skills（B1S，对比实验）
+
+服务端设置 `QUERYSHIELD_AGENT_PROFILE=b1s` 时，run 由有界 Agent 加一组 Skill 完成；客户端和模型都选不了，默认仍是 B1。Skill 是写给模型看的“这类任务怎么一步步做”，按需加载（渐进式披露）。读取和校验在 `src/queryshield/agent/skills.py`，组装在 `src/queryshield/agent/runtime.py` 的 `build_skills_agent`。
+
+- **Skill 文件**：仓库里的 `src/queryshield/skills/` 目录，每个 Skill 一个子目录和一个 `SKILL.md`：开头三行 `name`、`description`、`version`（夹在两行 `---` 之间），后面是正文。现在有两个：
+  - `src/queryshield/skills/composite-question/SKILL.md`：一题问多个指标或多个时间段，每个时间窗一条查询（同一时间窗的指标一起声明，`net_fen` 单独一条），全部部分都有结果才作答；
+  - `src/queryshield/skills/customer-ranking/SKILL.md`：按客户汇总、排名或要客户姓名，姓名照常发查询、由服务端转审批，不要自己拒绝。
+- **只在启动时读一次，不论配的是哪个 profile**：恢复按 run 存下的配置建 Agent，配置换成 B1 的服务也要能恢复 B1S 的 run。名字要和目录名相同，版本形如 `v1`，说明不超过 20 个字符，正文不超过 2,400 个 UTF-8 字节、不能含 `QUERYSHIELD_`；`skills/` 目录下每一项都必须是带 `SKILL.md` 的子目录，误放一个普通文件服务也起不来；有一个文件不合格，服务就起不来（`invalid_skill_file`），不会跳过。开头那段不按 YAML 解析：三个字符串不需要类型转换、锚点和标签，严格的逐行解析信任面更小。不从网络、上传或模型输出安装，运行中不重读。
+- **第一层：索引。** B1S 的系统消息在动作说明里多一项 `load_skill`：每个 Skill 的名字和一句说明，以及“每个 run 最多 2 个、每个只加载一次”。`runtime_versions` 的 `skill_versions` 记下每个 Skill 的名字和版本（如 `composite-question@v1`）。B0、B1、B2 的系统消息里没有这些。
+- **路由规则**：B1S 的 workflow 第一条是“Load the Skill fitting the question before querying; follow its text.”（提示词版本 `qs-skills-prompt-v2`）。原因：第一轮真实运行只放了索引，真实模型在 27 个 run 里一次也没有加载；常驻的 workflow 已经给了一套查询做法，模型照着直接查，Skill 和它争用时就被跳过。
+- **第二层：正文。** 模型发 `{"type":"load_skill","skill_id":"composite-question"}`；`src/queryshield/agent/proposals.py` 的 `parse_query_proposal` 只在 B1S 下接受这个动作，并核对名字在索引里。之后每次调用，正文都作为一条 system 消息紧跟在服务端上下文后面、用户问题之前，开头一行是 `QUERYSHIELD_SKILL name=…; version=…; server_guidance`；它是硬消息，超长时被删的只会是工具结果。不做第三层（Skill 附带的脚本和文件）：QS 不执行来自文件或模型的代码。
+- **出错就结束 run（502），不用那一次修复**：名字不在索引里是 `unknown_skill`，同一个 Skill 再加载一次是 `skill_already_loaded`（先查重复）；已经加载了 2 个、再加载第三个不同的 Skill 是 `skill_load_limit`。现在只部署了 2 个，所以第三次加载必然是重复，得到 `skill_already_loaded`。B0、B1、B2 和 `POST /query-proposals` 照旧把它当成不认识的动作：带 `skill_id` 时是 `unknown_field`，不带时是 `unknown_action`。
+- **计数和事件**：发出 `load_skill` 的那一步照常是一条 `model_call` 事件，算进模型调用次数和用量；加载本身不算工具调用、不改预算（仍是 6/8/60）。每次加载写一条 `skill_load` 事件：名字、版本和文件的 sha256，不写正文；SSE 摘要的字段不变，只多一种 `kind`。
+- **恢复**：已加载的 Skill 每一步都从 run 的事件重建，事件本来就存在 checkpoint 里，所以格式不变（v4），追问之后恢复，正文照样回到上下文。恢复时存下的 `skill_versions` 和当前部署的不一致就拒绝（HTTP 409 `checkpoint_invalid`，run 留在 `WAITING_USER`），和换了 profile 的拒绝走同一条路。审批之后服务端只执行被批准的那一条查询，不再调用模型。
+- **system 消息的不变式**：原来是“第一条之后没有 system 消息，system 消息里没有 `QUERYSHIELD_DATA`”（B0、B1、B2 照旧）。B1S 下改为：最前面连着的若干条 system 消息，第一条是服务端上下文，其余每条都逐字节等于某个已注册 Skill 的标记加正文；任何 system 消息里都没有 `QUERYSHIELD_DATA`。工具结果和检索结果仍然是 user 消息里的不可信数据。
+- **边界**：Skill 只是做法说明。身份、租户、权限、预算、审批、SQL 检查和事实核实都由服务端决定，正文里写“忽略预算”“改查 B 租户”什么也改不了（测试里放了这样一个 Skill）。
+- **和知识库、MCP、工具调用的分工**：知识库讲“是什么”（口径、规则、定义），按问题检索；Skill 讲“怎么做”，不复制定义，需要时提示模型去检索。工具是服务端执行的动作；MCP 是两个元数据工具的传输方式；Skill 是给模型看的文字，三者在 QS 里同时存在，互不替代。
+- **代价**：B1S 的系统消息比 B1 多约 295 个字符（索引、版本和路由规则）；加载要多一次模型调用，之后每次调用多带一份正文（两个 Skill 分别约 1,800 和 2,000 字节）。实测（2026-10-11 第二轮真实运行的复合题）：比 B1 多约 16% 的输入 tokens，每个 run 的模型调用多约 10%，详见[能力证据清单](evidence.md)。
+- **扩展性**：索引常驻系统消息，而 B1 的系统消息离 11,500 字符的上限只剩约 300 个字符，索引、版本和路由规则用掉了其中约 295，所以现在只放 2 个。Skill 多了以后，索引本身也要按需检索，不能全部放进系统消息。
+
 ### 评测
 
 `src/queryshield/evaluation/` 用同一个模型、同一组受控工具、同一个身份，成对运行两种配置：
@@ -277,3 +297,4 @@ sequenceDiagram
 10. **Fake 与真实模型严格分开。** 缺配置时服务以 503 结束（检查脚本记为 blocked），不会退回 Fake；用量未知记 `unknown`，不补 0。为什么：“跑通了”必须能说明跑的是什么。代价：没有密钥时只能看 Fake 结果，Fake 只认演示和评测里写好的题。
 11. **原生 function calling 只换输出方式。** 原生模式下，上下文仍然每次由服务端重建，工具结果仍作为不可信数据放在 user 消息里；不回放模型上一轮的 `tool_calls`，也不加带 `tool_call_id` 的 tool 消息。为什么：与 json 协议对比时只改一个变量；服务端也从不回显模型自己的输出。代价：这不是标准的多轮工具消息形式，模型看不到自己上一轮调用的原文，只看到服务端记下的结果。
 12. **多 Agent 的协调者就是有界 Agent 加一个动作。** 委派只交出结构化的子任务（指标和时间窗），子 Agent 只看到服务端写的那一句话，预算从同一个 run 里分，委派之后不能再追问。为什么：子任务的校验、结果的核实、事实的渲染都复用单 Agent 已经验证过的规则，多 Agent 不多出一条信任路径；子 Agent 看不到原问题，就不会自己改题；共享预算让两种配置的对比只差“怎么分工”；委派之后不追问，等待中的 run 就不会带着子 Agent 的状态，checkpoint 格式不用改。代价：子 Agent 不能追问或走审批，遇到就算失败；协调者作答前必须等所有子 Agent；没做固定的专家角色和技能、委派之后的恢复、检索缓存。对比实验不要求 B2 比 B1 好，结论以复合题的数字为准。
+13. **业务 Skills 按需加载，只放做法说明。** 第一层只有名字和一句说明，正文要模型自己发 `load_skill` 才进上下文；正文是 system 消息，但改不了身份、预算和审批。为什么：大部分问题不需要做法说明，常驻正文会挤占本来就紧的上下文；让模型自己选，比服务端按意图挑一个更接近通行的 Agent Skills 做法，也能对比“单 Agent 加做法说明”和多 Agent 的代价。代价：多一次模型调用和一份正文的 token；索引占系统消息，现在只放得下 2 个；Skill 写错了只会让模型做错，服务端的核实照旧兜底。对比实验不要求 B1S 比 B1 好，结论以复合题的数字为准。

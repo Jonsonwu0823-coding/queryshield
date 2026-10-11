@@ -35,6 +35,14 @@ MULTI_AGENT_VERSIONS: Final = {
     "action_schema_version": "qs-action-schema-multi-agent-v1",
 }
 
+# The skills profile: B1 plus the load_skill action and a Skills index.  Shorter
+# than the usual qs-system-prompt-* / qs-action-schema-* names on purpose: both
+# appear in the system message, which has about 30 characters left.
+SKILLS_VERSIONS: Final = {
+    "prompt_version": "qs-skills-prompt-v2",
+    "action_schema_version": "qs-skills-schema-v1",
+}
+
 
 def _version_text(value: object, *, field: str) -> str:
     if type(value) is not str or not value.strip() or len(value) > 200:
@@ -103,6 +111,7 @@ __all__ = [
     "MULTI_AGENT_VERSIONS",
     "NATIVE_VERSIONS",
     "RUN_CONFIG_VERSION",
+    "SKILLS_VERSIONS",
     "SYSTEM_PROMPT_VERSION",
     "TOOL_DESCRIPTION_VERSION",
     "RunConfig",

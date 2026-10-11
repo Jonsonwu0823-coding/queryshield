@@ -25,6 +25,7 @@ from queryshield.agent.runtime import (
     http_status_for_run,
     model_for_mode,
     product_retriever,
+    product_skills,
     provider_mode,
 )
 from queryshield.agent import (
@@ -58,6 +59,8 @@ from queryshield.facts.persisted import validate_persisted_run_result
 
 @asynccontextmanager
 async def _application_lifespan(application: FastAPI):
+    # Every profile checks the Skill files: a run resumes under its stored profile.  A bad file stops the start.
+    product_skills()
     service = shared_run_service()
     application.state.parallel_recovery = service.recover_parallel_groups()
     # After the parallel groups, whose runs end by their own rule.

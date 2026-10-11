@@ -265,6 +265,16 @@ class DelegateAction:
 
 
 @dataclass(frozen=True)
+class LoadSkillAction:
+    """The skills profile's request for one Skill's text; the parser has checked the name against the index."""
+
+    skill_id: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {"type": "load_skill", "skill_id": self.skill_id}
+
+
+@dataclass(frozen=True)
 class AskUserAction:
     question: str
     # Optional catalog clarification rule id; the server still identifies the
@@ -312,7 +322,7 @@ class DenyAction:
 
 
 ProposalAction: TypeAlias = (
-    ToolCallAction | ParallelReadonlyAction | AskUserAction | FinalAnswerAction | DenyAction | DelegateAction
+    ToolCallAction | ParallelReadonlyAction | AskUserAction | FinalAnswerAction | DenyAction | DelegateAction | LoadSkillAction
 )
 
 
@@ -368,16 +378,23 @@ def parse_query_proposal(
     context: ExecutionContext,
     model_call_id: str,
     delegate: bool = False,
+    skill_ids: frozenset[str] | None = None,
 ) -> QueryProposal:
     """Parse one provider response without executing any model-selected action.
 
-    ``delegate`` is set only for a coordinator; everyone else parses exactly as before.
+    ``delegate`` is set only for a coordinator and ``skill_ids`` (the Skills
+    index) only for the skills profile; everyone else parses exactly as before.
     """
     if not isinstance(context, ExecutionContext):
         raise TypeError("context must be an ExecutionContext")
     _check_server_id(model_call_id, "model_call_id")
     payload = _load_json(raw_content)
-    action = _parse_delegate(payload) if delegate and payload.get("type") == "delegate" else _parse_action(payload)
+    if delegate and payload.get("type") == "delegate":
+        action = _parse_delegate(payload)
+    elif skill_ids is not None and payload.get("type") == "load_skill":
+        action = _parse_load_skill(payload, skill_ids)
+    else:
+        action = _parse_action(payload)
     return QueryProposal(
         context=context,
         model_call_id=model_call_id,
@@ -678,6 +695,14 @@ def _parse_delegate(payload: Mapping[str, object]) -> DelegateAction:
             raise ProposalParseError("invalid_field", "subtask time_window must be an object")
         items.append({"metrics": list(item["metrics"]), "time_window": dict(item["time_window"])})
     return DelegateAction(tuple(items))
+
+
+def _parse_load_skill(payload: Mapping[str, object], skill_ids: frozenset[str]) -> LoadSkillAction:
+    _require_fields(payload, required={"type", "skill_id"}, allowed={"type", "skill_id"})
+    skill_id = _string(payload["skill_id"], field="skill_id")
+    if skill_id not in skill_ids:
+        raise ProposalParseError("unknown_skill", "skill_id is not in the server's Skills index")
+    return LoadSkillAction(skill_id)
 
 
 def _parse_fact_refs(value: object) -> tuple[FactRef, ...]:

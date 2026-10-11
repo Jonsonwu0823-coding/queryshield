@@ -29,6 +29,7 @@
 | 演示答案独立复算 | `scripts/generate_demo_data.py`、`scripts/verify_demo_expected.py`；判定在 `scripts/demo_run.py`、`scripts/demo_walkthrough.py` | `tests/test_demo_expected_answers.py`、`tests/test_demo_judge.py`、`tests/test_demo_walkthrough.py` | `python scripts/generate_demo_data.py --check`；演示脚本 | 见下文“演示题与演示脚本” |
 | 一条命令运行；本机与 CI 同一入口 | `Dockerfile`、`compose.yaml`、`scripts/new_env.py`、`scripts/setup_databases.py`、`scripts/check-all.ps1` | `tests/test_container_files.py`、`tests/test_check_all.py`、`tests/test_setup_databases.py` | 见[运维说明](operations.md)第 1、4 节 | CI 两个任务都通过（2026-10-03） |
 | 多 Agent（B2）：协调者把问题拆成 2–3 个子任务交给子 Agent，共享一个 run 的预算，服务端核实全部子任务的结果 | `src/queryshield/agent/delegation.py` 的 `resolve_subtasks`、`allocate`、`delegation_outcome`；`src/queryshield/agent/graph.py` 的 `_delegate`、`_run_subtasks`、`_merge_subtasks`；`src/queryshield/agent/runtime.py` 的 `build_b2_agent` | `tests/test_delegate_action.py`、`tests/test_multi_agent_runs.py`、`tests/test_multi_agent_http.py`、`tests/test_composite_demo.py` | `python -m pytest tests/test_delegate_action.py tests/test_multi_agent_runs.py tests/test_multi_agent_http.py`；在演示库上 `python scripts/demo_run.py --mode fake --questions composite --profile b2 --evidence-dir <目录>`，再用 `python scripts/compare_demo_runs.py` 比较两份摘要 | 见下文“多 Agent 对比（复合题与演示题，2026-10-10）” |
+| 业务 Skills（B1S）：系统消息里放 Skill 索引和一句路由规则，模型按需发 `load_skill`，服务端把做法说明放进之后的上下文；身份、预算、审批和核实不变 | `src/queryshield/agent/skills.py` 的 `load_skill_library`；`src/queryshield/agent/graph.py` 的 `_load_skill`、`_loaded_skills`；`src/queryshield/agent/runtime.py` 的 `build_skills_agent`；`src/queryshield/skills/` | `tests/test_skill_files.py`、`tests/test_skill_context.py`、`tests/test_load_skill_action.py`、`tests/test_skill_profile_http.py`、`tests/test_skill_demo_reports.py` | `python -m pytest tests/test_skill_files.py tests/test_load_skill_action.py tests/test_skill_profile_http.py`；在演示库上 `python scripts/demo_run.py --mode fake --questions composite --profile b1s --evidence-dir <目录>`，再用 `python scripts/compare_demo_runs.py` 比较 | 见下文“业务 Skills 对比（两轮真实运行，2026-10-11）” |
 | 文档本身：链接、路径、编号、用语 | `tests/test_docs.py` | 同左 | `python -m pytest tests/test_docs.py` | 随全量测试运行 |
 
 ## 评测结果
@@ -168,6 +169,83 @@ Real 那次记录的已知缺口：Q04b 退款总额 502 `query_repair_limit`；
 - 单个问题 B2 不委派，调用次数和耗时与 B1 相当；但要审批的 Q07 在 B2 下两次都没走通。
 - 两种配置的已核实事实都与独立算出的值一致，安全拒绝（隔离题、不允许的函数）照常生效。
 - 默认仍是 B1；B2 留作服务端可选的配置。
+
+### 业务 Skills 对比（两轮真实运行，2026-10-11）
+
+对比的是 B1（有界 Agent）、B1S（B1 加按需加载的业务 Skill，见[架构说明](architecture.md)的“业务 Skills”一节）和 B2（多 Agent）。B1S 有两个 Skill：`composite-question`（复合问题）和 `customer-ranking`（按客户排名、要客户姓名）。
+
+条件：
+- 两轮在同一天，各用一个代码版本，在本机 Compose 的演示库上运行。
+- 经模型网关调用真实模型 `qwen-plus`（嵌入 `text-embedding-v4`），json 协议，输出上限 512 token。
+- 两轮只差 B1S 的系统消息：
+  - **第一轮**只放 Skill 索引（名字和一句说明）；
+  - **第二轮**在 workflow 第一条加了路由规则“Load the Skill fitting the question before querying; follow its text.”（提示词版本 `qs-skills-prompt-v2`）。
+  - 两轮的 B0、B1、B2 和两个 Skill 文件都相同。
+- 每轮 6 次运行：复合题按 B1S、B1、B1S、B1、B2 各一次，再跑演示题 B1S 一次。
+  - 第一轮共 48 个 run、161 次聊天调用，用量已知的部分合计输入 518,613、输出 21,028 tokens；
+  - 第二轮共 48 个 run、168 次聊天调用，合计输入 543,951、输出 21,618 tokens；
+  - 两轮都有演示题 Q06b 一个 run 的用量未知。
+- 比较用 `scripts/compare_demo_runs.py`，和多 Agent 对比用的是同一个脚本。
+- **复合题和演示题都是开发材料，不是盲测。** 题少，每种配置每轮只跑一两次；模型自己决定的动作（加载、委派）在两轮之间波动很大，单次运行的差别不宜下结论。
+
+**复合题，第一轮（只有索引）**（B1、B1S 各 2 次 × 8 题，B2 1 次 × 8 题；每个 run 的数字按建了 run 的题计算，隔离题在入口被拒，没有 run）：
+
+| | B1 | B1S | B2 |
+|---|---|---|---|
+| 通过 | 9/16 | 9/16 | 6/8 |
+| 事实完整率 | 0.7 | 0.633 | 0.8 |
+| 已核实事实与独立算出的值比对 | 21 条，0 条不一致 | 19 条，0 条不一致 | 12 条，0 条不一致 |
+| 每个 run 的模型调用 / 工具调用 | 3.64 / 2.36 | 3.43 / 2.29 | 3.29 / 1.71 |
+| 输入 / 输出 tokens | 168,970 / 6,653 | 163,340 / 6,356 | 69,013 / 3,690 |
+| 耗时中位数 | 14.1 秒 | 13.0 秒 | 13.7 秒 |
+| 委派率 / 加载率 | 0 / 0 | 0 / 0 | 0.286 / 0 |
+
+- B1S 在全部 27 个 run（复合题 14 个、演示题 13 个）里一次也没有发 `load_skill`，做法和 B1 一样。
+  - CQ02、CQ06 只答了一半；CQ04（三个月份）两次都用了不允许的函数，被服务端拒绝（403 `function_not_allowed`）。
+  - 第 2 次的 CQ01 也只答了一半。
+- B2 只委派了 7 个 run 里的 2 个（CQ03、CQ06，都通过）；没委派的题和 B1 一样只答一部分。
+- 索引确实发出去了：同一道题，B1S 每次调用的输入 tokens 比 B1 多约 75 个。
+- 一个可能的解释是：常驻的 workflow 已经给了一套查询做法，模型照着它直接查；只有索引、没有一句话说什么时候该加载，模型就没有理由先花一次调用去加载 Skill。
+
+**复合题，第二轮（加了路由规则）**：
+
+| | B1 | B1S | B2 |
+|---|---|---|---|
+| 通过 | 8/16 | 10/16 | 8/8 |
+| 事实完整率 | 0.667 | 0.733 | 1.0 |
+| 已核实事实与独立算出的值比对 | 20 条，0 条不一致 | 22 条，0 条不一致 | 15 条，0 条不一致 |
+| 每个 run 的模型调用 / 工具调用 | 3.5 / 2.21 | 3.86 / 2.43 | 4.0 / 2.14 |
+| 输入 / 输出 tokens | 161,296 / 6,194 | 187,430 / 6,702 | 83,223 / 4,802 |
+| 耗时中位数 | 12.9 秒 | 13.7 秒 | 15.9 秒 |
+| 委派率 / 加载率 | 0 / 0 | 0 / 0.143 | 0.571 / 0 |
+
+- **CQ03**（7 月的已支付订单总额和 9 月的退款后净额，指标和月份都不同）：B1S 两次都先加载 `composite-question`，再每个时间窗一条查询，两次都答全；B1 两次都只答一半。
+- **CQ02、CQ04、CQ06**（同一个指标问两三个月）：B1S 两次都没加载，和 B1 一样只答一部分（CQ04 只查了一个月）。模型看来认为一条查询就能答，没有把它们认成复合问题。
+- B2 委派了 7 个 run 里的 4 个（CQ02、CQ03、CQ04、CQ06），8 题全过。
+
+**演示题**（14 道单个问题，每轮 B1S 一次）：
+- 两轮都是 14/14，已核实事实各 7 条，与独立算出的值 0 条不一致。
+- 第一轮没有加载。第二轮 13 个 run 里加载了 2 次，都是 `customer-ranking`：
+  - Q06（前 5 名客户）通过；
+  - Q07（最高客户的姓名）照正文发查询，走到审批，批准后成功。第一轮的 Q07 停在追问上，没有走到审批。
+- 已知缺口照旧：Q04b、Q06b（模型网关的上游超时）、Q09。
+- 每个 run 的模型调用：第一轮 3.0，第二轮 2.85。作参考（不是同一天、同一版本）：2026-10-10 的演示题 B1 是 2.77。
+
+**百炼接受第二条 system 消息**：第二轮的 4 次加载之后，后续调用都正常返回，这 4 个 run 都成功了。
+
+**模型网关对账**（两轮各自把 6 次运行合在一起核对）：
+- 每轮 47 个用量已知的 run，聊天调用次数和三个用量数都相等，加载那一次调用也算在内；
+- Q06b 那个 run 用量未知，跳过（两边都是 3 次聊天调用）；
+- 6 条记录没有 run（隔离题在入口被拒）；
+- 所有聊天调用都带 `X-Run-Id`。
+
+**代价和结论：**
+- **代价**（第二轮）：B1S 的输入 tokens 比 B1 多约 16%，每个 run 的模型调用多约 10%。多出来的是加载那一次调用、之后每次调用都带的正文，以及常驻的索引和路由规则。同一轮里，B2 每 8 题的输入 tokens 只比 B1 多约 3%。
+- **路由规则让模型开始用 Skill**：加载从第一轮的 0/27 变成第二轮的 4/27，加载了的题都做对了（CQ03 两次、Q06、Q07）。
+- **没加载的题和单 Agent 一样**：模型自己判断“不需要”时，Skill 帮不上忙。B2 的委派说明直接写了“2–3 个独立的指标或时间窗就委派”，第二轮触发得更多。
+- **这次的数字不支持“单 Agent 加 Skills 用更低的代价接近多 Agent”**：第二轮 B1S 复合题 10/16，用的输入 tokens 还比 B2 多（按每 8 题算）。Skill 有没有用，要看它会不会被加载；会不会被加载，取决于说明和路由是否让模型认出“这题需要它”。
+- 两种配置的已核实事实都与独立算出的值一致，安全拒绝（隔离题、不允许的函数）照常生效。
+- 默认仍是 B1；B1S 和 B2 一样，留作服务端可选的配置。
 
 ### 测试与 CI
 

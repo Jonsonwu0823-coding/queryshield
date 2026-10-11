@@ -135,9 +135,17 @@ flowchart LR
 
 对比用演示库上的 8 道复合题（每道问 2–3 个部分）：`demo_run.py --questions composite --profile b1|b2` 分别跑，`scripts/compare_demo_runs.py` 按配置汇总通过数、事实完整率、调用次数、token 和耗时。Fake 模式下 B1、B2 都通过全部 8 道；2026-10-10 经模型网关用真实模型 `qwen-plus` 各跑两次：复合题 B2 通过 15/16、B1 8/16，B2 每个 run 多约 0.7 次模型调用、耗时中位数多约 4 秒；单个问题 B2 不委派，但要审批的演示题 Q07 两次都没走到审批，所以默认仍是 B1。这些是开发材料上的少量运行，不是盲测，详见 [docs/evidence.md](docs/evidence.md)。设计与取舍见[架构说明](docs/architecture.md)的“多 Agent”一节，跑法见[演示数据](docs/demo-data.md)第 3 节。
 
+### 业务 Skills
+
+服务端设置 `QUERYSHIELD_AGENT_PROFILE=b1s` 时，有界 Agent 的系统消息里多一个 Skill 索引和一句路由规则，模型需要时发 `load_skill`，服务端再把那个 Skill 的做法说明放进之后的上下文（现在有“复合问题”和“按客户排名、要姓名”两个）。Skill 只讲怎么做，身份、预算、审批和核实照旧由服务端决定。2026-10-11 经模型网关用 `qwen-plus` 跑了两轮：
+- 只放索引时，27 个 run 一次也没加载；加了路由规则后加载了 4 次，加载了的题都做对了（复合题 B1S 10/16、B1 8/16、B2 8/8）。
+- 代价是比 B1 多约 16% 的输入 tokens。这次的数字不支持“单 Agent 加 Skills 用更低的代价接近多 Agent”，所以默认仍是 B1。
+
+这些都是开发材料上的少量运行，详见 [docs/evidence.md](docs/evidence.md)；设计见[架构说明](docs/architecture.md)的“业务 Skills”一节。
+
 ### 自动化检查与 CI
 
-`scripts/check-all.ps1` 是本机和 CI 的同一个入口：全量测试、历史检查（DB-SMOKE 和 BASE、PROPOSAL、AGENT、STATE、EVAL 五个套件的 Fake 模式）、Fake 冒烟（HTTP、MCP、演示题，以及 B2 跑复合题）。CI 有两个任务：`checks` 跑上面这些，`compose` 从空环境起 Compose 跑两遍演示脚本（默认设置、MCP 设置），并检查停止和重启。2026-10-03 的 CI（GitHub Actions，Linux）上：全量测试 1652 过、1 跳过。
+`scripts/check-all.ps1` 是本机和 CI 的同一个入口：全量测试、历史检查（DB-SMOKE 和 BASE、PROPOSAL、AGENT、STATE、EVAL 五个套件的 Fake 模式）、Fake 冒烟（HTTP、MCP、演示题，以及 B2、B1S 跑复合题）。CI 有两个任务：`checks` 跑上面这些，`compose` 从空环境起 Compose 跑两遍演示脚本（默认设置、MCP 设置），并检查停止和重启。2026-10-03 的 CI（GitHub Actions，Linux）上：全量测试 1652 过、1 跳过。
 
 各项能力的代码、测试和验证命令见 [docs/evidence.md](docs/evidence.md)。
 
@@ -150,6 +158,7 @@ flowchart LR
 - **模型偶尔自己拒绝**（`deny` 动作），而不是走审批：接口回 403，错误码是兜底的 `run_failed`（2026-10-03 演示题 Q07 出现过一次；结果安全，只是过于保守）。专门的错误码还没有做。
 - **含糊说法加同一个指标的两个月份做不到**：例如“7 月和 8 月的销售额分别是多少”。追问确认的指标按问题里第一个月份绑定时间窗，另一个月份的查询会被拒绝（B1、B2 都一样）；分开问两个月份可以。
 - **B2 下要审批的问题可能走不通**：2026-10-10 的真实运行里，演示题 Q07（查客户姓名，要审批）在 B2 下两次都没走到审批（一次回答格式不合法，502；一次模型自己拒绝，403），B1 两次都进入审批后成功。可能是委派的说明影响了模型写查询，样本太少，没有定论；默认的 B1 不受影响。
+- **B1S 由模型自己决定加载 Skill，同一个指标问几个月的复合题常常不加载**：例如“7 月和 8 月的已支付订单数分别是多少”。2026-10-11 第二轮真实运行里，这类题 B1S 都没加载，和 B1 一样只答一部分。
 - **行集不标“已核实”**：分组、明细、审批后的查询结果都是 `unverified`；只有行范围恰好等于口径范围的聚合才是已核实事实。
 - **只能单进程部署**：审批的“检查再执行”只靠进程内的锁串行化（见[运维说明](docs/operations.md)第 6 节）。
 - **身份是本地令牌映射**：四个固定身份（两个租户 × 请求人、审批人），不是生产身份系统。

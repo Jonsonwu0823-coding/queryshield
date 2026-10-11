@@ -60,6 +60,7 @@ from queryshield.agent.proposals import (
     DenyAction,
     ExecutionContext,
     FinalAnswerAction,
+    LoadSkillAction,
     MetricBinding,
     ModelCallIdentity,
     ModelCallStore,
@@ -87,6 +88,7 @@ from queryshield.agent.tool_execution import (
     check_clarification,
 )
 from queryshield.agent.tenant_scope import has_explicit_foreign_tenant
+from queryshield.agent.skills import MAX_SKILL_LOADS, Skill, SkillLibrary
 from queryshield.agent.parallel import ParallelPlan, ParallelScheduler, ParallelValidationError
 from queryshield.agent.delegation import (
     AFTER_DELEGATION_CODE,
@@ -289,6 +291,7 @@ class BoundedAgent:
         retrieval_available: bool = True,
         on_step: Callable[[Mapping[str, object]], None] | None = None,
         role: AgentRole | None = None,
+        skills: SkillLibrary | None = None,
     ) -> None:
         if type(retrieval_available) is not bool:
             raise TypeError("retrieval_available must be a boolean")
@@ -308,6 +311,8 @@ class BoundedAgent:
         self.on_step = on_step
         # None for B1; the coordinator or a sub-agent of the multi-agent profile.
         self.role = role
+        # The skills profile only: the Skills the model may load in this run.
+        self.skills = skills
         self._waiting_checkpoints: dict[str, _GraphState] = {}
         self._compiled_graph = self._build_graph()
 
@@ -429,6 +434,9 @@ class BoundedAgent:
         state = _deserialize_agent_checkpoint(checkpoint, expected_context=context)
         if state["run_config"] != self.run_config:
             raise RunResumeError("resume_profile_mismatch", "checkpoint profile differs from the configured agent")
+        # The agent is built from the stored configuration, so compare its Skills with the deployed ones.
+        if self.skills is not None and self.skills.versions != self.run_config.skill_versions:
+            raise RunResumeError("resume_profile_mismatch", "the run's Skills differ from the deployed Skills")
         self._waiting_checkpoints[context.run_id] = state
         return self._continue_waiting(context, answer, state)
 
@@ -621,6 +629,10 @@ class BoundedAgent:
             routes["delegate"] = "delegate"
             builder.add_conditional_edges("delegate", self._after_delegate, {"subtasks": "run_subtasks", "model": "model_decision"})
             builder.add_edge("run_subtasks", "model_decision")
+        if self.skills is not None:
+            builder.add_node("load_skill", self._load_skill)
+            routes["skill"] = "load_skill"
+            builder.add_edge("load_skill", "model_decision")
         builder.add_conditional_edges("model_decision", self._after_model, routes)
         builder.add_edge("execute_tool", "model_decision")
         builder.add_edge("execute_parallel", "model_decision")
@@ -663,6 +675,19 @@ class BoundedAgent:
             parallel_available=self._parallel_available(state),
             retrieval_available=self.retrieval_available,
             delegate_available=self._can_delegate,
+            skills=self.skills,
+            loaded_skills=self._loaded_skills(state),
+        )
+
+    def _loaded_skills(self, state: Mapping[str, object]) -> tuple[Skill, ...]:
+        """The Skills this run loaded, rebuilt from its events (a resumed run's come from its checkpoint)."""
+
+        if self.skills is None:
+            return ()
+        return tuple(
+            self.skills.get(event["skill_id"])
+            for event in state.get("events", ())
+            if event.get("kind") == "skill_load" and event.get("status") == "succeeded"
         )
 
     @property
@@ -722,6 +747,7 @@ class BoundedAgent:
                 context=state["context"],
                 model_call_id=identity.model_call_id,
                 delegate=self._can_delegate,
+                skill_ids=self.skills.ids if self.skills is not None else None,
             )
         except ProposalParseError as exc:
             validation_event = self._event(
@@ -764,7 +790,9 @@ class BoundedAgent:
                 'Resend as {"type":"tool_call","name":<tool_name>,"arguments":{...}}; type is only one of: '
                 + ", ".join(
                     available_action_types(
-                        parallel_available=self._parallel_available(state), delegate_available=self._can_delegate
+                        parallel_available=self._parallel_available(state),
+                        delegate_available=self._can_delegate,
+                        skills_available=self.skills is not None,
                     )
                 )
                 + "."
@@ -1317,6 +1345,32 @@ class BoundedAgent:
         event = _delegation_event(subtasks, limits)
         return {"delegation": {"subtasks": subtasks, "limits": limits}, "events": self._event(state, event)}
 
+    def _load_skill(self, state: _GraphState) -> dict[str, object]:
+        """Put one Skill's text into the next contexts: each Skill once, at most MAX_SKILL_LOADS per run.
+
+        The model call that asked for it is already counted; loading is no tool
+        call and changes no budget.  The event records which text, never the text.
+        """
+
+        skill = self.skills.get(state["proposal"].action.skill_id)
+        loaded = self._loaded_skills(state)
+        if skill in loaded or len(loaded) >= MAX_SKILL_LOADS:
+            code, reason = (
+                ("skill_already_loaded", "this Skill is already loaded in this run")
+                if skill in loaded
+                else ("skill_load_limit", f"a run loads at most {MAX_SKILL_LOADS} Skills")
+            )
+            event = {"kind": "skill_load", "status": "failed", "error_code": code, "skill_id": skill.name}
+            return {"status": "failed", "reason": reason, "error_code": code, "events": self._event(state, event)}
+        event = {
+            "kind": "skill_load",
+            "status": "succeeded",
+            "skill_id": skill.name,
+            "skill_version": skill.version,
+            "skill_sha256": skill.sha256,
+        }
+        return {"proposal": None, "events": self._event(state, event)}
+
     def _after_delegate(self, state: _GraphState) -> str:
         return "subtasks" if state.get("status") == "running" and state.get("delegation") is not None else "model"
 
@@ -1862,6 +1916,8 @@ class BoundedAgent:
             return "parallel"
         if proposal is not None and isinstance(proposal.action, DelegateAction):
             return "delegate"
+        if proposal is not None and isinstance(proposal.action, LoadSkillAction):
+            return "skill"
         return "finish"
 
     def _budget_update(self, state: _GraphState, *, kind: Literal["model", "tool"]) -> dict[str, object] | None:

@@ -14,6 +14,7 @@ import json
 
 from queryshield.agent.config import DEFAULT_RUN_CONFIG, RunConfig
 from queryshield.agent.proposals import ALLOWED_TABLES, ANSWER_BASES, ExecutionContext
+from queryshield.agent.skills import MAX_SKILL_LOADS, Skill, SkillLibrary
 from queryshield.catalog import load_default_catalog
 from queryshield.catalog.catalog import ALLOWED_TABLE_COLUMNS, SemanticCatalog
 from queryshield.mcp_metadata.schemas import DESCRIBE_TABLES_INPUT, SEARCH_CATALOG_INPUT, TOOLS as METADATA_TOOLS
@@ -136,18 +137,36 @@ _DELEGATE_ACTION = {
     "after": "only final_answer citing every result, or deny",
 }
 _DELEGATE_WORKFLOW_RULE = "Use delegate once for 2-3 independent metrics or time windows."
+# The skills profile, only: the index (first layer) sits in the action contract;
+# a loaded Skill's text (second layer) is its own system message.
+_SKILL_RULE = f"At most {MAX_SKILL_LOADS} per run, each once."
+# Leads the skills profile's workflow: with the index alone a real model never
+# loaded a Skill, because the standing workflow already tells it how to query.
+_SKILL_WORKFLOW_RULE = "Load the Skill fitting the question before querying; follow its text."
 
 
-def available_action_types(*, parallel_available: bool, delegate_available: bool = False) -> tuple[str, ...]:
-    """Action types the model may use in this run; parallel only with a server plan, delegate only for a coordinator."""
+def available_action_types(
+    *, parallel_available: bool, delegate_available: bool = False, skills_available: bool = False
+) -> tuple[str, ...]:
+    """Action types the model may use in this run; parallel only with a server plan,
+    delegate only for a coordinator, load_skill only for the skills profile."""
 
     types = ("tool_call", "final_answer", "ask_user", "deny")
     types += ("parallel_readonly",) if parallel_available else ()
-    return types + ("delegate",) if delegate_available else types
+    types += ("delegate",) if delegate_available else ()
+    return types + ("load_skill",) if skills_available else types
 
 
-def action_type_rule(*, parallel_available: bool, retrieval_available: bool = True, delegate_available: bool = False) -> str:
-    types = available_action_types(parallel_available=parallel_available, delegate_available=delegate_available)
+def action_type_rule(
+    *,
+    parallel_available: bool,
+    retrieval_available: bool = True,
+    delegate_available: bool = False,
+    skills_available: bool = False,
+) -> str:
+    types = available_action_types(
+        parallel_available=parallel_available, delegate_available=delegate_available, skills_available=skills_available
+    )
     listed = ", ".join(types[:-1]) + " or " + types[-1]
     tool_names = (
         "search_catalog, describe_tables and query_readonly" if retrieval_available else "describe_tables and query_readonly"
@@ -299,6 +318,7 @@ def _action_contract(
     retrieval_available: bool = True,
     catalog: SemanticCatalog | None = None,
     delegate_available: bool = False,
+    skills: SkillLibrary | None = None,
 ) -> dict[str, object]:
     """The static contract rendered for this request.
 
@@ -328,6 +348,7 @@ def _action_contract(
             parallel_available=parallel_available,
             retrieval_available=retrieval_available,
             delegate_available=delegate_available,
+            skills_available=skills is not None,
         )
         if item == TYPE_RULE_PLACEHOLDER
         else item
@@ -355,6 +376,13 @@ def _action_contract(
     if delegate_available:
         contract["actions"]["delegate"] = dict(_DELEGATE_ACTION)
         contract["workflow"].append(_DELEGATE_WORKFLOW_RULE)
+    if skills is not None:
+        contract["actions"]["load_skill"] = {
+            "required_fields": ["type", "skill_id"],
+            "skills": skills.index(),
+            "rule": _SKILL_RULE,
+        }
+        contract["workflow"].insert(0, _SKILL_WORKFLOW_RULE)
     return contract
 
 
@@ -609,6 +637,7 @@ def _system_content(
     request_time_window: dict[str, str] | None,
     retrieval_available: bool = True,
     delegate_available: bool = False,
+    skills: SkillLibrary | None = None,
 ) -> str:
     # metric_intent imports NET_FEN_PLAN_ID from this module; import it lazily.
     from queryshield.agent.metric_intent import metric_declaration_contract
@@ -621,6 +650,7 @@ def _system_content(
         retrieval_available=retrieval_available,
         catalog=metric_catalog,
         delegate_available=delegate_available,
+        skills=skills,
     )
     payload = {
         "context_version": CONTEXT_VERSION,
@@ -768,12 +798,15 @@ def build_context(
     parallel_available: bool = True,
     retrieval_available: bool = True,
     delegate_available: bool = False,
+    skills: SkillLibrary | None = None,
+    loaded_skills: Sequence[Skill] = (),
 ) -> ContextBuildResult:
     """Build a bounded context without allowing optional data to erase identity.
 
     ``optional_summaries`` and ``tool_results`` are ordered oldest to newest.
     When the serialized UTF-8 representation is too large, the oldest optional
     message is removed as a whole.  No JSON/tool receipt is sliced.
+    ``loaded_skills`` (skills profile) are server-checked Skills, in load order.
     """
 
     if not isinstance(context, ExecutionContext):
@@ -811,11 +844,22 @@ def build_context(
             parallel_available=parallel_available,
             retrieval_available=retrieval_available,
             delegate_available=delegate_available,
+            skills=skills,
         ),
         hard=True,
         source="server",
     )
-    hard_messages = [server_message, *_question_messages(question, normalized_clarifications), *_retrieval_messages(retrieval_items)]
+    # Trusted server text: system role, right after the server context, never trimmed.
+    skill_messages = [
+        ContextMessage(message_id=f"skill-{skill.name}", role="system", content=skill.message, hard=True, source="skill")
+        for skill in loaded_skills
+    ]
+    hard_messages = [
+        server_message,
+        *skill_messages,
+        *_question_messages(question, normalized_clarifications),
+        *_retrieval_messages(retrieval_items),
+    ]
     optional_messages = _optional_messages(optional_summaries, tool_results, native=run_config.model_protocol == "native")
     messages, dropped = _trim_to_budget(hard_messages + optional_messages)
     return ContextBuildResult(
