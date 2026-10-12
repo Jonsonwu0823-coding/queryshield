@@ -561,6 +561,8 @@ def summary_record(question: Mapping[str, object], obs: Mapping[str, object], ju
         "kind": question["kind"],
         # To match the gateway's per-run record (X-Run-Id): a random run id, and fixed states and numbers.
         "run_id": obs.get("run_id"),
+        # The run's trace-id, as in the traceparent of each of its model calls (null without a run).
+        "trace_id": obs.get("trace_id"),
         "http_status": obs.get("http_status"),
         "terminal": obs.get("status"),
         "error_code": obs.get("error_code"),
@@ -661,6 +663,7 @@ def _observe(code: int, body: Mapping[str, object], state_path: Path, fixed_no_d
         "max_output_tokens": max_output_tokens(),
         "run_id": run_id,
         "usage_total": body.get("usage_total"),
+        "trace_id": body.get("trace_id"),
     }
 
 

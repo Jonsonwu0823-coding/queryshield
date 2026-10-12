@@ -39,6 +39,7 @@ from queryshield.db.guarded import GuardedQueryError, GuardedQueryExecutor
 from queryshield.policy.params import ordered_param_values
 from queryshield.policy.sql import SQLPolicyError, parse_readonly_select
 from queryshield.tools.semantic import ToolError, check_sensitive_access
+from queryshield.providers.http import run_trace_id
 import psycopg
 from psycopg.errors import GroupingError, QueryCanceled, UndefinedColumn
 from queryshield.approval.models import ApprovalRequest, EmptyRequest, PreferenceUpdate, ResumeRequest
@@ -282,6 +283,7 @@ def _public_run(run: Mapping[str, object], *, include_result: bool = False, incl
         "tool_call_count": run["tool_call_count"],
         "sql_exec_count": run["sql_exec_count"],
         "usage_total": _usage_total(run),
+        "trace_id": run_trace_id(run["run_id"]),
     }
     if run.get("approval_id") is not None:
         payload["approval_id"] = run["approval_id"]

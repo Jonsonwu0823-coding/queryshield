@@ -453,6 +453,8 @@ def test_the_top_customer_question_asks_for_the_highest_paid_amount_not_for_spen
 RUN_ID = "run-6f1c2d3e-4a5b-4c6d-8e9f-0a1b2c3d4e5f"
 PAUSED = {"status": "known", "prompt_tokens": 400, "completion_tokens": 20, "total_tokens": 420}
 FINAL = {"status": "known", "prompt_tokens": 900, "completion_tokens": 45, "total_tokens": 945}
+# The run's trace-id, as every public response of the run gives it.
+TRACE = "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
 
 
 def _drive(monkeypatch, question, responses):
@@ -476,25 +478,26 @@ def _drive(monkeypatch, question, responses):
 def test_the_summary_names_the_run_and_its_total_from_the_last_response(monkeypatch) -> None:
     q = QUESTIONS["Q07"]
     obs, calls = _drive(monkeypatch, q, [
-        (202, {"run_id": RUN_ID, "status": "WAITING_APPROVAL", "approval_id": "approval-1", "usage_total": PAUSED}),
-        (200, {"run_id": RUN_ID, "status": "SUCCEEDED", "usage_total": PAUSED}),
-        (200, {"run_id": RUN_ID, "status": "SUCCEEDED", "usage_total": FINAL, "result": {"rows": []}}),
+        (202, {"run_id": RUN_ID, "status": "WAITING_APPROVAL", "approval_id": "approval-1", "usage_total": PAUSED, "trace_id": TRACE}),
+        (200, {"run_id": RUN_ID, "status": "SUCCEEDED", "usage_total": PAUSED, "trace_id": TRACE}),
+        (200, {"run_id": RUN_ID, "status": "SUCCEEDED", "usage_total": FINAL, "trace_id": TRACE, "result": {"rows": []}}),
     ])
     assert [path for _, path in calls] == ["/queries", f"/runs/{RUN_ID}/approval", f"/runs/{RUN_ID}/result"]
     record = run.summary_record(q, obs, run.judge_top_customer(q, obs))
     assert record["run_id"] == RUN_ID
     assert record["usage_total"] == FINAL
+    assert record["trace_id"] == TRACE
 
 
 def test_a_resumed_question_keeps_the_total_of_its_resume_response(monkeypatch) -> None:
     q = QUESTIONS["Q08"]
     obs, calls = _drive(monkeypatch, q, [
-        (200, {"run_id": RUN_ID, "status": "WAITING_USER", "usage_total": PAUSED}),
-        (200, {"run_id": RUN_ID, "status": "SUCCEEDED", "usage_total": FINAL}),
+        (200, {"run_id": RUN_ID, "status": "WAITING_USER", "usage_total": PAUSED, "trace_id": TRACE}),
+        (200, {"run_id": RUN_ID, "status": "SUCCEEDED", "usage_total": FINAL, "trace_id": TRACE}),
     ])
     assert [path for _, path in calls] == ["/queries", f"/runs/{RUN_ID}/resume"]
     record = run.summary_record(q, obs, run.judge_clarify_resume(q, obs))
-    assert (record["run_id"], record["usage_total"]) == (RUN_ID, FINAL)
+    assert (record["run_id"], record["usage_total"], record["trace_id"]) == (RUN_ID, FINAL, TRACE)
 
 
 def test_a_question_refused_before_any_run_has_no_run_id_and_no_total(monkeypatch) -> None:
@@ -503,4 +506,4 @@ def test_a_question_refused_before_any_run_has_no_run_id_and_no_total(monkeypatc
         (403, {"error": {"code": "forbidden", "message": "x", "request_id": "r"}}),
     ])
     record = run.summary_record(q, obs, run.judge_isolation(q, obs))
-    assert (record["run_id"], record["usage_total"]) == (None, None)
+    assert (record["run_id"], record["usage_total"], record["trace_id"]) == (None, None, None)

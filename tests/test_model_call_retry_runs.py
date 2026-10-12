@@ -100,6 +100,12 @@ def cleanup():
     reset_shared_state_stores()
 
 
+def _span(request: httpx.Request) -> str:
+    """The parent-id of the request's traceparent: the span its attempt record names."""
+
+    return request.headers["traceparent"].split("-")[2]
+
+
 def _model_call_events(run_id: str) -> list[dict]:
     events = shared_state_store().events(run_id, after_event_id=0, limit=1000)
     return [event["payload"] for event in events if event["type"] == "agent_step" and event["payload"].get("kind") == "model_call"]
@@ -133,8 +139,8 @@ def _assert_one_logical_call_retried(tmp_path, upstream: _RefusingUpstream, body
     (retried,) = [event for event in events if len(event["attempts"]) == 2]
     assert (retried["model_call_id"], retried["request_id"]) == (call_id, request_ids[0])
     assert retried["attempts"] == [
-        {"request_id": request_ids[0], "status": "failed", "error_code": "upstream_request_error"},
-        {"request_id": request_ids[1], "status": "succeeded"},
+        {"request_id": request_ids[0], "span_id": _span(first), "status": "failed", "error_code": "upstream_request_error"},
+        {"request_id": request_ids[1], "span_id": _span(second), "status": "succeeded"},
     ]
     return retried
 
@@ -189,8 +195,8 @@ def test_a_b0_call_refused_once_is_one_call_with_two_attempts(cleanup) -> None:
     assert first.headers["idempotency-key"] == second.headers["idempotency-key"] == record["model_call_ids"][0]
     assert first.content == second.content
     assert record["model_call_attempts"] == [
-        {"request_id": first.headers["x-client-request-id"], "status": "failed", "error_code": "upstream_request_error"},
-        {"request_id": second.headers["x-client-request-id"], "status": "succeeded"},
+        {"request_id": first.headers["x-client-request-id"], "span_id": _span(first), "status": "failed", "error_code": "upstream_request_error"},
+        {"request_id": second.headers["x-client-request-id"], "span_id": _span(second), "status": "succeeded"},
     ]
 
 
@@ -238,6 +244,6 @@ def test_a_b0_call_that_fails_after_a_retry_still_records_both_attempts(second, 
     assert first.headers["idempotency-key"] == retry.headers["idempotency-key"] == record["model_call_ids"][0]
     assert first.content == retry.content
     assert record["model_call_attempts"] == [
-        {"request_id": first.headers["x-client-request-id"], "status": "failed", "error_code": "upstream_request_error"},
-        {"request_id": retry.headers["x-client-request-id"], **second_attempt},
+        {"request_id": first.headers["x-client-request-id"], "span_id": _span(first), "status": "failed", "error_code": "upstream_request_error"},
+        {"request_id": retry.headers["x-client-request-id"], "span_id": _span(retry), **second_attempt},
     ]

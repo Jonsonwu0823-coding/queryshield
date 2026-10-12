@@ -9,6 +9,8 @@ source cannot pass.
 
 from __future__ import annotations
 
+import re
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -169,9 +171,14 @@ def test_building_the_index_and_a_probe_call_carry_no_run_id(upstream) -> None:
 
 
 def test_the_header_is_the_run_id_unchanged_and_only_when_given() -> None:
-    outside = json_headers("k", "request-1", None, "local-call-1")
+    trace = "4bf92f3577b34da6a3ce929d0e0e4736"
+    outside = json_headers("k", "request-1", None, "local-call-1", trace)
     assert "X-Run-Id" not in outside and "Idempotency-Key" not in outside
-    headers = json_headers("k", "request-1", "eval-b1-0123456789abcdef0123456789abcdef-state-alias", "local-call-1")
+    headers = json_headers("k", "request-1", "eval-b1-0123456789abcdef0123456789abcdef-state-alias", "local-call-1", trace)
     assert headers["X-Run-Id"] == "eval-b1-0123456789abcdef0123456789abcdef-state-alias"
     assert headers["X-Client-Request-Id"] == "request-1"
     assert headers["Idempotency-Key"] == "local-call-1"
+    # The given trace, a new parent-id for each request, flags 01.
+    for sent in (outside, headers):
+        assert re.fullmatch(rf"00-{trace}-[0-9a-f]{{16}}-01", sent["traceparent"])
+    assert outside["traceparent"] != headers["traceparent"]

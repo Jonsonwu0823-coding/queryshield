@@ -62,6 +62,12 @@ def _embed(client, sleep, run_id):
     )
 
 
+def _span(request: httpx.Request) -> str:
+    """The parent-id of the request's traceparent: the span its attempt record names."""
+
+    return request.headers["traceparent"].split("-")[2]
+
+
 def _chat_tokens(result) -> int:
     return result.usage.total_tokens
 
@@ -158,8 +164,8 @@ def test_a_first_attempt_that_never_reached_the_upstream_is_sent_once_more(adapt
     assert tokens(result) == 9 and result.provider_request_id == "upstream-9"
     assert (result.request_id, result.model_call_id) == ("request-1", CALL_ID)
     assert list(result.attempts) == [
-        {"request_id": "request-1", "status": "failed", **first_record},
-        {"request_id": two.headers["x-client-request-id"], "status": "succeeded"},
+        {"request_id": "request-1", "span_id": _span(one), "status": "failed", **first_record},
+        {"request_id": two.headers["x-client-request-id"], "span_id": _span(two), "status": "succeeded"},
     ]
 
 
@@ -246,7 +252,9 @@ def test_when_both_attempts_fail_the_second_is_the_result(adapter, outcomes, cod
     assert error.record["provider_request_id"] == provider_request_id
     second = requests[1].headers["x-client-request-id"]
     assert [attempt["request_id"] for attempt in error.record["attempts"]] == ["request-1", second]
-    assert error.record["attempts"][1] == {"request_id": second, "status": "failed", "error_code": code, **last_fields}
+    assert error.record["attempts"][1] == {
+        "request_id": second, "span_id": _span(requests[1]), "status": "failed", "error_code": code, **last_fields
+    }
 
 
 def test_the_chat_timeout_defaults_to_30_seconds(monkeypatch) -> None:

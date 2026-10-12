@@ -69,6 +69,8 @@ HTTP 接口都在 `src/queryshield/api/main.py`：
 - `usage_total`：这个 run 的聊天调用用量合计，所有返回 run 的响应都有，形如 `{"status": "known", "prompt_tokens": 1234, "completion_tokens": 56, "total_tokens": 1290}`。`known`：每次聊天调用都报了用量，三个数是合计；`unknown`：至少一次聊天调用没有用量（例如 Fake 模型）、存下的合计对不上、run 还没存下用量，或者 run 执行中途抛异常结束时有一次已经发出的聊天调用没来得及记下，三个数都是 `null`，不按 0 算；`not_run`：这个 run 没有聊天调用，三个数都是 0。口径和 `model_call_count` 一样只算聊天调用，嵌入不算；追问后恢复的 run 是暂停前和恢复后的合计，审批后执行不调模型，合计不变。执行中途抛异常结束的 run，计数和合计按最后一个已写进事件表的步骤算，出错前已记下的调用都在里面；第一次调模型之前就出错的 run（B0 也一样）是 `not_run`。合计只在 run 停下时更新：执行期间（`RUNNING`、`CANCEL_REQUESTED`）一律是 `unknown`，包括追问后恢复和审批后执行，即使暂停时已经存下了合计；提交后才是新的合计。
 - `usage`：只有同步 `POST /queries` 的响应有，是逐次聊天调用的明细列表（调用编号、上游的调用编号和请求编号、三个用量、`usage_status`）。
 
+`trace_id` 也是所有返回 run 的响应都有：这个 run 的追踪编号（32 位小写十六进制），等于这个 run 的每个聊天、嵌入请求的 `traceparent` 里的 trace-id，由 run 编号算出（见下面的模型调用一节）。
+
 身份：`src/queryshield/auth/identity.py` 的 `resolve_identity` 把 `Authorization: Bearer <令牌>` 映射到四个固定身份之一（租户 A、B 各一个请求人、一个审批人），令牌来自环境变量；有两个令牌相同时整张映射作废。服务端用认证结果构造 `ExecutionContext`，之后所有工具调用都用它。用哪种配置（B1 有界 Agent 或 B0 基线）由服务端设置 `QUERYSHIELD_AGENT_PROFILE` 决定，客户端选不了。
 
 ### 运行服务与状态库
@@ -148,7 +150,7 @@ HTTP 接口都在 `src/queryshield/api/main.py`：
 
 ### 模型适配器
 
-`src/queryshield/providers/`：`QUERYSHIELD_PROVIDER_MODE` 为 `fake`（默认）时用确定性的 `FakeModel`，为 `real` 时用 OpenAI 兼容的 `OpenAICompatibleModel`（`/chat/completions`，超时默认 30 秒，输出上限默认 512 tokens）。缺配置以 503 结束，不退回 Fake。用量只记提供方返回的值：没有就记 `unknown`，不补 0；Fake 的用量一律是 `unknown`。另有嵌入（`embedding.py`）和重排（`rerank.py`）适配器。聊天和嵌入共用 `http.py`：run 里的调用带请求头 `X-Run-Id`（run 编号）和 `Idempotency-Key`（这次逻辑调用的 `model_call_id`），只有两种失败（连接没建立，或网关没有调上游就返回的两种 503）用同一个键、同样的请求体重试一次，出错时用同一个函数读提供方的错误码，网关的 429 `quota_exhausted`、`rate_limited` 映射成 `model_quota_exhausted`、`model_rate_limited`；调用记录的模型名取响应里的 `model`。
+`src/queryshield/providers/`：`QUERYSHIELD_PROVIDER_MODE` 为 `fake`（默认）时用确定性的 `FakeModel`，为 `real` 时用 OpenAI 兼容的 `OpenAICompatibleModel`（`/chat/completions`，超时默认 30 秒，输出上限默认 512 tokens）。缺配置以 503 结束，不退回 Fake。用量只记提供方返回的值：没有就记 `unknown`，不补 0；Fake 的用量一律是 `unknown`。另有嵌入（`embedding.py`）和重排（`rerank.py`）适配器。聊天和嵌入共用 `http.py`：run 里的调用带请求头 `X-Run-Id`（run 编号）和 `Idempotency-Key`（这次逻辑调用的 `model_call_id`），只有两种失败（连接没建立，或网关没有调上游就返回的两种 503）用同一个键、同样的请求体重试一次，出错时用同一个函数读提供方的错误码，网关的 429 `quota_exhausted`、`rate_limited` 映射成 `model_quota_exhausted`、`model_rate_limited`；调用记录的模型名取响应里的 `model`。一个 run 一条追踪：聊天和嵌入请求都带 W3C 请求头 `traceparent`，run 里的调用的 trace-id 由 run 编号算出，所以恢复、进程重启、子 Agent 之后都不变，也不用存；run 之外的调用每次一条新的。每次 HTTP 尝试（包括重试）一个新的 parent-id，记成这次尝试的记录里的 `span_id`。
 
 ### 两种动作协议
 

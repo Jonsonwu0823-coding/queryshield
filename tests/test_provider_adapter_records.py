@@ -71,20 +71,37 @@ def _no_wait(seconds: float) -> None:
     """The adapters' injected wait before a retry; these tests never really wait."""
 
 
-def _attempts(error_code: str | None, extra: dict[str, object]) -> list[dict[str, object]]:
+# A W3C version-00 traceparent with flags 01, lower-case hex (the calls here are outside a run).
+TRACEPARENT = re.compile(r"00-[0-9a-f]{32}-[0-9a-f]{16}-01")
+
+
+def _traceparent(request: httpx.Request) -> str:
+    value = request.headers["traceparent"]
+    assert TRACEPARENT.fullmatch(value), value
+    return value
+
+
+def _span(request: httpx.Request) -> str:
+    """The parent-id of the request's traceparent: the span its attempt record names."""
+
+    return _traceparent(request).split("-")[2]
+
+
+def _attempts(error_code: str | None, extra: dict[str, object], recorder: _Recorder) -> list[dict[str, object]]:
     """The one attempt of a call that was not retried: failed with the call's own code, or a 2xx whose body failed."""
 
+    (request,) = recorder.requests
     if error_code not in {"upstream_timeout", "upstream_request_error"} and "http_status" not in extra:
-        return [{"request_id": "local-request", "status": "succeeded"}]
+        return [{"request_id": "local-request", "span_id": _span(request), "status": "succeeded"}]
     fields = {key: extra[key] for key in ("http_status", "provider_error_code") if key in extra}
-    return [{"request_id": "local-request", "status": "failed", "error_code": error_code, **fields}]
+    return [{"request_id": "local-request", "span_id": _span(request), "status": "failed", "error_code": error_code, **fields}]
 
 
 def _sent_attempts(recorder: _Recorder, error_code: str) -> list[dict[str, object]]:
-    """One failed attempt per request the recorder saw, under the request id that request carried."""
+    """One failed attempt per request the recorder saw, under the request id and span that request carried."""
 
     return [
-        {"request_id": request.headers["x-client-request-id"], "status": "failed", "error_code": error_code}
+        {"request_id": request.headers["x-client-request-id"], "span_id": _span(request), "status": "failed", "error_code": error_code}
         for request in recorder.requests
     ]
 
@@ -115,7 +132,7 @@ def _chat_body(**overrides):
     return body
 
 
-def _failed_chat_record(error_code: str, attempts=None, **extra) -> list[tuple[str, object]]:
+def _failed_chat_record(error_code: str, recorder: _Recorder, attempts=None, **extra) -> list[tuple[str, object]]:
     record = [
         ("status", "failed"),
         ("mode", "real"),
@@ -131,7 +148,7 @@ def _failed_chat_record(error_code: str, attempts=None, **extra) -> list[tuple[s
         ("usage_status", "unknown"),
         ("error_code", error_code),
     ]
-    return record + list(extra.items()) + [("attempts", attempts or _attempts(error_code, extra))]
+    return record + list(extra.items()) + [("attempts", attempts or _attempts(error_code, extra, recorder))]
 
 
 def test_chat_request_url_headers_and_payload_are_fixed() -> None:
@@ -139,11 +156,12 @@ def test_chat_request_url_headers_and_payload_are_fixed() -> None:
     (request,) = recorder.requests
     assert request.method == "POST"
     assert str(request.url) == "https://example.test/v1/chat/completions"
-    assert _headers(request, ("accept", "authorization", "content-type", "x-client-request-id")) == [
+    assert _headers(request, ("accept", "authorization", "content-type", "x-client-request-id", "traceparent", "tracestate")) == [
         ("accept", "application/json"),
         ("authorization", "Bearer test-secret"),
         ("content-type", "application/json"),
         ("x-client-request-id", "local-request"),
+        ("traceparent", _traceparent(request)),
     ]
     assert json.loads(request.content) == {
         "model": "demo-model",
@@ -163,12 +181,13 @@ def test_chat_request_body_bytes_and_header_order_are_fixed() -> None:
         b'{"model":"demo-model","messages":[{"role":"system","content":"s"},'
         b'{"role":"user","content":"\xe9\x97\xae\xe9\xa2\x98"}],"temperature":0,"max_tokens":64,"stream":false}'
     )
-    ours = (b"Accept", b"Authorization", b"Content-Type", b"X-Client-Request-Id")
+    ours = (b"Accept", b"Authorization", b"Content-Type", b"X-Client-Request-Id", b"traceparent")
     assert [(name, value) for name, value in request.headers.raw if name in ours] == [
         (b"Accept", b"application/json"),
         (b"Authorization", b"Bearer test-secret"),
         (b"Content-Type", b"application/json"),
         (b"X-Client-Request-Id", b"local-request"),
+        (b"traceparent", _traceparent(request).encode()),
     ]
 
 
@@ -202,7 +221,7 @@ def test_chat_endpoint_keeps_a_full_chat_completions_url() -> None:
 
 
 def test_chat_json_success_result_and_record() -> None:
-    result, _ = _chat((200, _chat_body(), {"x-request-id": "  provider-request  "}))
+    result, recorder = _chat((200, _chat_body(), {"x-request-id": "  provider-request  "}))
     assert (result.provider_call_id, result.content, result.model) == ("provider-call", "回答", "served-model")
     assert (result.tool_calls, result.finish_reason) == (None, None)
     assert list(result.to_redacted_record().items()) == [
@@ -220,7 +239,7 @@ def test_chat_json_success_result_and_record() -> None:
         ("content_sha256", "f3f512648742020fbd700fa8f0576babd8f7ec8e56d3dcd38e28be5b99287db3"),
         ("usage", {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}),
         ("usage_status", "known"),
-        ("attempts", [{"request_id": "local-request", "status": "succeeded"}]),
+        ("attempts", [{"request_id": "local-request", "span_id": _span(recorder.requests[0]), "status": "succeeded"}]),
     ]
 
 
@@ -288,9 +307,9 @@ def test_chat_usage_known_or_unknown(usage, expected) -> None:
     ],
 )
 def test_chat_inconsistent_usage_fails_the_call(usage) -> None:
-    error, _ = _chat((200, _chat_body(usage=usage), {"x-request-id": "p"}))
+    error, recorder = _chat((200, _chat_body(usage=usage), {"x-request-id": "p"}))
     assert error.code == "invalid_usage"
-    assert list(error.record.items()) == _failed_chat_record("invalid_usage", provider_request_id="p")
+    assert list(error.record.items()) == _failed_chat_record("invalid_usage", recorder, provider_request_id="p")
 
 
 @pytest.mark.parametrize(
@@ -321,15 +340,15 @@ def test_chat_inconsistent_usage_fails_the_call(usage) -> None:
     ],
 )
 def test_chat_malformed_json_body_is_an_invalid_response(body, native) -> None:
-    error, _ = _chat((200, body, {"x-request-id": "p"}), tools=TOOLS if native else None)
+    error, recorder = _chat((200, body, {"x-request-id": "p"}), tools=TOOLS if native else None)
     assert error.code == "invalid_response"
-    assert list(error.record.items()) == _failed_chat_record("invalid_response", provider_request_id="p")
+    assert list(error.record.items()) == _failed_chat_record("invalid_response", recorder, provider_request_id="p")
 
 
 def test_chat_body_that_is_not_json_is_an_invalid_response() -> None:
-    error, _ = _chat((200, b"not json", {"x-request-id": "p"}))
+    error, recorder = _chat((200, b"not json", {"x-request-id": "p"}))
     assert error.code == "invalid_response"
-    assert list(error.record.items()) == _failed_chat_record("invalid_response", provider_request_id="p")
+    assert list(error.record.items()) == _failed_chat_record("invalid_response", recorder, provider_request_id="p")
     assert isinstance(error.__cause__, ValueError)
 
 
@@ -353,7 +372,7 @@ def test_chat_transport_failures(error, code) -> None:
     assert result.code == code and str(result) == f"model provider call failed: {code}"
     # Only a connection that was never made is sent once more (tests/test_model_call_retry.py).
     assert len(recorder.requests) == (2 if isinstance(error, httpx.ConnectError) else 1)
-    assert list(result.record.items()) == _failed_chat_record(code, attempts=_sent_attempts(recorder, code))
+    assert list(result.record.items()) == _failed_chat_record(code, recorder, attempts=_sent_attempts(recorder, code))
     assert result.__cause__ is not None
 
 
@@ -374,12 +393,12 @@ def test_chat_transport_failures(error, code) -> None:
     ],
 )
 def test_chat_http_errors_record_status_and_only_a_short_provider_code(status, body, provider_error_code) -> None:
-    error, _ = _chat((status, body, {"x-request-id": " p "}))
+    error, recorder = _chat((status, body, {"x-request-id": " p "}))
     assert error.code == "upstream_http_error"
     extra = {"provider_request_id": "p", "http_status": status}
     if provider_error_code is not None:
         extra["provider_error_code"] = provider_error_code
-    assert list(error.record.items()) == _failed_chat_record("upstream_http_error", **extra)
+    assert list(error.record.items()) == _failed_chat_record("upstream_http_error", recorder, **extra)
     assert error.__cause__ is None
 
 
@@ -506,7 +525,7 @@ def _embed_body(**overrides):
     return body
 
 
-def _failed_embed_record(error_code: str, attempts=None, **extra) -> list[tuple[str, object]]:
+def _failed_embed_record(error_code: str, recorder: _Recorder, attempts=None, **extra) -> list[tuple[str, object]]:
     record = [
         ("status", "failed"),
         ("mode", "real"),
@@ -522,18 +541,19 @@ def _failed_embed_record(error_code: str, attempts=None, **extra) -> list[tuple[
         ("usage", None),
         ("error_code", error_code),
     ]
-    return record + list(extra.items()) + [("attempts", attempts or _attempts(error_code, extra))]
+    return record + list(extra.items()) + [("attempts", attempts or _attempts(error_code, extra, recorder))]
 
 
 def test_embedding_request_url_headers_and_payload_are_fixed() -> None:
     _result, recorder = _embed((200, _embed_body(), {}))
     (request,) = recorder.requests
     assert str(request.url) == "https://example.test/v1/embeddings"
-    assert _headers(request, ("accept", "authorization", "content-type", "x-client-request-id")) == [
+    assert _headers(request, ("accept", "authorization", "content-type", "x-client-request-id", "traceparent", "tracestate")) == [
         ("accept", "application/json"),
         ("authorization", "Bearer test-secret"),
         ("content-type", "application/json"),
         ("x-client-request-id", "local-request"),
+        ("traceparent", _traceparent(request)),
     ]
     assert list(json.loads(request.content).items()) == [("model", "embed-demo"), ("input", ["a", "b"]), ("dimensions", 2)]
     assert request.extensions["timeout"] == {"connect": 30.0, "read": 30.0, "write": 30.0, "pool": 30.0}
@@ -611,9 +631,9 @@ def test_embedding_usage_known_or_unknown(usage, expected) -> None:
     ],
 )
 def test_embedding_malformed_body_fails_with_a_fixed_code(body, code) -> None:
-    error, _ = _embed((200, body, {"x-request-id": "p"}))
+    error, recorder = _embed((200, body, {"x-request-id": "p"}))
     assert error.code == code and str(error) == f"embedding provider call failed: {code}"
-    assert list(error.record.items()) == _failed_embed_record(code, provider_request_id="p")
+    assert list(error.record.items()) == _failed_embed_record(code, recorder, provider_request_id="p")
 
 
 def test_embedding_non_finite_vector_value_fails() -> None:
@@ -623,9 +643,9 @@ def test_embedding_non_finite_vector_value_fails() -> None:
 
 
 def test_embedding_body_that_is_not_json_is_an_invalid_response() -> None:
-    error, _ = _embed((200, b"{", {"x-request-id": "p"}))
+    error, recorder = _embed((200, b"{", {"x-request-id": "p"}))
     assert error.code == "invalid_response"
-    assert list(error.record.items()) == _failed_embed_record("invalid_response", provider_request_id="p")
+    assert list(error.record.items()) == _failed_embed_record("invalid_response", recorder, provider_request_id="p")
 
 
 @pytest.mark.parametrize(
@@ -636,15 +656,15 @@ def test_embedding_transport_failures(error, code) -> None:
     result, recorder = _embed(error=error)
     assert result.code == code
     assert len(recorder.requests) == (2 if isinstance(error, httpx.ConnectError) else 1)
-    assert list(result.record.items()) == _failed_embed_record(code, attempts=_sent_attempts(recorder, code))
+    assert list(result.record.items()) == _failed_embed_record(code, recorder, attempts=_sent_attempts(recorder, code))
 
 
 @pytest.mark.parametrize("status", [503, 300, 199])
 def test_embedding_http_error_records_the_status_and_the_provider_code(status) -> None:
-    error, _ = _embed((status, {"error": {"code": "busy"}}, {"x-request-id": " p "}))
+    error, recorder = _embed((status, {"error": {"code": "busy"}}, {"x-request-id": " p "}))
     assert error.code == "upstream_http_error"
     assert list(error.record.items()) == _failed_embed_record(
-        "upstream_http_error", provider_request_id=" p ", http_status=status, provider_error_code="busy"
+        "upstream_http_error", recorder, provider_request_id=" p ", http_status=status, provider_error_code="busy"
     )
 
 

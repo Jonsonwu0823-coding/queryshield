@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+import hashlib
 import json
 import re
+import secrets
 from typing import Any
 from urllib.parse import urlparse
 
@@ -38,12 +40,23 @@ def endpoint_url(base_url: str, path: str) -> str:
     return base if base.endswith(path) else f"{base}{path}"
 
 
-def json_headers(api_key: str, request_id: str, run_id: str | None, model_call_id: str) -> dict[str, str]:
+def run_trace_id(run_id: str) -> str:
+    """The W3C trace-id of every call of a run.
+
+    Derived from the run id rather than stored, so a resume, a restarted process, a sub-agent
+    and an MCP subprocess all send the run's one trace.
+    """
+
+    return hashlib.sha256(run_id.encode("utf-8")).hexdigest()[:32]
+
+
+def json_headers(api_key: str, request_id: str, run_id: str | None, model_call_id: str, trace_id: str) -> dict[str, str]:
     """The request headers.
 
     Only a call made inside a run carries ``X-Run-Id`` (so a gateway can bill per run) and
     ``Idempotency-Key``: calls outside a run, such as building the knowledge index, reuse the
     same ids on every start, and a gateway would refuse a reused key for a changed body.
+    Every request is a new span (the parent-id) of the call's trace.
     """
 
     headers = {
@@ -51,6 +64,7 @@ def json_headers(api_key: str, request_id: str, run_id: str | None, model_call_i
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "X-Client-Request-Id": request_id,
+        "traceparent": f"00-{trace_id}-{secrets.token_hex(8)}-01",
     }
     if run_id is not None:
         headers["X-Run-Id"] = run_id
@@ -87,24 +101,27 @@ def send_json(
 ) -> Sent:
     """POST ``payload``; once more, after RETRY_WAIT_SECONDS, when the first attempt never reached an upstream.
 
-    Both attempts send the same bytes and the same Idempotency-Key, each its own X-Client-Request-Id.
+    Both attempts send the same bytes, the same Idempotency-Key and trace-id, each its own
+    X-Client-Request-Id and parent-id.
     Anything else is the call's result; docs/operations.md gives the reason for each kind of failure.
     """
 
     # Exactly what httpx's json= sends, serialized once so a retry cannot differ.
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
-    first = _attempt(client, url, body, json_headers(api_key, request_id, run_id, model_call_id), timeout)
+    # A call outside a run is a trace of its own; its retry stays in it.
+    trace_id = run_trace_id(run_id) if run_id is not None else secrets.token_hex(16)
+    first = _attempt(client, url, body, json_headers(api_key, request_id, run_id, model_call_id, trace_id), timeout)
     if not first.retryable:
         return first
     sleep(RETRY_WAIT_SECONDS)
-    second = _attempt(client, url, body, json_headers(api_key, new_request_id(), run_id, model_call_id), timeout)
+    second = _attempt(client, url, body, json_headers(api_key, new_request_id(), run_id, model_call_id, trace_id), timeout)
     return replace(second, attempts=first.attempts + second.attempts)
 
 
 def _attempt(client: httpx.Client | None, url: str, body: bytes, headers: Mapping[str, str], timeout: float) -> Sent:
     """One POST and its record (never a message text); the one place that decides whether it may be retried."""
 
-    record: dict[str, object] = {"request_id": headers["X-Client-Request-Id"]}
+    record: dict[str, object] = {"request_id": headers["X-Client-Request-Id"], "span_id": headers["traceparent"].split("-")[2]}
     try:
         response = _post(client, url, body, headers, timeout)
     except httpx.TimeoutException as exc:

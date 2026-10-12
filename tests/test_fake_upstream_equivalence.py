@@ -61,7 +61,8 @@ USAGE_FIELDS = (
 # D7: the embedded snapshot id (the embedding model name and revision are in the index hash).
 SNAPSHOT_FIELDS = ("knowledge_snapshot_id",)
 # D8: a model_call event's HTTP attempts.  Only an HTTP adapter makes attempts, so the key exists on
-# the upstream side alone; it is removed before comparing and checked on its own below.
+# the upstream side alone; it is removed before comparing and checked on its own below, each attempt
+# against the span (traceparent parent-id) its request carried.
 ATTEMPTS_FIELD = "attempts"
 # The adapter passes its timeout to the injected client; TestClient ignores it and warns.
 pytestmark = pytest.mark.filterwarnings("ignore:You should not use the 'timeout' argument")
@@ -69,8 +70,20 @@ _UUID_OR_HEX = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9
 
 
 @pytest.fixture(scope="module")
-def client() -> TestClient:
-    return TestClient(app)
+def sent_spans() -> dict[str, str]:
+    """The traceparent parent-id of every request sent to the fake upstream, by X-Client-Request-Id."""
+
+    return {}
+
+
+@pytest.fixture(scope="module")
+def client(sent_spans) -> TestClient:
+    def keep(request) -> None:
+        sent_spans[request.headers["x-client-request-id"]] = request.headers["traceparent"].split("-")[2]
+
+    client = TestClient(app)
+    client.event_hooks = {"request": [keep]}
+    return client
 
 
 class _Capturing:
@@ -179,7 +192,9 @@ def _model_call_events(record: dict[str, object]) -> list[dict]:
 
 @pytest.mark.parametrize("protocol", PROTOCOLS)
 @pytest.mark.parametrize(("name", "question", "window", "resume_answer"), PATHS, ids=[path[0] for path in PATHS])
-def test_each_step_and_the_result_match_the_in_process_fake(client, retrievers, protocol, name, question, window, resume_answer) -> None:
+def test_each_step_and_the_result_match_the_in_process_fake(
+    client, sent_spans, retrievers, protocol, name, question, window, resume_answer
+) -> None:
     fake = _run(FakeModel(), retrievers["fake"], protocol, question, window, resume_answer)
     upstream = _run(_upstream_model(client), retrievers["upstream"], protocol, question, window, resume_answer)
 
@@ -197,7 +212,9 @@ def test_each_step_and_the_result_match_the_in_process_fake(client, retrievers, 
         assert (event["provider"], event["model"], event["usage_status"]) == ("openai_compatible", FAKE_UPSTREAM_MODEL, "known")
         assert re.fullmatch(r"fake-chatcmpl-[0-9a-f]{32}", event["provider_call_id"])
         assert re.fullmatch(r"fake-req-[0-9a-f]{32}", event["provider_request_id"])
-        assert event[ATTEMPTS_FIELD] == [{"request_id": event["request_id"], "status": "succeeded"}]
+        assert event[ATTEMPTS_FIELD] == [
+            {"request_id": event["request_id"], "span_id": sent_spans[event["request_id"]], "status": "succeeded"}
+        ]
         usage = event["usage"]
         assert usage_is_consistent(usage["prompt_tokens"], usage["completion_tokens"], usage["total_tokens"]) and usage["completion_tokens"] > 0
     last = upstream.get("resumed") or upstream["result"]
