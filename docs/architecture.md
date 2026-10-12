@@ -106,6 +106,7 @@ HTTP 接口都在 `src/queryshield/api/main.py`：
 
 - `query_readonly` 是唯一读业务数据的工具。SQL 先过 `src/queryshield/policy/sql.py` 的 `parse_readonly_select`：项目自己的分词器和解析器，只接受单条 SELECT，表只能是 customers、orders、refunds，函数只有 `SUM`、`COUNT`、`COALESCE`，只支持内连接，不接受 CTE、集合运算、注释和类型转换，长度不超过 4000 字符。
 - 执行在 `src/queryshield/db/guarded.py`：只按解析结果重新渲染 SQL，每张表替换成 `(SELECT * FROM t WHERE tenant_id = %s)` 子查询（`_scoped_table`），没有 LIMIT 时补 `LIMIT 101`，多于 100 行以 422 `result_row_limit` 结束。连接来自 `src/queryshield/db/readonly.py` 的 `connect_readonly`：只读角色、`default_transaction_read_only=on`、`statement_timeout=2000`，并在事务里设置 `queryshield.tenant_id`，配合 `migrations/002_rls.sql` 里三张表的行级安全（ENABLE + FORCE）。
+- 执行前，`src/queryshield/agent/tool_execution.py` 的 `_resolve_call` 先调 `_bind_tenant_equality_params`：模型 SQL 里 `tenant_id = <参数>` 的参数一律换成认证身份的租户，所以模型在参数里写了别的租户，查到的也是本租户的数。写成字面量的租户值不换，但每张表都套了本租户的子查询，照样查不到别的租户的行（没声明指标的查询结果是 0 行）；带参数的同一条 SQL 不经这一步、直接交给受限执行器时，结果也是 0 行。
 - 查客户姓名（`customers.name` 或 `customers.*`）时，非审批人会得到 `approval_required`，run 进入等待审批（`check_sensitive_access`）。单次提案入口 `POST /query-proposals` 用同一个检查，请求人查姓名直接返回 403。
 
 ### catalog：指标、说法表、追问

@@ -170,7 +170,7 @@ python scripts/demo_run.py --mode fake-upstream --evidence-dir /tmp/demo-run    
 
 ### 经模型网关调用模型
 
-模型网关是一个 OpenAI 兼容的服务（管额度、限流和记账），跑在它自己的 Compose 项目里，要转发 `tools` 和 `tool_calls`，并原样返回上游的 `model`（否则认不出假上游）。两个项目经一个**外部 Docker 网络**互通，只有 `app`（和下面的 `fake-upstream`）接入它：Docker 在网络上按服务名解析，数据库这类服务接进去，可能被对方的同名服务顶替。
+模型网关是一个 OpenAI 兼容的服务（管额度、限流和记账；配套的实现是公开的 [QuotaForge](https://github.com/Jonsonwu0823-coding/quotaforge)），跑在它自己的 Compose 项目里，要转发 `tools` 和 `tool_calls`，并原样返回上游的 `model`（否则认不出假上游）。两个项目经一个**外部 Docker 网络**互通，只有 `app`（和下面的 `fake-upstream`）接入它：Docker 在网络上按服务名解析，数据库这类服务接进去，可能被对方的同名服务顶替。
 
 在当前 shell 里设置（都必须设置，没有默认值；网络名和地址与网关那边约定，key 由网关发）：
 
