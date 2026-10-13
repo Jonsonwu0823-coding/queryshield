@@ -19,6 +19,7 @@ from typing import Any, Literal, NamedTuple, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from queryshield import tracing
 from queryshield.agent.config import DEFAULT_RUN_CONFIG, RunConfig
 from queryshield.agent.context import (
     CONTEXT_VERSION,
@@ -616,21 +617,25 @@ class BoundedAgent:
 
     def _build_graph(self) -> Any:
         builder = StateGraph(_GraphState)
-        builder.add_node("model_decision", self._model_decision)
-        builder.add_node("execute_tool", self._execute_tool)
-        builder.add_node("execute_parallel", self._execute_parallel)
-        builder.add_node("finish", self._finish)
+
+        def add_node(name: str, node: Callable[[_GraphState], dict[str, object]]) -> None:
+            builder.add_node(name, self._step(name, node))
+
+        add_node("model_decision", self._model_decision)
+        add_node("execute_tool", self._execute_tool)
+        add_node("execute_parallel", self._execute_parallel)
+        add_node("finish", self._finish)
         builder.add_edge(START, "model_decision")
         routes = {"tool": "execute_tool", "parallel": "execute_parallel", "finish": "finish", "retry": "model_decision"}
         if self._can_delegate:
             # Two nodes, so the delegation event is stored before any sub-agent step.
-            builder.add_node("delegate", self._delegate)
-            builder.add_node("run_subtasks", self._run_subtasks)
+            add_node("delegate", self._delegate)
+            add_node("run_subtasks", self._run_subtasks)
             routes["delegate"] = "delegate"
             builder.add_conditional_edges("delegate", self._after_delegate, {"subtasks": "run_subtasks", "model": "model_decision"})
             builder.add_edge("run_subtasks", "model_decision")
         if self.skills is not None:
-            builder.add_node("load_skill", self._load_skill)
+            add_node("load_skill", self._load_skill)
             routes["skill"] = "load_skill"
             builder.add_edge("load_skill", "model_decision")
         builder.add_conditional_edges("model_decision", self._after_model, routes)
@@ -642,6 +647,24 @@ class BoundedAgent:
             {"model": "model_decision", "end": END},
         )
         return builder.compile()
+
+    def _step(self, name: str, node: Callable[[_GraphState], dict[str, object]]) -> Callable[[_GraphState], dict[str, object]]:
+        """The node as one span; the agent events it records become the span's events."""
+
+        label = self.role.label if self.role is not None else None
+
+        def step(state: _GraphState) -> dict[str, object]:
+            with tracing.span(f"queryshield.step.{name}") as span:
+                tracing.annotate(span, {"agent": label})
+                update = node(state)
+                # A sub-agent's events, merged in by run_subtasks, are already on its own step spans.
+                for event in update.get("events", ())[len(state.get("events", ())):]:
+                    if event.get("agent") == label:
+                        tracing.add_event(span, str(event["kind"]), {**event, **(event.get("usage") or {})})
+                tracing.annotate(span, {"status": update.get("status"), "error_code": update.get("error_code")})
+            return update
+
+        return step
 
     def _model_decision(self, state: _GraphState) -> dict[str, object]:
         """One model step; ``retry_model`` is set only by the action-type repair and cleared here."""
@@ -1396,17 +1419,19 @@ class BoundedAgent:
             on_step=self.on_step,
             role=role,
         )
-        return agent._invoke(
-            _new_state(
-                state["context"],
-                subtask_question(self.tools.catalog, subtask),
-                state["run_config"],
-                started_at=self._clock(),
-                metric_bindings=subtask.bindings,
-                request_time_window=_request_window(subtask.time_window),
-                agent=role.label,
+        with tracing.span("queryshield.subtask") as span:
+            tracing.annotate(span, {"agent": role.label, "subtask_index": subtask.index})
+            return agent._invoke(
+                _new_state(
+                    state["context"],
+                    subtask_question(self.tools.catalog, subtask),
+                    state["run_config"],
+                    started_at=self._clock(),
+                    metric_bindings=subtask.bindings,
+                    request_time_window=_request_window(subtask.time_window),
+                    agent=role.label,
+                )
             )
-        )
 
     def _merge_subtasks(
         self, state: _GraphState, subtasks: Sequence[Subtask], finals: Sequence[Mapping[str, object]]

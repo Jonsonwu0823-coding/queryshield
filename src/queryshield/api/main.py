@@ -39,7 +39,8 @@ from queryshield.db.guarded import GuardedQueryError, GuardedQueryExecutor
 from queryshield.policy.params import ordered_param_values
 from queryshield.policy.sql import SQLPolicyError, parse_readonly_select
 from queryshield.tools.semantic import ToolError, check_sensitive_access
-from queryshield.providers.http import run_trace_id
+from queryshield import tracing
+from queryshield.providers.http import base_url_is_valid, run_trace_id
 import psycopg
 from psycopg.errors import GroupingError, QueryCanceled, UndefinedColumn
 from queryshield.approval.models import ApprovalRequest, EmptyRequest, PreferenceUpdate, ResumeRequest
@@ -63,6 +64,14 @@ async def _application_lifespan(application: FastAPI):
     # Every profile checks the Skill files: a run resumes under its stored profile.  A bad file stops the start.
     product_skills()
     service = shared_run_service()
+    # Span export, off unless configured; started before the recovery so the runs it ends are exported.
+    traces_url = tracing.configured_url()
+    if traces_url:
+        if not base_url_is_valid(traces_url):
+            raise RuntimeConfigurationError(
+                "invalid_otlp_traces_url", f"{tracing.URL_VARIABLE} is not an http(s) URL with a host and no credentials"
+            )
+        tracing.start(traces_url)
     application.state.parallel_recovery = service.recover_parallel_groups()
     # After the parallel groups, whose runs end by their own rule.
     application.state.interrupted_runs = service.end_interrupted_runs()
@@ -71,6 +80,8 @@ async def _application_lifespan(application: FastAPI):
     from queryshield.mcp_metadata.launch import cleanup_index_dir
 
     cleanup_index_dir()
+    if traces_url:
+        tracing.stop()
 
 
 app = FastAPI(title="QueryShield", version="0.1.0", lifespan=_application_lifespan)

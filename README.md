@@ -14,6 +14,7 @@ Run it with one command: `python scripts/new_env.py && docker compose up -d --bu
 Evaluation status: on the development set (20 frozen questions, seen during development; not a blind test), two real-model runs on 2026-10-03 gave B1 19/20 (one model-call timeout) and 20/20, with 0 safety violations in both.
 A blind test exists only for an older version (2026-09); a blind test of the current version has not been done yet.
 The companion model gateway, [QuotaForge](https://github.com/Jonsonwu0823-coding/quotaforge), handles quota, rate limiting and accounting for model calls; the two sides reconcile run by run through `X-Run-Id`, and QuotaForge's CI runs the joint demo against a pinned commit of this repository.
+Every chat and embedding request carries a W3C `traceparent` (one trace per run), and setting `QUERYSHIELD_OTLP_TRACES_URL` exports QueryShield's own spans over OTLP/HTTP, so a run shows up as one trace next to the gateway's spans (off by default).
 Docs: [architecture](docs/architecture.md), [evidence](docs/evidence.md), [retrospective](docs/retrospective.md), [operations](docs/operations.md), [MCP](docs/mcp.md), [demo data](docs/demo-data.md). The docs are in Chinese.
 
 ## 它做什么

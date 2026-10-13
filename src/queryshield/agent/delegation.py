@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import TypeVar
 
+from queryshield import tracing
 from queryshield.agent.metric_intent import MetricDeclarationError, check_confirmed_metrics, resolve_query_declaration
 from queryshield.agent.proposals import DelegateAction, MetricBinding
 from queryshield.agent.tool_execution import check_clarification
@@ -158,7 +159,7 @@ def run_all(calls: Sequence[Callable[[], _T]]) -> list[_T]:
     """
 
     with ThreadPoolExecutor(max_workers=len(calls), thread_name_prefix="queryshield-subtask") as pool:
-        futures = [pool.submit(call) for call in calls]
+        futures = [pool.submit(tracing.carried(call)) for call in calls]
     return [future.result() for future in futures]
 
 

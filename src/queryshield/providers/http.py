@@ -17,7 +17,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from opentelemetry.trace import SpanKind
 
+from queryshield import tracing
 from queryshield.providers.contracts import new_request_id
 
 
@@ -110,18 +112,33 @@ def send_json(
     body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
     # A call outside a run is a trace of its own; its retry stays in it.
     trace_id = run_trace_id(run_id) if run_id is not None else secrets.token_hex(16)
-    first = _attempt(client, url, body, json_headers(api_key, request_id, run_id, model_call_id, trace_id), timeout)
-    if not first.retryable:
-        return first
-    sleep(RETRY_WAIT_SECONDS)
-    second = _attempt(client, url, body, json_headers(api_key, new_request_id(), run_id, model_call_id, trace_id), timeout)
-    return replace(second, attempts=first.attempts + second.attempts)
+    # On the header's trace even when this thread lost the run's span, so the gateway's spans hang under ours.
+    with tracing.span("queryshield.model_call", trace_id=trace_id) as call:
+        endpoint = "embeddings" if url.endswith("/embeddings") else "chat"
+        tracing.annotate(call, {"run_id": run_id, "model_call_id": model_call_id, "endpoint": endpoint})
+        sent = _attempt(client, url, body, json_headers(api_key, request_id, run_id, model_call_id, trace_id), timeout)
+        if sent.retryable:
+            sleep(RETRY_WAIT_SECONDS)
+            second = _attempt(client, url, body, json_headers(api_key, new_request_id(), run_id, model_call_id, trace_id), timeout)
+            sent = replace(second, attempts=sent.attempts + second.attempts)
+        last = sent.attempts[-1]
+        tracing.annotate(call, {"attempt_count": len(sent.attempts), "status": last["status"], "error_code": last.get("error_code")})
+    return sent
 
 
 def _attempt(client: httpx.Client | None, url: str, body: bytes, headers: Mapping[str, str], timeout: float) -> Sent:
-    """One POST and its record (never a message text); the one place that decides whether it may be retried."""
+    """One POST and its record (never a message text), as a CLIENT span whose id is the request's parent-id."""
 
     record: dict[str, object] = {"request_id": headers["X-Client-Request-Id"], "span_id": headers["traceparent"].split("-")[2]}
+    with tracing.span("queryshield.http_attempt", span_id=str(record["span_id"]), kind=SpanKind.CLIENT, attributes={"http.request.method": "POST"}) as span:
+        sent = _outcome(client, url, body, headers, timeout, record)
+        tracing.annotate(span, sent.attempts[0])
+    return sent
+
+
+def _outcome(client: httpx.Client | None, url: str, body: bytes, headers: Mapping[str, str], timeout: float, record: dict[str, object]) -> Sent:
+    """The attempt's result and record; the one place that decides whether it may be retried."""
+
     try:
         response = _post(client, url, body, headers, timeout)
     except httpx.TimeoutException as exc:

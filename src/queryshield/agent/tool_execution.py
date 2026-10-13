@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 
 from psycopg import Error as DatabaseDriverError
 from psycopg import OperationalError as DatabaseOperationalError
 
+from queryshield import tracing
 from queryshield.policy.sql import (
     BooleanExpression,
     ColumnRef,
@@ -110,7 +111,26 @@ def _row_limit_error() -> ToolError:
     return ToolError(RESULT_ROW_LIMIT_CODE, "query returned more than the 100 row limit")
 
 
-def call_tool(tools, name, arguments, *, context, metric_bindings=(), request_time_window=None, clarifications=None):
+def call_tool(tools, name, arguments, **options):
+    """One tool call as a span, its database query inside; see ``_call_tool``."""
+
+    return _in_tool_span(name, lambda: _call_tool(tools, name, arguments, **options))
+
+
+def _in_tool_span(tool_name: str, call: Callable[[], object]):
+    with tracing.span("queryshield.tool") as span:
+        tracing.annotate(span, {"tool_name": tool_name})
+        try:
+            output = call()
+        except ToolError as exc:
+            tracing.annotate(span, {"status": "failed", "error_code": exc.code})
+            raise
+        rows = output.get("row_count") if isinstance(output, Mapping) else getattr(output, "row_count", None)
+        tracing.annotate(span, {"status": "succeeded", "row_count": rows})
+        return output
+
+
+def _call_tool(tools, name, arguments, *, context, metric_bindings=(), request_time_window=None, clarifications=None):
     """Use the existing safety facade; translate only actual driver exceptions.
 
     SQL syntax/name errors may use the existing one-repair budget. Connection,
@@ -265,6 +285,12 @@ def _verified_read(arguments, bindings, *, context) -> tuple[str, tuple[object, 
 
 
 def execute_approved_query(tools, pending_call: Mapping[str, object], *, context: ExecutionContext) -> ResultEvidence:
+    """The approved call as one tool span; see ``_execute_approved_query``."""
+
+    return _in_tool_span("query_readonly", lambda: _execute_approved_query(tools, pending_call, context=context))
+
+
+def _execute_approved_query(tools, pending_call: Mapping[str, object], *, context: ExecutionContext) -> ResultEvidence:
     """Execute exactly one approved pending call for the requester.
 
     This is not a general permission switch: the caller passes the one call

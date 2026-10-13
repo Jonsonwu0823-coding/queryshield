@@ -74,6 +74,8 @@ services:
       QUERYSHIELD_MODEL_PROTOCOL: ${QUERYSHIELD_MODEL_PROTOCOL:-json}
       # Empty: the default profile (B1); b2 runs the multi-agent profile.
       QUERYSHIELD_AGENT_PROFILE: ${QUERYSHIELD_AGENT_PROFILE:-}
+      # Empty: no span export; set, the OTLP/HTTP traces address (docs/operations.md).
+      QUERYSHIELD_OTLP_TRACES_URL: ${QUERYSHIELD_OTLP_TRACES_URL:-}
       QUERYSHIELD_TOKEN_A_REQUESTER: ${QUERYSHIELD_TOKEN_A_REQUESTER:?QUERYSHIELD_TOKEN_A_REQUESTER is not set - run python scripts/new_env.py first}
       QUERYSHIELD_TOKEN_A_APPROVER: ${QUERYSHIELD_TOKEN_A_APPROVER:?QUERYSHIELD_TOKEN_A_APPROVER is not set - run python scripts/new_env.py first}
       QUERYSHIELD_TOKEN_B_REQUESTER: ${QUERYSHIELD_TOKEN_B_REQUESTER:?QUERYSHIELD_TOKEN_B_REQUESTER is not set - run python scripts/new_env.py first}

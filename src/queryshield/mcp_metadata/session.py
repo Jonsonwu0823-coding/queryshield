@@ -24,6 +24,7 @@ from typing import Any
 from uuid import uuid4
 import weakref
 
+from queryshield import tracing
 from queryshield.mcp_metadata.launch import LaunchSpec
 from queryshield.mcp_metadata.process import wait_until_gone
 from queryshield.mcp_metadata.schemas import (
@@ -152,7 +153,10 @@ class McpMetadataSession:
         self._loop = asyncio.new_event_loop()
         self._thread = Thread(target=self._loop.run_forever, name=f"queryshield-{self.session_id}", daemon=True)
         self._thread.start()
-        self._serve_future = asyncio.run_coroutine_threadsafe(self._serve(params), self._loop)
+        # The loop's tasks inherit the submitting thread's context: without a QueryShield span, the
+        # SDK puts no trace context into the requests' _meta, as with export off.
+        with tracing.detached():
+            self._serve_future = asyncio.run_coroutine_threadsafe(self._serve(params), self._loop)
         try:
             self._ready.result(timeout=self.start_timeout)
         except concurrent.futures.TimeoutError:
@@ -274,7 +278,8 @@ class McpMetadataSession:
             if self._closed or self._broken or self._client is None or self._loop is None:
                 raise McpSessionError(MCP_UNAVAILABLE)
             self._record["call_count"] = int(self._record["call_count"]) + 1  # type: ignore[arg-type]
-            future = asyncio.run_coroutine_threadsafe(self._call(name, arguments), self._loop)
+            with tracing.detached():
+                future = asyncio.run_coroutine_threadsafe(self._call(name, arguments), self._loop)
         try:
             return future.result(timeout=self.call_timeout + 1.0)
         except concurrent.futures.TimeoutError:

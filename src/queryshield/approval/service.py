@@ -27,6 +27,7 @@ from threading import Lock, RLock, Thread
 from typing import Any, Callable
 from uuid import uuid4
 
+from queryshield import tracing
 from queryshield.agent.context import NET_FEN_TIME_WINDOW
 from queryshield.agent.graph import RunResumeError, _usage_summary
 from queryshield.agent.metric_intent import build_metric_binding
@@ -70,6 +71,7 @@ from queryshield.facts import FactResolver
 from queryshield.facts.facts import FACTS_SCHEMA_VERSION, is_scalar_metric_result
 from queryshield.facts.persisted import evidence_from_record
 from queryshield.policy.params import ordered_param_values
+from queryshield.providers.http import run_trace_id
 from queryshield.tools import ControlledTools, ToolError
 
 
@@ -84,6 +86,8 @@ APPROVAL_PERMISSION_UNAVAILABLE_CODE = "approval_permission_unavailable"
 KNOWLEDGE_UNAVAILABLE_CODE = "knowledge_unavailable"
 # The process exited while the run executed; the next startup ended it.
 INTERRUPTED_CODE = "execution_interrupted"
+# What a segment span reads back from the run when the execution ends.
+_SEGMENT_OUTCOME = ("status", "error_code", "model_call_count", "tool_call_count", "sql_exec_count")
 APPROVAL_ACTION_KIND = "query_readonly"
 
 
@@ -357,17 +361,29 @@ class RunService:
         A move that fails (the run moved meanwhile, e.g. a cancel request) is decided again.
         """
 
-        while True:
-            status = (self.store.get_run(run_id) or {}).get("status")
-            if status == "RUNNING":
-                to_status, events = "FAILED", [_event("terminal", "FAILED", {"error_code": INTERRUPTED_CODE})]
-                fields = {"error_code": INTERRUPTED_CODE}
-            elif status == "CANCEL_REQUESTED":
-                to_status, events, fields = "CANCELLED", _CANCELLED_EVENTS, {}
-            else:
-                return None
-            if self.store.transition_run(run_id, status, to_status, events=events, usage_json=_json(_USAGE_LOST), **fields):
-                return to_status
+        with self._segment(run_id, "interrupted"):
+            while True:
+                status = (self.store.get_run(run_id) or {}).get("status")
+                if status == "RUNNING":
+                    to_status, events = "FAILED", [_event("terminal", "FAILED", {"error_code": INTERRUPTED_CODE})]
+                    fields = {"error_code": INTERRUPTED_CODE}
+                elif status == "CANCEL_REQUESTED":
+                    to_status, events, fields = "CANCELLED", _CANCELLED_EVENTS, {}
+                else:
+                    return None
+                if self.store.transition_run(run_id, status, to_status, events=events, usage_json=_json(_USAGE_LOST), **fields):
+                    return to_status
+
+    @contextmanager
+    def _segment(self, run_id: str, segment: str, **fields: object):
+        """One execution of the run as a root span on the run's trace; its outcome is read back from the store."""
+
+        with tracing.span("queryshield.run", trace_id=run_trace_id(run_id)) as span:
+            tracing.annotate(span, {"run_id": run_id, "segment": segment, **fields})
+            yield
+            if span.is_recording():
+                run = self.store.get_run(run_id) or {}
+                tracing.annotate(span, {name: run.get(name) for name in _SEGMENT_OUTCOME})
 
     def _default_executor(self) -> object:
         check_fake_database_boundary(self.mode)
@@ -614,57 +630,58 @@ class RunService:
         deps: RuntimeDependencies,
         metadata: object | None = None,
     ) -> dict[str, object]:
-        opened_store = None
-        tools: object | None = None
-        counter: CountingExecutor | None = None
-        model: CountingModel | None = None
-        writer = _StepWriter(self.store, run_id)
-        metadata_written = [False]
-        try:
-            self.store.append_event(run_id, "step_started", "RUNNING", payload={"step": "agent_run", "profile": deps.profile})
-            call_store = deps.call_store
-            if call_store is None:
-                from queryshield.agent.call_store import DurableModelCallStore
+        with self._segment(run_id, "execute", profile=deps.profile):
+            opened_store = None
+            tools: object | None = None
+            counter: CountingExecutor | None = None
+            model: CountingModel | None = None
+            writer = _StepWriter(self.store, run_id)
+            metadata_written = [False]
+            try:
+                self.store.append_event(run_id, "step_started", "RUNNING", payload={"step": "agent_run", "profile": deps.profile})
+                call_store = deps.call_store
+                if call_store is None:
+                    from queryshield.agent.call_store import DurableModelCallStore
 
-                opened_store = DurableModelCallStore(call_store_path_from_env())
-                call_store = opened_store
-            counter = CountingExecutor(deps.executor)
-            model = CountingModel(deps.model)
-            run_deps = replace(deps, call_store=call_store, model=model)
-            tools = product_tools(run_deps, executor=counter, metadata=metadata)
-            context = ExecutionContext(
-                run_id=run_id,
-                tenant_id=subject.tenant_id,
-                principal_id=subject.principal_id,
-                role=subject.role,
-            )
-            profile_run = run_profile(run_deps, context, question, time_window=time_window, tools=tools, on_step=writer)
-            # The run's MCP session ends with this execution, before the result commits.
-            metadata_record = self._close_metadata(tools, metadata_written)
-            return self._commit(
-                run_id,
-                profile_run.payload,
-                agent=profile_run.agent,
-                tools=tools,
-                context=context,
-                sql_executions=counter.executions,
-                writer=writer,
-                metadata_record=metadata_record,
-            )
-        except Exception as exc:  # noqa: BLE001 - durable terminal state is the boundary
-            metadata_record = self._close_metadata(tools, metadata_written)
-            if metadata_record is not None:
-                self.store.append_event(run_id, "metadata_session", "RUNNING", payload=metadata_record)
-            return self._end_on_error(
-                run_id, exc, sql_exec_count=counter.executions if counter is not None else 0, writer=writer, model=model
-            )
-        finally:
-            self._close_metadata(tools, metadata_written)
-            if opened_store is not None:
-                opened_store.close()
-            with self._active_lock:
-                self._active.discard(run_id)
-            _unregister(run_id)
+                    opened_store = DurableModelCallStore(call_store_path_from_env())
+                    call_store = opened_store
+                counter = CountingExecutor(deps.executor)
+                model = CountingModel(deps.model)
+                run_deps = replace(deps, call_store=call_store, model=model)
+                tools = product_tools(run_deps, executor=counter, metadata=metadata)
+                context = ExecutionContext(
+                    run_id=run_id,
+                    tenant_id=subject.tenant_id,
+                    principal_id=subject.principal_id,
+                    role=subject.role,
+                )
+                profile_run = run_profile(run_deps, context, question, time_window=time_window, tools=tools, on_step=writer)
+                # The run's MCP session ends with this execution, before the result commits.
+                metadata_record = self._close_metadata(tools, metadata_written)
+                return self._commit(
+                    run_id,
+                    profile_run.payload,
+                    agent=profile_run.agent,
+                    tools=tools,
+                    context=context,
+                    sql_executions=counter.executions,
+                    writer=writer,
+                    metadata_record=metadata_record,
+                )
+            except Exception as exc:  # noqa: BLE001 - durable terminal state is the boundary
+                metadata_record = self._close_metadata(tools, metadata_written)
+                if metadata_record is not None:
+                    self.store.append_event(run_id, "metadata_session", "RUNNING", payload=metadata_record)
+                return self._end_on_error(
+                    run_id, exc, sql_exec_count=counter.executions if counter is not None else 0, writer=writer, model=model
+                )
+            finally:
+                self._close_metadata(tools, metadata_written)
+                if opened_store is not None:
+                    opened_store.close()
+                with self._active_lock:
+                    self._active.discard(run_id)
+                _unregister(run_id)
 
     # -- one commit path for every outcome ----------------------------------
 
@@ -957,66 +974,67 @@ class RunService:
             writer = _StepWriter(self.store, run_id, written=stored_steps)
             if not self.store.transition_run(run_id, "WAITING_USER", "RUNNING", cancel_requested=0):
                 return self.store.get_run(run_id)  # type: ignore[return-value]
-            context = ExecutionContext(
-                run_id=run_id,
-                tenant_id=subject.tenant_id,
-                principal_id=subject.principal_id,
-                role=subject.role,
-            )
-            counter = CountingExecutor(executor)
-            counted = CountingModel(model)
-            try:
-                deps = RuntimeDependencies(
-                    model=counted,  # type: ignore[arg-type]
-                    executor=counter,
-                    retriever=retriever,
-                    call_store=call_store,
-                    profile=run_config.profile,
+            with self._segment(run_id, "resume", profile=run_config.profile):
+                context = ExecutionContext(
+                    run_id=run_id,
+                    tenant_id=subject.tenant_id,
+                    principal_id=subject.principal_id,
+                    role=subject.role,
                 )
-                tools = product_tools(deps, metadata=metadata)
-                for evidence in paused_results:
-                    tools.restore_result_evidence(evidence, context=context)
-                agent = build_bounded_agent(
-                    counted,  # type: ignore[arg-type]
-                    tools,
-                    call_store=call_store,
-                    run_config=run_config,
-                    retrieval_available=retriever is not None,
-                    on_step=writer,
-                )
-                result, metadata_record = self._resume_agent(agent, tools, choice, context, answer, checkpoint_for_resume)
-                envelope_updates: dict[str, object] = {}
-                if choice.selected_metric is not None:
-                    envelope_updates["clarified_metric"] = choice.selected_metric
-                payload = b1_result_payload(result, context, str(agent_checkpoint.get("question", run.get("question", ""))))
-                envelope_updates["last_agent_result"] = result.as_dict()
-                return self._commit(
-                    run_id,
-                    payload,
-                    agent=agent,
-                    tools=tools,
-                    context=context,
-                    sql_executions=counter.executions,
-                    writer=writer,
-                    envelope_updates=envelope_updates,
-                    metadata_record=metadata_record,
-                )
-            except Exception as exc:  # noqa: BLE001 - as in a first execution, the run ends on the error's code
-                # A refusal before any step leaves the run as it was; after a step, waiting
-                # again would store those steps twice on the next resume.
-                if (
-                    isinstance(exc, _ResumeRefused)
-                    and writer.written == stored_steps
-                    and self.store.transition_run(run_id, "RUNNING", "WAITING_USER")
-                ):
-                    raise
-                return self._end_on_error(
-                    run_id,
-                    exc,
-                    sql_exec_count=int(run.get("sql_exec_count", 0)) + counter.executions,
-                    writer=writer,
-                    model=counted,
-                )
+                counter = CountingExecutor(executor)
+                counted = CountingModel(model)
+                try:
+                    deps = RuntimeDependencies(
+                        model=counted,  # type: ignore[arg-type]
+                        executor=counter,
+                        retriever=retriever,
+                        call_store=call_store,
+                        profile=run_config.profile,
+                    )
+                    tools = product_tools(deps, metadata=metadata)
+                    for evidence in paused_results:
+                        tools.restore_result_evidence(evidence, context=context)
+                    agent = build_bounded_agent(
+                        counted,  # type: ignore[arg-type]
+                        tools,
+                        call_store=call_store,
+                        run_config=run_config,
+                        retrieval_available=retriever is not None,
+                        on_step=writer,
+                    )
+                    result, metadata_record = self._resume_agent(agent, tools, choice, context, answer, checkpoint_for_resume)
+                    envelope_updates: dict[str, object] = {}
+                    if choice.selected_metric is not None:
+                        envelope_updates["clarified_metric"] = choice.selected_metric
+                    payload = b1_result_payload(result, context, str(agent_checkpoint.get("question", run.get("question", ""))))
+                    envelope_updates["last_agent_result"] = result.as_dict()
+                    return self._commit(
+                        run_id,
+                        payload,
+                        agent=agent,
+                        tools=tools,
+                        context=context,
+                        sql_executions=counter.executions,
+                        writer=writer,
+                        envelope_updates=envelope_updates,
+                        metadata_record=metadata_record,
+                    )
+                except Exception as exc:  # noqa: BLE001 - as in a first execution, the run ends on the error's code
+                    # A refusal before any step leaves the run as it was; after a step, waiting
+                    # again would store those steps twice on the next resume.
+                    if (
+                        isinstance(exc, _ResumeRefused)
+                        and writer.written == stored_steps
+                        and self.store.transition_run(run_id, "RUNNING", "WAITING_USER")
+                    ):
+                        raise
+                    return self._end_on_error(
+                        run_id,
+                        exc,
+                        sql_exec_count=int(run.get("sql_exec_count", 0)) + counter.executions,
+                        writer=writer,
+                        model=counted,
+                    )
 
     def _resume_agent(
         self, agent: Any, tools: object, choice: ResumeChoice, context: ExecutionContext, answer: str, checkpoint: dict[str, object]
@@ -1207,13 +1225,14 @@ class RunService:
     ) -> dict[str, object]:
         """Execute the single approved call; whatever it raises ends the run (the approval is consumed)."""
 
-        counter: CountingExecutor | None = None
-        try:
-            counter = CountingExecutor(self._executor_factory())
-            return self._run_approved(run_id, run, approval, counter)
-        except Exception as exc:  # noqa: BLE001 - durable terminal state is the boundary
-            executed = counter.executions if counter is not None else 0
-            return self._end_on_error(run_id, exc, sql_exec_count=int(run.get("sql_exec_count", 0)) + executed)
+        with self._segment(run_id, "approved", approval_id=approval.get("approval_id")):
+            counter: CountingExecutor | None = None
+            try:
+                counter = CountingExecutor(self._executor_factory())
+                return self._run_approved(run_id, run, approval, counter)
+            except Exception as exc:  # noqa: BLE001 - durable terminal state is the boundary
+                executed = counter.executions if counter is not None else 0
+                return self._end_on_error(run_id, exc, sql_exec_count=int(run.get("sql_exec_count", 0)) + executed)
 
     def _run_approved(
         self,
