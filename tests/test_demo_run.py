@@ -378,6 +378,15 @@ def test_every_question_kind_has_a_judge_and_the_fake_flags_follow_the_scripted_
         run.judge_question({"kind": "unknown", "expected": {}}, {}, DEMO_IDS)
 
 
+def test_a_question_the_fake_does_not_script_is_recorded_without_run_fields() -> None:
+    questions = json.loads(gen.QUESTIONS_PATH.read_text(encoding="utf-8"))["questions"]
+    [unscripted] = [q for q in questions if not q["fake_supported"]]
+    record = run.not_applicable_record(unscripted)
+    # No run was made: no run_id, usage_total or trace_id for a reader to follow.
+    assert set(record) == {"id", "identity", "kind", "verdict", "reason", "hard_failures", "known_gaps"}
+    assert (record["id"], record["identity"], record["kind"]) == (unscripted["id"], unscripted["identity"], unscripted["kind"])
+
+
 def test_questions_avoid_september_except_as_the_end_of_the_range_and_name_their_month() -> None:
     for q in QUESTIONS.values():
         window = q["window"]

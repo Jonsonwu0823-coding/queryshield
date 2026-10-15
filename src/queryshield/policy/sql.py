@@ -147,17 +147,6 @@ class SelectStatement:
             for table in (self.from_table,) + tuple(join.table for join in self.joins)
         }
 
-    @property
-    def function_names(self) -> tuple[str, ...]:
-        names: list[str] = []
-        for item in self.projection:
-            _collect_function_names(item.expression, names)
-        for expression in self.group_by:
-            _collect_function_names(expression, names)
-        for item in self.order_by:
-            _collect_function_names(item.expression, names)
-        return tuple(names)
-
 
 # The version recorded on every result, run configuration and approval.  Bump it
 # when the accepted SQL subset or the rendering rules change.
@@ -221,6 +210,8 @@ _SYMBOLS = frozenset({"(", ")", ",", ".", "*", ";"})
 _SINGLE_OPERATORS = frozenset({"=", "<", ">", "+", "-"})
 _ASCII_DIGITS = frozenset("0123456789")
 
+_KEYWORD_LITERALS: dict[str, object] = {"NULL": None, "TRUE": True, "FALSE": False}
+
 
 def parse_readonly_select(sql: str) -> SelectStatement:
     """Parse and policy-check one supported SELECT before database execution."""
@@ -248,24 +239,13 @@ def _tokenize(sql: str) -> tuple[_Token, ...]:
             raise SQLPolicyError("unsupported_syntax", "SQL comments are not supported")
 
         if char.isalpha() or char == "_":
-            end = index + 1
-            while end < len(sql) and (sql[end].isalnum() or sql[end] == "_"):
-                end += 1
+            end = _read_word(sql, index)
             tokens.append(_Token("word", sql[index:end]))
             index = end
             continue
 
         if char in _ASCII_DIGITS:
-            end = index + 1
-            while end < len(sql) and sql[end] in _ASCII_DIGITS:
-                end += 1
-            if end < len(sql) and sql[end] == ".":
-                end += 1
-                fraction_start = end
-                while end < len(sql) and sql[end] in _ASCII_DIGITS:
-                    end += 1
-                if end == fraction_start:
-                    raise SQLPolicyError("invalid_sql", "invalid numeric literal")
+            end = _read_number(sql, index)
             tokens.append(_Token("number", sql[index:end]))
             index = end
             continue
@@ -311,6 +291,31 @@ def _tokenize(sql: str) -> tuple[_Token, ...]:
 
     tokens.append(_Token("eof", ""))
     return tuple(tokens)
+
+
+def _read_word(sql: str, start: int) -> int:
+    """The end of the word starting at ``start``: letters, digits and underscores."""
+
+    end = start + 1
+    while end < len(sql) and (sql[end].isalnum() or sql[end] == "_"):
+        end += 1
+    return end
+
+
+def _read_number(sql: str, start: int) -> int:
+    """The end of the ASCII-digit number starting at ``start``, with at most one fraction part."""
+
+    end = start + 1
+    while end < len(sql) and sql[end] in _ASCII_DIGITS:
+        end += 1
+    if end < len(sql) and sql[end] == ".":
+        end += 1
+        fraction_start = end
+        while end < len(sql) and sql[end] in _ASCII_DIGITS:
+            end += 1
+        if end == fraction_start:
+            raise SQLPolicyError("invalid_sql", "invalid numeric literal")
+    return end
 
 
 def _read_string(sql: str, start: int) -> tuple[str, int]:
@@ -503,10 +508,7 @@ class _Parser:
         if self._match_symbol("*"):
             return Star()
         if token.kind == "parameter":
-            self._advance()
-            parameter = ParameterRef(self._parameter_index)
-            self._parameter_index += 1
-            return parameter
+            return self._next_parameter()
         if token.kind == "number":
             self._advance()
             if "." not in token.text:
@@ -519,10 +521,9 @@ class _Parser:
             self._advance()
             return LiteralValue(token.text)
         if token.kind in {"word", "quoted_identifier"}:
-            if token.kind == "word" and token.text.upper() in {"NULL", "TRUE", "FALSE"}:
+            if token.kind == "word" and token.text.upper() in _KEYWORD_LITERALS:
                 self._advance()
-                values: dict[str, object] = {"NULL": None, "TRUE": True, "FALSE": False}
-                return LiteralValue(values[token.text.upper()])
+                return LiteralValue(_KEYWORD_LITERALS[token.text.upper()])
             if self._lookahead_symbol("("):
                 return self._parse_function()
             return self._parse_column()
@@ -585,15 +586,12 @@ class _Parser:
         token = self._current()
         if token.kind == "number":
             self._advance()
-            value = int(token.text) if token.text.isdigit() else -1
+            value = int(token.text) if "." not in token.text else -1
             if not 0 <= value <= MAX_RESULT_ROWS:
                 raise SQLPolicyError("limit_exceeded", "LIMIT must be between 0 and 100")
             return value
         if token.kind == "parameter":
-            self._advance()
-            parameter = ParameterRef(self._parameter_index)
-            self._parameter_index += 1
-            return parameter
+            return self._next_parameter()
         raise SQLPolicyError("invalid_sql", "LIMIT must be an integer or parameter")
 
     def _parse_identifier(self, field: str) -> str:
@@ -651,15 +649,14 @@ class _Parser:
     def _current(self) -> _Token:
         return self._tokens[self._index]
 
+    def _next_parameter(self) -> ParameterRef:
+        """The current parameter token, numbered in the order the parameters appear."""
+
+        self._advance()
+        parameter = ParameterRef(self._parameter_index)
+        self._parameter_index += 1
+        return parameter
+
     def _previous(self) -> _Token:
         return self._tokens[self._index - 1]
 
-
-def _collect_function_names(expression: Expression, names: list[str]) -> None:
-    if isinstance(expression, FunctionCall):
-        names.append(expression.name)
-        for argument in expression.arguments:
-            _collect_function_names(argument, names)
-    elif isinstance(expression, BinaryExpression):
-        _collect_function_names(expression.left, names)
-        _collect_function_names(expression.right, names)

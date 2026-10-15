@@ -115,3 +115,33 @@ def test_failed_step_record_shows_parse_detail_and_shape(tmp_path, capsys) -> No
         {"error_code": "invalid_field", "error_detail": "params must be an object", "action_shape": shape}
     ]
     assert "params must be an object" in capsys.readouterr().out
+
+
+def test_the_agent_steps_of_a_run_are_only_its_agent_step_payloads(tmp_path) -> None:
+    from queryshield.db.state_store import StateStore
+
+    state_path = tmp_path / "state.sqlite3"
+    with StateStore(state_path) as store:
+        store.create_run(run_id="run-1", tenant_id="A", principal_id="p", role="requester", question="q", mode="real")
+        store.append_event("run-1", "step_started", "RUNNING", payload={"kind": "model_call", "step": "agent_run"})
+        store.append_event("run-1", "agent_step", "RUNNING", payload={"kind": "model_call", "model": "m"})
+        store.append_event("run-1", "terminal", "SUCCEEDED", payload={"kind": "tool_call"})
+
+    assert smoke.agent_steps(state_path, "run-1") == [{"kind": "model_call", "model": "m"}]
+
+
+def test_a_service_that_never_answers_health_is_not_healthy_after_30_seconds(monkeypatch) -> None:
+    clock = iter(range(0, 1000, 10))  # each look at the clock is 10 s later
+    slept: list[float] = []
+    asked: list[str] = []
+
+    def refused(url, timeout):
+        asked.append(url)
+        raise smoke.URLError("refused")
+
+    monkeypatch.setattr(smoke.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(smoke.time, "sleep", slept.append)
+    monkeypatch.setattr(smoke, "urlopen", refused)
+
+    assert smoke.service_healthy("http://127.0.0.1:1") is False
+    assert asked == ["http://127.0.0.1:1/health"] * 2 and slept == [0.2] * 2  # at 10 s and 20 s; at 30 s the time is up

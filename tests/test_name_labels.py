@@ -27,7 +27,7 @@ EXCEPTIONS = Path(__file__).with_name("name_label_exceptions.json")
 
 WEEK = re.compile(r"(?<![A-Za-z0-9])[Ww](?:0[1-9]|1[0-2])(?![0-9])")
 TICKET_B = re.compile(r"(?<![A-Za-z0-9])[Bb](?:1-[12]|[2-4][a-e](?:-?[12])?)(?![A-Za-z0-9])")
-TICKET_CS = re.compile(r"(?<![A-Za-z0-9])[CS][1-9](?=[ :]?(?:验收|返工|计划|实现|review|rework|plan)|:)")
+TICKET_CS = re.compile(r"(?<![A-Za-z0-9])[CS][1-9][0-9]?(?=[ :]?(?:验收|返工|计划|实现|review|rework|plan)|:)")
 CONTENT_PATTERNS = (WEEK, TICKET_B, TICKET_CS)
 PATH_LABEL = re.compile(r"(?<![a-z0-9])(?:w(?:0[1-9]|1[0-2])|b1-[12]|b[2-4][a-e](?:-?[12])?|c[1-5]|s[1-5])(?![a-z0-9])")
 SKIPPED_DIRS = {".venv", "__pycache__", ".pytest_cache", ".git", "build", "dist"}

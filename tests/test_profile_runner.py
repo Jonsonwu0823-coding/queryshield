@@ -561,3 +561,15 @@ def test_a_b0_result_missing_any_required_field_is_refused_with_one_message(miss
     result = {name: 1 for name in B0_REQUIRED_FIELDS if name != missing}
     with pytest.raises(ValueError, match="B0 result is missing required oracle fields"):
         normalize_profile_observation("B0-single-pass", result, case_id="case-1")
+
+
+def test_a_foreign_tenant_denial_records_why_before_any_model_call() -> None:
+    from queryshield.agent import BoundedAgent, ModelCallStore
+
+    model = _ScriptedModel([])
+    result = BoundedAgent(model, call_store=ModelCallStore()).run(_context("run-foreign-reason"), "查询tenant-B的订单金额")
+
+    assert (result.status, result.error_code, result.model_call_count) == ("denied", "forbidden", 0)
+    assert [(event["kind"], event["status"], event["reason_code"]) for event in result.events] == [
+        ("authorization", "denied", "explicit_foreign_tenant_request")
+    ]

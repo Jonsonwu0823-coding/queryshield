@@ -596,8 +596,14 @@ def build_questions(data: DemoData) -> dict[str, object]:
     }
 
 
+def _question_file_text(document: dict[str, object]) -> str:
+    """How both question files are written: the build's key order, two-space indent, a final newline."""
+
+    return json.dumps(document, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
+
+
 def render_questions(data: DemoData) -> str:
-    return json.dumps(build_questions(data), ensure_ascii=False, indent=2, sort_keys=False) + "\n"
+    return _question_file_text(build_questions(data))
 
 
 def build_composite_questions(data: DemoData) -> dict[str, object]:
@@ -652,7 +658,7 @@ def build_composite_questions(data: DemoData) -> dict[str, object]:
 
 
 def render_composite_questions(data: DemoData) -> str:
-    return json.dumps(build_composite_questions(data), ensure_ascii=False, indent=2, sort_keys=False) + "\n"
+    return _question_file_text(build_composite_questions(data))
 
 
 # --- description -------------------------------------------------------------

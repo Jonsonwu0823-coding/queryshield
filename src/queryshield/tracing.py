@@ -1,6 +1,6 @@
 """QueryShield's own spans, exported over OTLP/HTTP only when QUERYSHIELD_OTLP_TRACES_URL is set.
 
-A span takes over the ids C20 already sends rather than making its own: every span of a run is on
+A span takes over the ids the requests already send rather than making its own: every span of a run is on
 the run's trace-id (``providers.http.run_trace_id``), and an HTTP attempt's span id is the
 parent-id of its ``traceparent`` header, so the gateway's spans hang under it.  Spans carry
 only the FIELDS below.  Off, the tracer is the API's no-op one: nothing is built, no thread

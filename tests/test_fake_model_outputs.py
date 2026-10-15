@@ -47,6 +47,16 @@ def _user(text: str) -> dict:
 
 VERIFIED = {"result_id": "result-1", "verified_metrics": [{"metric_id": "gross_fen"}, {"metric_id": 3}, "x"], "rows": [{"gross_fen": 1}]}
 GROUPED = {"result_id": "result-2", "verified_metrics": [], "rows": [{"customer_id": "c1", "gross_fen": 5}]}
+NET = {"result_id": "result-3", "verified_metrics": [{"metric_id": "net_fen"}], "rows": [{"net_fen": 4}]}
+COMPOSITE = "2026年9月的已支付订单总额和退款后净额分别是多少？"
+COMPOSITE_SHARED = "2026年9月的已支付订单数、2026年9月的已支付订单总额分别是多少？"
+COMPOSITE_CARRIED = "2026年7月和2026年8月的已支付订单数分别是多少？"
+COMPOSITE_AMBIGUOUS = "2026年9月的销售额和退款后净额分别是多少？"
+SUBTASK = "统计时间窗 [2026-08-01T00:00:00Z, 2026-09-01T00:00:00Z)（UTC）内的已支付订单数（paid_count）。"
+
+
+def _skill() -> dict:
+    return {"role": "system", "content": fm._SKILL_MESSAGE + " version=v1\nbody"}
 
 # (label, messages, native tools or None for the json protocol)
 CASES = [
@@ -99,6 +109,26 @@ CASES = [
     ("server_context_not_object", [_system(raw_context="[1]"), _user("2026年9月订单数")], None),
     ("no_user_message", [_system(contract=())], None),
     ("clarification_skips_data_messages", [_system(contract=()), _user("2026年9月销售额"), _retrieval({"items": []}), _user("净额")], None),
+    # Composite questions (two or three parts): B1 queries them in turn, a coordinator delegates, the skills profile loads its Skill first.
+    ("composite_search_first", [_system(), _user(COMPOSITE)], None),
+    ("composite_search_first_native", [_system(), _user(COMPOSITE)], WITH_SEARCH),
+    ("composite_first_query", [_system(contract=()), _user(COMPOSITE)], None),
+    ("composite_second_query", [_system(contract=()), _user(COMPOSITE), _tool_result("query_readonly", output=VERIFIED)], None),
+    ("composite_second_query_native", [_system(), _user(COMPOSITE), _tool_result("query_readonly", output=VERIFIED)], WITH_SEARCH),
+    ("composite_answered", [_system(contract=()), _user(COMPOSITE), _tool_result("query_readonly", output=VERIFIED), _tool_result("query_readonly", output=NET)], None),
+    ("composite_shared_window", [_system(contract=()), _user(COMPOSITE_SHARED)], None),
+    ("composite_month_carried", [_system(contract=()), _user(COMPOSITE_CARRIED)], None),
+    ("composite_ambiguous", [_system(contract=()), _user(COMPOSITE_AMBIGUOUS)], None),
+    ("composite_ambiguous_answered", [_system(contract=()), _user(COMPOSITE_AMBIGUOUS), _user("按支付金额")], None),
+    ("composite_one_part", [_system(contract=()), _user("2026年9月的已支付订单总额分别是多少？")], None),
+    ("composite_delegate", [_system(contract=("search_catalog", "query_readonly", "delegate")), _user(COMPOSITE), _tool_result("search_catalog", output={})], None),
+    ("composite_delegate_answered", [_system(contract=("delegate",)), _user(COMPOSITE), _tool_result("query_readonly", output=VERIFIED)], None),
+    ("composite_load_skill", [_system(contract=("search_catalog", "query_readonly", "load_skill")), _user(COMPOSITE)], None),
+    ("composite_skill_loaded", [_system(contract=("query_readonly", "load_skill")), _skill(), _user(COMPOSITE)], None),
+    ("composite_baseline", [_system(baseline=True), _user("QUESTION\n" + COMPOSITE + "\n\nAPPROVED_TABLE_SCHEMA\n{}")], None),
+    # A sub-agent's question names its window in ISO form; it wins over a month in the same text.
+    ("iso_window", [_system(contract=()), _user(SUBTASK)], None),
+    ("iso_window_over_month", [_system(contract=()), _user(SUBTASK + "2026年3月")], None),
 ]
 
 

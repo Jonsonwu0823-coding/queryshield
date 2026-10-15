@@ -37,8 +37,6 @@ import subprocess
 import sys
 import tempfile
 import time
-from urllib.error import URLError
-from urllib.request import urlopen
 from uuid import uuid4
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -106,12 +104,8 @@ def fact_values(facts: list[dict], metric_id: str) -> list[int]:
 
 
 def fact_windows(facts: list[dict], metric_id: str) -> list[dict[str, str]]:
-    result = []
-    for item in facts:
-        window = item.get("time_window")
-        if item.get("metric_id") == metric_id and isinstance(window, Mapping):
-            result.append({"start": str(window.get("start")), "end": str(window.get("end"))})
-    return result
+    windows = [_window_of(item) for item in facts if item.get("metric_id") == metric_id]
+    return [{"start": start, "end": end} for start, end in filter(None, windows)]
 
 
 _DEMO_DATA: list = []
@@ -135,7 +129,7 @@ def _utc_seconds(value: object) -> int | None:
     return int(parsed.timestamp())
 
 
-def verified_fact_counts(question: Mapping[str, object], obs: Mapping[str, object], data=None) -> tuple[int, int]:
+def verified_fact_counts(question: Mapping[str, object], obs: Mapping[str, object]) -> tuple[int, int]:
     """(checked, mismatched) for every verified fact of one question (all questions).
 
     Each fact's value must equal the generator's own value for the question's tenant,
@@ -153,7 +147,7 @@ def verified_fact_counts(question: Mapping[str, object], obs: Mapping[str, objec
         if tenant is None or start is None or end is None or not _is_int(fact.get("value")):
             mismatched += 1
             continue
-        expected = gen.expected_metrics(data or demo_data(), tenant, start, end).get(str(fact.get("metric_id")))
+        expected = gen.expected_metrics(demo_data(), tenant, start, end).get(str(fact.get("metric_id")))
         if expected is None or expected != fact["value"]:
             mismatched += 1
     return checked, mismatched
@@ -276,15 +270,21 @@ def judge_composite(question: Mapping[str, object], obs: Mapping[str, object]) -
     )
 
 
+def _clarify_failures(first: Mapping[str, object]) -> list[str]:
+    """The first request must have stopped on the catalog's own question."""
+
+    if not (first.get("http_status") == 202 and first.get("status") == "WAITING_USER"):
+        return ["clarify_not_triggered"]
+    if not first.get("pending_is_catalog_question"):
+        return ["clarify_question_not_from_catalog"]
+    return []
+
+
 def judge_composite_clarify(question: Mapping[str, object], obs: Mapping[str, object]) -> dict:
     """An ambiguous word in a composite question: the server asks the catalog question first, then every part is judged."""
 
-    first = obs.get("first") or {}
     outcome = judge_composite(question, obs)
-    if not (first.get("http_status") == 202 and first.get("status") == "WAITING_USER"):
-        outcome["hard_failures"] = sorted({*outcome["hard_failures"], "clarify_not_triggered"})
-    elif not first.get("pending_is_catalog_question"):
-        outcome["hard_failures"] = sorted({*outcome["hard_failures"], "clarify_question_not_from_catalog"})
+    outcome["hard_failures"] = sorted({*outcome["hard_failures"], *_clarify_failures(obs.get("first") or {})})
     return outcome
 
 
@@ -415,10 +415,7 @@ def judge_clarify_resume(question: Mapping[str, object], obs: Mapping[str, objec
 
     hard, gaps = _common_failures(obs)
     first = obs.get("first") or {}
-    if not (first.get("http_status") == 202 and first.get("status") == "WAITING_USER"):
-        hard.append("clarify_not_triggered")
-    elif not first.get("pending_is_catalog_question"):
-        hard.append("clarify_question_not_from_catalog")
+    hard += _clarify_failures(first)
     resumed = judge_metric({**question, "kind": "metric"}, obs)
     if "answer_states_basis" in obs and not obs["answer_states_basis"] and not resumed["hard_failures"]:
         hard.append("basis_not_stated")
@@ -626,16 +623,12 @@ def _error_code(body: Mapping[str, object]) -> object:
 def _completion_tokens(state_path: Path, run_id: str) -> list:
     """Completion tokens of every model call of the run, from the run's stored events (None = unknown)."""
 
-    from queryshield.db.state_store import StateStore
-
     tokens: list = []
-    with StateStore(state_path) as store:
-        for event in store.events(run_id):
-            payload = event.get("payload") or {}
-            if event.get("type") == "agent_step" and payload.get("kind") == "model_call":
-                usage = payload.get("usage") if isinstance(payload.get("usage"), Mapping) else {}
-                value = usage.get("completion_tokens")
-                tokens.append(int(value) if _is_int(value) else None)
+    for payload in smoke.agent_steps(state_path, run_id):
+        if payload.get("kind") == "model_call":
+            usage = payload.get("usage") if isinstance(payload.get("usage"), Mapping) else {}
+            value = usage.get("completion_tokens")
+            tokens.append(int(value) if _is_int(value) else None)
     return tokens
 
 
@@ -674,7 +667,7 @@ def _run_shape(state_path: Path, run_id: str) -> dict:
 
     with StateStore(state_path) as store:
         run = store.get_run(run_id) or {}
-        steps = [event.get("payload") or {} for event in store.events(run_id) if event.get("type") == "agent_step"]
+    steps = smoke.agent_steps(state_path, run_id)
     subtasks = [len(step.get("subtasks") or []) for step in steps if step.get("kind") == "delegation"]
     return {
         "profile": (run.get("run_config") or {}).get("profile"),
@@ -818,6 +811,50 @@ def _blocked(reason: str, **extra) -> int:
     return 2
 
 
+def _start_own_service(args: argparse.Namespace) -> tuple[subprocess.Popen, str, dict[str, str], Path]:
+    """A service of its own on the demo data: the process, its base URL, its four tokens and its state store."""
+
+    workdir = Path(tempfile.mkdtemp(prefix="demo-run-"))
+    state_path = workdir / "state.sqlite3"
+    tokens = {name: uuid4().hex for name in TOKEN_ENVIRONMENT}
+    env = os.environ.copy()
+    for name in ("QUERYSHIELD_FAKE_DB", "QUERYSHIELD_AGENT_PROFILE", "QUERYSHIELD_RETRIEVAL", "QUERYSHIELD_METADATA_TOOLS"):
+        env.pop(name, None)
+    env.update(
+        {
+            "QUERYSHIELD_DEMO_DATASET": DEMO_DATASET,
+            "QUERYSHIELD_PROVIDER_MODE": smoke.SERVER_MODE[args.mode],
+            "QUERYSHIELD_MODEL_PROTOCOL": args.model_protocol,
+            "QUERYSHIELD_STATE_STORE_PATH": str(state_path),
+            "QUERYSHIELD_CALL_STORE_PATH": str(workdir / "calls.sqlite3"),
+            **{variable: tokens[name] for name, variable in TOKEN_ENVIRONMENT.items()},
+            "PYTHONPATH": str(SRC_ROOT) + os.pathsep + env.get("PYTHONPATH", ""),
+        }
+    )
+    if args.profile is not None:
+        env["QUERYSHIELD_AGENT_PROFILE"] = args.profile
+    process, base = smoke.start_service(env)
+    return process, base, tokens, state_path
+
+
+def _run_config_snapshot_ids(state_path: Path, run_ids: list[str]) -> list[str]:
+    """The knowledge snapshot each run's configuration recorded (never the URL).
+
+    The snapshot label (catalog-v2 for the frozen knowledge base, catalog-v4 for the demo
+    one) is reported next to the catalog version of the facts and run configuration.
+    """
+
+    from queryshield.db.state_store import StateStore
+
+    snapshot_ids: set[str] = set()
+    with StateStore(state_path) as store:
+        for run_id in run_ids:
+            config = ((store.get_run(run_id) or {}).get("run_config") or {}).get("agent_run_config") or {}
+            if config.get("knowledge_snapshot_id"):
+                snapshot_ids.add(str(config["knowledge_snapshot_id"]))
+    return sorted(snapshot_ids)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--evidence-dir", type=Path, required=True)
@@ -849,8 +886,9 @@ def main(argv: list[str] | None = None) -> int:
     missing = [name for name in smoke.required_names(args.mode) if not os.getenv(name, "").strip()]
     if missing:
         return _blocked("missing_configuration", missing_configuration_names=missing)
-    if args.mode == "fake-upstream" and smoke.names_not_fake_upstream(os.environ):
-        return _blocked("model_names_not_fake_upstream", names=smoke.names_not_fake_upstream(os.environ))
+    wrong_names = smoke.names_not_fake_upstream(os.environ) if args.mode == "fake-upstream" else []
+    if wrong_names:
+        return _blocked("model_names_not_fake_upstream", names=wrong_names)
     external = None
     if args.base_url:
         tokens, problems = tokens_from_environment(os.environ)
@@ -891,51 +929,13 @@ def main(argv: list[str] | None = None) -> int:
     if external is not None:
         tokens, state_path, base = external
     else:
-        workdir = Path(tempfile.mkdtemp(prefix="demo-run-"))
-        state_path = workdir / "state.sqlite3"
-        tokens = {name: uuid4().hex for name in ("a-requester", "a-approver", "b-requester", "b-approver")}
-        env = os.environ.copy()
-        for name in ("QUERYSHIELD_FAKE_DB", "QUERYSHIELD_AGENT_PROFILE", "QUERYSHIELD_RETRIEVAL", "QUERYSHIELD_METADATA_TOOLS"):
-            env.pop(name, None)
-        env.update(
-            {
-                "QUERYSHIELD_DEMO_DATASET": DEMO_DATASET,
-                "QUERYSHIELD_PROVIDER_MODE": smoke.SERVER_MODE[args.mode],
-                "QUERYSHIELD_MODEL_PROTOCOL": args.model_protocol,
-                "QUERYSHIELD_STATE_STORE_PATH": str(state_path),
-                "QUERYSHIELD_CALL_STORE_PATH": str(workdir / "calls.sqlite3"),
-                "QUERYSHIELD_TOKEN_A_REQUESTER": tokens["a-requester"],
-                "QUERYSHIELD_TOKEN_A_APPROVER": tokens["a-approver"],
-                "QUERYSHIELD_TOKEN_B_REQUESTER": tokens["b-requester"],
-                "QUERYSHIELD_TOKEN_B_APPROVER": tokens["b-approver"],
-                "PYTHONPATH": str(SRC_ROOT) + os.pathsep + env.get("PYTHONPATH", ""),
-            }
-        )
-        if args.profile is not None:
-            env["QUERYSHIELD_AGENT_PROFILE"] = args.profile
-        port = smoke._free_port()
-        base = f"http://127.0.0.1:{port}"
-        process = subprocess.Popen(
-            [sys.executable, "-m", "uvicorn", "queryshield.api.main:app", "--host", "127.0.0.1", "--port", str(port)],
-            cwd=PROJECT_ROOT,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        process, base, tokens, state_path = _start_own_service(args)
     records: list[dict] = []
     raw_records: list[dict] = []
     run_ids: list[str] = []
     fact_catalog_versions: set[str] = set()
     try:
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            try:
-                with urlopen(base + "/health", timeout=2) as response:
-                    if response.status == 200:
-                        break
-            except (URLError, OSError):
-                time.sleep(0.2)
-        else:
+        if not smoke.service_healthy(base):
             return _blocked("server_not_healthy")
         for question in questions:
             if fake_scripted_only(args.mode, question):
@@ -963,24 +963,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({key: records[-1].get(key) for key in ("id", "verdict", "hard_failures", "known_gaps")}, ensure_ascii=False), flush=True)
     finally:
         if process is not None:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=10)
+            smoke.stop_service(process)
 
-    # Versions as recorded by the server for these runs (never the URL): the knowledge snapshot
-    # label (catalog-v2 for the frozen knowledge base, catalog-v4 for the demo one) next to the
-    # catalog version of the facts and run configuration (O8).
-    from queryshield.db.state_store import StateStore
-
-    snapshot_ids: set[str] = set()
-    with StateStore(state_path) as store:
-        for run_id in run_ids:
-            config = ((store.get_run(run_id) or {}).get("run_config") or {}).get("agent_run_config") or {}
-            if config.get("knowledge_snapshot_id"):
-                snapshot_ids.add(str(config["knowledge_snapshot_id"]))
+    snapshot_ids = _run_config_snapshot_ids(state_path, run_ids)
     hard_failures = sorted({f"{r['id']}:{item}" for r in records for item in r.get("hard_failures", [])})
     hard_failures += [f"setup:{item['check']}" for item in setup if not item.get("ok")]
     model_names, failures = smoke.model_labels(args.mode, state_path, run_ids, os.environ)
@@ -1008,7 +993,7 @@ def main(argv: list[str] | None = None) -> int:
             "knowledge_version": next((item.get("knowledge_version") for item in setup if item["check"] == "demo_snapshot"), None),
             "knowledge_snapshot_catalog_version": next((item.get("catalog_version") for item in setup if item["check"] == "demo_snapshot"), None),
             "fact_catalog_versions": sorted(fact_catalog_versions),
-            "run_config_knowledge_snapshot_ids": sorted(snapshot_ids),
+            "run_config_knowledge_snapshot_ids": snapshot_ids,
         },
         "note": "ids, status codes, terminal states, counts and numbers only; no question or answer text, customer names, URLs or credentials",
     }

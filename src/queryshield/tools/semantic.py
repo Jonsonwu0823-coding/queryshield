@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 import hashlib
 from typing import Any
@@ -272,22 +272,9 @@ class ControlledTools:
     ) -> dict[str, object]:
         """The evaluation sidecar record of one retrieval: what was returned and why it was visible."""
 
-        index = getattr(self.retriever, "index", None)
-        chunk_by_id = {
-            str(getattr(chunk, "chunk_id", "")): chunk
-            for chunk in getattr(index, "chunks", ())
-            if getattr(chunk, "chunk_id", None)
-        }
-        source_by_id = {
-            str(getattr(source, "source_id", "")): source
-            for source in getattr(getattr(self.retriever, "snapshot", None), "source_records", ())
-            if getattr(source, "source_id", None)
-        }
-        catalog_by_id = {
-            str(getattr(entry, "id", "")): entry
-            for entry in getattr(self.catalog, "entries", ())
-            if getattr(entry, "id", None)
-        }
+        chunk_by_id = _by_id(getattr(getattr(self.retriever, "index", None), "chunks", ()), "chunk_id")
+        source_by_id = _by_id(getattr(getattr(self.retriever, "snapshot", None), "source_records", ()), "source_id")
+        catalog_by_id = _by_id(getattr(self.catalog, "entries", ()), "id")
         return {
             "run_id": context.run_id,
             "tenant_id": context.tenant_id,
@@ -304,15 +291,7 @@ class ControlledTools:
                     "source_id": item.get("source_id"),
                     "version": item.get("version"),
                     "text_sha256": hashlib.sha256(str(item.get("text", "")).encode("utf-8")).hexdigest(),
-                    "source_kind": (
-                        "knowledge_document"
-                        if item.get("id") in chunk_by_id
-                        else (
-                            "catalog_retrieval_candidate"
-                            if item.get("id") in catalog_by_id
-                            else "retriever_candidate"
-                        )
-                    ),
+                    "source_kind": _source_kind(item.get("id"), chunk_by_id, catalog_by_id),
                     "visibility_check": self._retrieval_item_visibility(
                         item,
                         context=context,
@@ -581,17 +560,19 @@ class ControlledTools:
             raise ToolError("result_not_found", "the result is not visible in this run")
         self._evidence[(context.run_id, evidence.result_id)] = evidence
 
-    def get_retrieval_evidence(
-        self,
-        retrieval_id: str,
-        *,
-        context: ExecutionContext,
-    ) -> Any:
-        _require_context(context)
-        evidence = self._retrieval_evidence.get((context.run_id, retrieval_id))
-        if evidence is None or evidence.run_id != context.run_id:
-            raise ToolError("retrieval_not_found", "the retrieval is not visible in this run")
-        return evidence
+
+def _by_id(items: Iterable[object], attribute: str) -> dict[str, Any]:
+    """Each item under its ``attribute``; items without one are left out."""
+
+    return {str(getattr(item, attribute)): item for item in items if getattr(item, attribute, None)}
+
+
+def _source_kind(item_id: object, chunk_by_id: Mapping[str, object], catalog_by_id: Mapping[str, object]) -> str:
+    if item_id in chunk_by_id:
+        return "knowledge_document"
+    if item_id in catalog_by_id:
+        return "catalog_retrieval_candidate"
+    return "retriever_candidate"
 
 
 __all__ = ["ControlledTools", "ToolError"]

@@ -84,18 +84,23 @@ def names_not_fake_upstream(environ) -> list[str]:
     return [name for name in FAKE_UPSTREAM_MODEL_NAMES if environ.get(name, "").strip() != FAKE_UPSTREAM_MODEL]
 
 
-def recorded_model_names(state_path: Path, run_ids, environ) -> list[str]:
-    """The chat model names the runs' model_call events recorded, and the embedding model the server used."""
+def agent_steps(state_path: Path, run_id: str) -> list[dict]:
+    """The payloads of a run's agent_step events, read from the local run store."""
 
     from queryshield.db.state_store import StateStore
 
-    names = {environ.get("QUERYSHIELD_EMBEDDING_MODEL_NAME", "").strip()} - {""}
     with StateStore(state_path) as store:
-        for run_id in run_ids:
-            for event in store.events(run_id):
-                payload = event.get("payload") or {}
-                if event.get("type") == "agent_step" and payload.get("kind") == "model_call" and isinstance(payload.get("model"), str):
-                    names.add(payload["model"])
+        return [event.get("payload") or {} for event in store.events(run_id) if event.get("type") == "agent_step"]
+
+
+def recorded_model_names(state_path: Path, run_ids, environ) -> list[str]:
+    """The chat model names the runs' model_call events recorded, and the embedding model the server used."""
+
+    names = {environ.get("QUERYSHIELD_EMBEDDING_MODEL_NAME", "").strip()} - {""}
+    for run_id in run_ids:
+        for payload in agent_steps(state_path, run_id):
+            if payload.get("kind") == "model_call" and isinstance(payload.get("model"), str):
+                names.add(payload["model"])
     return sorted(names)
 
 
@@ -149,55 +154,32 @@ def _facts(body: dict) -> list[dict]:
 def _declared_metrics(state_path: Path, run_id: str) -> list[list[str]]:
     """The metrics each query_readonly call declared, read from the local run store."""
 
-    from queryshield.db.state_store import StateStore
-
     declared: list[list[str]] = []
-    with StateStore(state_path) as store:
-        for event in store.events(run_id):
-            payload = event.get("payload") or {}
-            if event.get("type") == "agent_step" and payload.get("kind") == "tool_call" and payload.get("tool_name") == "query_readonly":
-                summary = payload.get("input_summary") or {}
-                metrics = summary.get("declared_metrics")
-                declared.append([str(item) for item in metrics] if isinstance(metrics, list) else [])
+    for payload in agent_steps(state_path, run_id):
+        if payload.get("kind") == "tool_call" and payload.get("tool_name") == "query_readonly":
+            metrics = (payload.get("input_summary") or {}).get("declared_metrics")
+            declared.append([str(item) for item in metrics] if isinstance(metrics, list) else [])
     return declared
 
 
 def _parse_failures(state_path: Path, run_id: str) -> list[dict]:
     """Server-fixed parse error text and value-free action shape of rejected proposals."""
 
-    from queryshield.db.state_store import StateStore
-
-    failures: list[dict] = []
-    with StateStore(state_path) as store:
-        for event in store.events(run_id):
-            payload = event.get("payload") or {}
-            if event.get("type") == "agent_step" and payload.get("kind") == "proposal_validation":
-                failures.append({
-                    "error_code": payload.get("error_code"),
-                    "error_detail": payload.get("error_detail"),
-                    "action_shape": payload.get("action_shape"),
-                })
-    return failures
+    return [
+        {"error_code": payload.get("error_code"), "error_detail": payload.get("error_detail"), "action_shape": payload.get("action_shape")}
+        for payload in agent_steps(state_path, run_id)
+        if payload.get("kind") == "proposal_validation"
+    ]
 
 
 def _clarification_reviews(state_path: Path, run_id: str) -> list[dict]:
     """Fixed identifiers of the server's ask reviews for a run (never the question text)."""
 
-    from queryshield.db.state_store import StateStore
-
-    reviews: list[dict] = []
-    with StateStore(state_path) as store:
-        for event in store.events(run_id):
-            payload = event.get("payload") or {}
-            if event.get("type") == "agent_step" and payload.get("kind") == "clarification_review":
-                reviews.append({
-                    "decision": payload.get("decision"),
-                    "error_code": payload.get("error_code"),
-                    "clarification_ids": payload.get("clarification_ids"),
-                    "id_status": payload.get("id_status"),
-                    "signal": payload.get("signal"),
-                })
-    return reviews
+    return [
+        {name: payload.get(name) for name in ("decision", "error_code", "clarification_ids", "id_status", "signal")}
+        for payload in agent_steps(state_path, run_id)
+        if payload.get("kind") == "clarification_review"
+    ]
 
 
 _TRACE_IDENTIFIER = re.compile(r"[a-z][a-z0-9_]*")
@@ -255,13 +237,7 @@ def action_trace(payloads: list[dict]) -> list[str]:
 
 
 def _action_trace(state_path: Path, run_id: str) -> list[str]:
-    from queryshield.db.state_store import StateStore
-
-    with StateStore(state_path) as store:
-        payloads = [
-            event.get("payload") or {} for event in store.events(run_id) if event.get("type") == "agent_step"
-        ]
-    return action_trace(payloads)
+    return action_trace(agent_steps(state_path, run_id))
 
 
 def judge_time_request(
@@ -625,6 +601,43 @@ def _run_steps(run: _SmokeRun, base: str, requester: str, approver: str, state_p
         run.hard_failures.append("approval_not_triggered")
 
 
+def start_service(env: dict[str, str]) -> tuple[subprocess.Popen, str]:
+    """The product service on a free local port, started with ``env``, and its base URL."""
+
+    port = _free_port()
+    process = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "queryshield.api.main:app", "--host", "127.0.0.1", "--port", str(port)],
+        cwd=PROJECT_ROOT,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return process, f"http://127.0.0.1:{port}"
+
+
+def service_healthy(base: str) -> bool:
+    """Whether ``/health`` answers 200 within 30 seconds."""
+
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        try:
+            with urlopen(base + "/health", timeout=2) as response:
+                if response.status == 200:
+                    return True
+        except (URLError, OSError):
+            time.sleep(0.2)
+    return False
+
+
+def stop_service(process: subprocess.Popen) -> None:
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=10)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence-dir", type=Path, required=True)
@@ -641,8 +654,9 @@ def main() -> int:
     if missing:
         print(json.dumps({"status": "blocked", "missing_configuration_names": missing}))
         return 2
-    if args.mode == "fake-upstream" and names_not_fake_upstream(os.environ):
-        print(json.dumps({"status": "blocked", "reason": "model_names_not_fake_upstream", "names": names_not_fake_upstream(os.environ)}))
+    wrong_names = names_not_fake_upstream(os.environ) if args.mode == "fake-upstream" else []
+    if wrong_names:
+        print(json.dumps({"status": "blocked", "reason": "model_names_not_fake_upstream", "names": wrong_names}))
         return 2
     args.evidence_dir.mkdir(parents=True, exist_ok=True)
     if not _database_reachable():
@@ -675,26 +689,10 @@ def main() -> int:
         "QUERYSHIELD_TOKEN_A_APPROVER": approver,
         "PYTHONPATH": str(SRC_ROOT) + os.pathsep + env.get("PYTHONPATH", ""),
     })
-    port = _free_port()
-    base = f"http://127.0.0.1:{port}"
-    process = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "queryshield.api.main:app", "--host", "127.0.0.1", "--port", str(port)],
-        cwd=PROJECT_ROOT,
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    process, base = start_service(env)
     run = _SmokeRun()
     try:
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline:
-            try:
-                with urlopen(base + "/health", timeout=2) as response:
-                    if response.status == 200:
-                        break
-            except (URLError, OSError):
-                time.sleep(0.2)
-        else:
+        if not service_healthy(base):
             print(json.dumps({"status": "blocked", "reason": "server_not_healthy"}))
             return 2
         try:
@@ -708,12 +706,7 @@ def main() -> int:
             run.hard_failures.append(f"smoke_error:{run.step}:{type(error).__name__}")
             run.records.append({"step": run.step, "error": type(error).__name__})
     finally:
-        process.terminate()
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=10)
+        stop_service(process)
 
     records, hard_failures, known_gaps = run.records, run.hard_failures, run.known_gaps
     for record in records:

@@ -25,6 +25,10 @@ class ModelUsage:
         }
 
 
+# The token counts of a chat call's usage, in this order wherever they are listed.
+TOKEN_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
+
+
 def usage_is_consistent(prompt: object, completion: object, total: object) -> bool:
     """Token counts count as known only when each is a plain non-negative integer and the parts add up."""
 

@@ -77,7 +77,7 @@ from queryshield.agent.proposals import (
     parse_query_proposal,
     proposal_shape_summary,
 )
-from queryshield.providers.contracts import ModelAdapter, ModelCallResult, ModelProviderError, usage_is_consistent
+from queryshield.providers.contracts import TOKEN_FIELDS, ModelAdapter, ModelCallResult, ModelProviderError, usage_is_consistent
 from queryshield.tools.semantic import ControlledTools, ToolError
 from queryshield.agent.tool_execution import (
     CLARIFICATION_VALUE_UNSUPPORTED_CODE,
@@ -157,6 +157,10 @@ RunStatus = Literal[
 _InternalStatus = Literal[
     "running", "succeeded", "denied", "waiting_user", "waiting_approval", "failed", "limit_reached"
 ]
+
+
+# The tool errors that make a run wait instead of ending it: an approval, an answer to the catalog's question.
+_RUN_PAUSES = (ApprovalRequiredError, ClarificationRequiredError)
 
 
 class RunResumeError(ValueError):
@@ -344,30 +348,7 @@ class BoundedAgent:
             raise TypeError("context must be an ExecutionContext")
         normalized_request_window = _request_window(request_time_window)
         if has_explicit_foreign_tenant(question, context.tenant_id):
-            event = {
-                "kind": "authorization",
-                "status": "denied",
-                "error_code": "forbidden",
-                "reason_code": "explicit_foreign_tenant_request",
-            }
-            return AgentRunResult(
-                status="denied",
-                run_id=context.run_id,
-                run_config=self.run_config,
-                reason="request targets a tenant outside the authenticated scope",
-                error_code="forbidden",
-                action=None,
-                answer=None,
-                facts=None,
-                model_call_ids=(),
-                model_call_count=0,
-                tool_call_count=0,
-                repair_count=0,
-                usage_summary=_usage_summary((event,)),
-                events=(event,),
-                context_version=CONTEXT_VERSION,
-                elapsed_ms=0,
-            )
+            return self._foreign_tenant_denial(context)
         if context.run_id in self._waiting_checkpoints:
             raise RunResumeError(
                 "run_waiting_user",
@@ -397,6 +378,34 @@ class BoundedAgent:
         if result.status == "waiting_user":
             self._waiting_checkpoints[context.run_id] = final_state
         return result
+
+    def _foreign_tenant_denial(self, context: ExecutionContext) -> AgentRunResult:
+        """A question that names another tenant is denied before any model call."""
+
+        event = {
+            "kind": "authorization",
+            "status": "denied",
+            "error_code": "forbidden",
+            "reason_code": "explicit_foreign_tenant_request",
+        }
+        return AgentRunResult(
+            status="denied",
+            run_id=context.run_id,
+            run_config=self.run_config,
+            reason="request targets a tenant outside the authenticated scope",
+            error_code="forbidden",
+            action=None,
+            answer=None,
+            facts=None,
+            model_call_ids=(),
+            model_call_count=0,
+            tool_call_count=0,
+            repair_count=0,
+            usage_summary=_usage_summary((event,)),
+            events=(event,),
+            context_version=CONTEXT_VERSION,
+            elapsed_ms=0,
+        )
 
     def resume(
         self,
@@ -438,6 +447,8 @@ class BoundedAgent:
         # The agent is built from the stored configuration, so compare its Skills with the deployed ones.
         if self.skills is not None and self.skills.versions != self.run_config.skill_versions:
             raise RunResumeError("resume_profile_mismatch", "the run's Skills differ from the deployed Skills")
+        if self.skills is not None and not _all_deployed(_loaded_skill_ids(state), self.skills.index()):
+            raise RunResumeError("invalid_checkpoint", "checkpoint loaded a Skill that is not deployed")
         self._waiting_checkpoints[context.run_id] = state
         return self._continue_waiting(context, answer, state)
 
@@ -707,11 +718,7 @@ class BoundedAgent:
 
         if self.skills is None:
             return ()
-        return tuple(
-            self.skills.get(event["skill_id"])
-            for event in state.get("events", ())
-            if event.get("kind") == "skill_load" and event.get("status") == "succeeded"
-        )
+        return tuple(self.skills.get(skill_id) for skill_id in _loaded_skill_ids(state))
 
     @property
     def _can_delegate(self) -> bool:
@@ -865,6 +872,8 @@ class BoundedAgent:
                 self.tools,
                 action.name,
                 action.arguments,
+                # A sub-agent's run does not wait: an approval or a question leaves its subtask incomplete.
+                pauses=() if self.role is not None and self.role.ends_when_bound else _RUN_PAUSES,
                 context=state["context"],
                 metric_bindings=state.get("metric_bindings", ()),
                 request_time_window=state.get("request_time_window"),
@@ -1265,26 +1274,18 @@ class BoundedAgent:
                 code="parallel_unavailable",
                 reason="parallel execution requires a server-owned scheduler and plan",
             )
+        gate = {
+            "tool_call_count": state.get("tool_call_count", 0),
+            "tool_name": "parallel_readonly",
+            "input_summary": {"metric_ids": list(proposal.action.metric_ids)},
+            "elapsed_ms": 0,
+        }
         try:
             check_clarification(self._clarification_reading(state), proposal.action.metric_ids)
         except MetricContradictsQuestionError as exc:
-            return self._contradiction_update(
-                state,
-                exc,
-                tool_call_count=state.get("tool_call_count", 0),
-                tool_name="parallel_readonly",
-                input_summary={"metric_ids": list(proposal.action.metric_ids)},
-                elapsed_ms=0,
-            )
+            return self._contradiction_update(state, exc, **gate)
         except (ClarificationRequiredError, ClarificationValueUnsupportedError) as exc:
-            return self._clarification_gate_update(
-                state,
-                exc,
-                tool_call_count=state.get("tool_call_count", 0),
-                tool_name="parallel_readonly",
-                input_summary={"metric_ids": list(proposal.action.metric_ids)},
-                elapsed_ms=0,
-            )
+            return self._clarification_gate_update(state, exc, **gate)
         remaining_tool_budget = self.limits.max_tool_calls - state.get("tool_call_count", 0)
         try:
             result = self.parallel_scheduler.run(
@@ -1935,13 +1936,14 @@ class BoundedAgent:
         if state.get("retry_model") is True:
             return "retry"
         proposal = state.get("proposal")
-        if proposal is not None and isinstance(proposal.action, ToolCallAction):
+        action = proposal.action if proposal is not None else None
+        if isinstance(action, ToolCallAction):
             return "tool"
-        if proposal is not None and isinstance(proposal.action, ParallelReadonlyAction):
+        if isinstance(action, ParallelReadonlyAction):
             return "parallel"
-        if proposal is not None and isinstance(proposal.action, DelegateAction):
+        if isinstance(action, DelegateAction):
             return "delegate"
-        if proposal is not None and isinstance(proposal.action, LoadSkillAction):
+        if isinstance(action, LoadSkillAction):
             return "skill"
         return "finish"
 
@@ -2360,6 +2362,44 @@ def _restore_parallel_plan(raw: object, context: ExecutionContext) -> ParallelPl
     return plan
 
 
+def _all_deployed(skill_ids: Sequence[object], deployed: Mapping[str, str]) -> bool:
+    """Every name is a string the deployed library has (a stored name may be any JSON value)."""
+
+    return all(type(skill_id) is str and skill_id in deployed for skill_id in skill_ids)
+
+
+def _loaded_skill_ids(state: Mapping[str, object]) -> list[object]:
+    """The Skills a run loaded, in order, from its skill_load events."""
+
+    return [
+        event.get("skill_id")
+        for event in state.get("events", ())
+        if event.get("kind") == "skill_load" and event.get("status") == "succeeded"
+    ]
+
+
+def _restore_bounce_counts(raw: Mapping[str, object]) -> dict[str, int]:
+    """The two send-back counters: a stored count that could be lowered would buy extra send-backs."""
+
+    bounce_count = raw["clarification_bounce_count"]
+    if type(bounce_count) is not int or bounce_count < 0:
+        raise RunResumeError("invalid_checkpoint", "checkpoint clarification bounce count is invalid")
+    answer_bounce_count = raw.get("answer_bounce_count", 0)
+    if type(answer_bounce_count) is not int or answer_bounce_count < 0:
+        raise RunResumeError("invalid_checkpoint", "checkpoint answer bounce count is invalid")
+    return {"clarification_bounce_count": bounce_count, "answer_bounce_count": answer_bounce_count}
+
+
+def _restore_counts(raw: Mapping[str, object]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for name in ("model_call_count", "tool_call_count", "repair_count"):
+        value = raw.get(name)
+        if type(value) is not int or value < 0:
+            raise RunResumeError("invalid_checkpoint", f"checkpoint {name} is invalid")
+        counts[name] = value
+    return counts
+
+
 def _restore_sequences(raw: Mapping[str, object]) -> dict[str, tuple[Mapping[str, object], ...]]:
     sequences: dict[str, tuple[Mapping[str, object], ...]] = {}
     for name in ("events", "retrieval_items", "tool_results"):
@@ -2409,24 +2449,14 @@ def _deserialize_agent_checkpoint(
         type(waiting_clarification_id) is not str or not waiting_clarification_id.strip()
     ):
         raise RunResumeError("invalid_checkpoint", "checkpoint clarification rule is invalid")
-    bounce_count = raw["clarification_bounce_count"]
-    if type(bounce_count) is not int or bounce_count < 0:
-        raise RunResumeError("invalid_checkpoint", "checkpoint clarification bounce count is invalid")
-    answer_bounce_count = raw.get("answer_bounce_count", 0)
-    if type(answer_bounce_count) is not int or answer_bounce_count < 0:
-        raise RunResumeError("invalid_checkpoint", "checkpoint answer bounce count is invalid")
+    bounce_counts = _restore_bounce_counts(raw)
     run_config = _restore_run_config(raw.get("run_config"))
     bindings = _restore_bindings(raw.get("metric_bindings"))
     parallel_plan = _restore_parallel_plan(raw.get("parallel_plan"), context)
     active_elapsed = raw.get("active_elapsed_before")
     if type(active_elapsed) not in {int, float} or active_elapsed < 0:
         raise RunResumeError("invalid_checkpoint", "checkpoint active time is invalid")
-    counts: dict[str, int] = {}
-    for name in ("model_call_count", "tool_call_count", "repair_count"):
-        value = raw.get(name)
-        if type(value) is not int or value < 0:
-            raise RunResumeError("invalid_checkpoint", f"checkpoint {name} is invalid")
-        counts[name] = value
+    counts = _restore_counts(raw)
     model_call_ids = raw.get("model_call_ids")
     if type(model_call_ids) is not list or any(type(item) is not str or not item for item in model_call_ids):
         raise RunResumeError("invalid_checkpoint", "checkpoint model call identities are invalid")
@@ -2447,8 +2477,6 @@ def _deserialize_agent_checkpoint(
         parallel_plan=parallel_plan,
         active_elapsed_before=float(active_elapsed),
         clarifications=tuple(clarifications),
-        clarification_bounce_count=bounce_count,
-        answer_bounce_count=answer_bounce_count,
         status="waiting_user",
         final_action={
             "type": "ask_user",
@@ -2458,6 +2486,7 @@ def _deserialize_agent_checkpoint(
         model_call_ids=tuple(model_call_ids),
         context_version=context_version,
         elapsed_ms=int(float(active_elapsed) * 1000),
+        **bounce_counts,
         **counts,
         **sequences,
     )
@@ -2655,9 +2684,6 @@ def _source_ids_from_tool_output(output: Mapping[str, object]) -> list[str]:
 
 
 
-_USAGE_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
-
-
 def _usage_summary(events: Sequence[Mapping[str, object]]) -> dict[str, object]:
     """Token usage of the model calls in ``events``; one unknown call leaves the totals empty, never zero."""
 
@@ -2669,11 +2695,11 @@ def _usage_summary(events: Sequence[Mapping[str, object]]) -> dict[str, object]:
         if type(call_id) is str and call_id:
             model_call_ids.append(call_id)
         usage = event.get("usage")
-        tokens = [usage.get(name) if isinstance(usage, Mapping) else None for name in _USAGE_FIELDS]
+        tokens = [usage.get(name) if isinstance(usage, Mapping) else None for name in TOKEN_FIELDS]
         if event.get("usage_status") == "known" and usage_is_consistent(*tokens):
-            known.append(dict(zip(_USAGE_FIELDS, tokens)))
+            known.append(dict(zip(TOKEN_FIELDS, tokens)))
     unknown_count = len(model_events) - len(known)
-    known_totals = {name: sum(usage[name] for usage in known) if known else None for name in _USAGE_FIELDS}
+    known_totals = {name: sum(usage[name] for usage in known) if known else None for name in TOKEN_FIELDS}
     all_known = bool(model_events) and unknown_count == 0
     return {
         "status": "not_run" if not model_events else ("known" if unknown_count == 0 else "unknown"),
@@ -2681,8 +2707,8 @@ def _usage_summary(events: Sequence[Mapping[str, object]]) -> dict[str, object]:
         "known_call_count": len(known),
         "unknown_call_count": unknown_count,
         "model_call_ids": model_call_ids,
-        **{f"known_{name}": known_totals[name] for name in _USAGE_FIELDS},
-        **{name: known_totals[name] if all_known else None for name in _USAGE_FIELDS},
+        **{f"known_{name}": known_totals[name] for name in TOKEN_FIELDS},
+        **{name: known_totals[name] if all_known else None for name in TOKEN_FIELDS},
     }
 
 

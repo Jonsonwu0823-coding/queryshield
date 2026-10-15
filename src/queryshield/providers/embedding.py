@@ -20,7 +20,7 @@ from typing import Any, Literal
 import httpx
 
 from queryshield.providers.contracts import finite_float, new_local_call_id, new_request_id
-from queryshield.providers.http import base_url_is_valid, endpoint_url, response_model, send_json
+from queryshield.providers.http import base_url_is_valid, endpoint_url, failed_call_fields, response_model, send_json
 
 
 EmbeddingMode = Literal["fake", "real"]
@@ -394,12 +394,7 @@ class OpenAICompatibleEmbedding:
         provider_request_id = (response.headers.get("x-request-id") or None) if response is not None else None
         last = sent.attempts[-1]
         if last["status"] == "failed":
-            raise fail(
-                last["error_code"],
-                provider_request_id=provider_request_id,
-                http_status=last.get("http_status"),
-                provider_error_code=last.get("provider_error_code"),
-            ) from sent.error
+            raise fail(last["error_code"], provider_request_id=provider_request_id) from sent.error
         try:
             body = response.json()
             provider_call_id, vectors, total_tokens = _parse_embedding_response(
@@ -495,10 +490,8 @@ def _failed_record(
     model_call_id: str,
     error_code: str,
     *,
-    attempts: Sequence[Mapping[str, object]],
+    attempts: tuple[dict[str, object], ...],
     provider_request_id: str | None = None,
-    http_status: int | None = None,
-    provider_error_code: str | None = None,
 ) -> dict[str, object]:
     record: dict[str, object] = {
         "status": "failed",
@@ -514,12 +507,8 @@ def _failed_record(
         "usage_status": "unknown",
         "usage": None,
         "error_code": error_code,
+        **failed_call_fields(attempts),
     }
-    if http_status is not None:
-        record["http_status"] = http_status
-    if provider_error_code is not None:
-        record["provider_error_code"] = provider_error_code
-    record["attempts"] = [dict(attempt) for attempt in attempts]
     return record
 
 

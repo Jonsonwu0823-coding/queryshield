@@ -19,6 +19,7 @@ from multi_agent_support import cite_all
 from test_metric_intent import _tools
 from test_skill_context import system_messages_are_trusted
 from test_skill_files import skill_text, write_skill
+from test_clarification import service  # noqa: F401  (fixture)
 
 SKILLS = product_skills()
 CONFIG = product_run_config(B1S_PROFILE, catalog=load_default_catalog(), retriever=None)
@@ -228,3 +229,69 @@ def test_a_skills_run_is_not_resumed_by_the_b1_agent() -> None:
     with pytest.raises(RunResumeError) as caught:
         agent.resume_from_checkpoint(CONTEXT, "2026年9月", checkpoint)
     assert caught.value.code == "resume_profile_mismatch"
+
+
+@pytest.mark.parametrize(
+    "skill_id", ["no-such-skill", None, 5, ["composite-question"], {"name": "composite-question"}],
+    ids=["unknown_name", "no_name", "integer", "list", "mapping"],
+)
+def test_a_checkpoint_that_loaded_a_skill_that_is_not_deployed_is_refused_as_invalid(skill_id) -> None:
+    checkpoint = _waiting_checkpoint()
+    [loaded] = [event for event in checkpoint["events"] if event.get("kind") == "skill_load"]
+    if skill_id is None:
+        del loaded["skill_id"]
+    else:
+        loaded["skill_id"] = skill_id
+    model = Steps([SEPTEMBER_GROSS, cite_all])
+
+    with pytest.raises(RunResumeError) as caught:
+        skills_agent(model).resume_from_checkpoint(CONTEXT, "2026年9月", checkpoint)
+
+    assert (caught.value.code, str(caught.value)) == ("invalid_checkpoint", "invalid_checkpoint: checkpoint loaded a Skill that is not deployed")
+    assert model.messages == []  # refused before any model call
+
+
+@pytest.mark.parametrize("skill_id", [5, ["composite-question"], {"name": "composite-question"}], ids=["integer", "list", "mapping"])
+def test_a_stored_skill_name_that_is_not_a_string_leaves_the_run_waiting_with_checkpoint_invalid(service, monkeypatch, skill_id) -> None:
+    from test_approval_api_pins import _edit, _resume_fails
+    from test_clarification import _query, _start
+    from queryshield.approval.service import ApprovalConflict
+
+    monkeypatch.setenv("QUERYSHIELD_AGENT_PROFILE", "b1s")
+    run = _start(service, "2026年9月销售额是多少？", [load(), _query()])
+    assert run["status"] == "WAITING_USER"
+
+    def rename(agent_checkpoint) -> None:
+        [loaded] = [event for event in agent_checkpoint["events"] if event.get("kind") == "skill_load"]
+        loaded["skill_id"] = skill_id
+
+    _edit(service[0], run, agent=rename)
+    _resume_fails(service, run, ApprovalConflict, "checkpoint_invalid")
+
+
+def test_a_run_that_loaded_every_deployed_skill_resumes() -> None:
+    first = skills_agent(Steps([load(), load("customer-ranking"), ASK]))
+    waiting = first.run(CONTEXT, UNDATED)
+    assert waiting.status == "waiting_user"
+    checkpoint = first.export_waiting_checkpoint(CONTEXT.run_id)
+    assert sorted(e["skill_id"] for e in checkpoint["events"] if e.get("kind") == "skill_load") == sorted(SKILLS.index())
+
+    result = skills_agent(Steps([SEPTEMBER_GROSS, cite_all])).resume_from_checkpoint(CONTEXT, "2026年9月", checkpoint)
+
+    assert result.status == "succeeded"
+
+
+def test_a_checkpoint_with_one_deployed_and_one_undeployed_skill_is_refused_as_invalid() -> None:
+    first = skills_agent(Steps([load(), load("customer-ranking"), ASK]))
+    assert first.run(CONTEXT, UNDATED).status == "waiting_user"
+    checkpoint = first.export_waiting_checkpoint(CONTEXT.run_id)
+    loads = [event for event in checkpoint["events"] if event.get("kind") == "skill_load"]
+    assert [event["skill_id"] for event in loads] == ["composite-question", "customer-ranking"]
+    loads[1]["skill_id"] = "no-such-skill"  # the first stays a deployed Skill
+    model = Steps([SEPTEMBER_GROSS, cite_all])
+
+    with pytest.raises(RunResumeError) as caught:
+        skills_agent(model).resume_from_checkpoint(CONTEXT, "2026年9月", checkpoint)
+
+    assert (caught.value.code, str(caught.value)) == ("invalid_checkpoint", "invalid_checkpoint: checkpoint loaded a Skill that is not deployed")
+    assert model.messages == []  # refused before any model call

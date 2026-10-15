@@ -41,7 +41,7 @@ from queryshield.facts import FactResolver
 from queryshield.policy.sql import SQLPolicyError, parse_readonly_select
 from queryshield.tools.semantic import ControlledTools
 from queryshield.tools.semantic import ToolError
-from queryshield.providers.contracts import ModelCallResult, ModelProviderError
+from queryshield.providers.contracts import ModelCallResult, ModelProviderError, usage_is_consistent
 
 
 _FIXED_WINDOW = dict(NET_FEN_TIME_WINDOW)
@@ -1531,12 +1531,7 @@ def _usage_summary_from_events(events: Sequence[Mapping[str, object]]) -> dict[s
             prompt = usage.get("prompt_tokens")
             completion = usage.get("completion_tokens")
             total = usage.get("total_tokens")
-            if (
-                type(prompt) is int and prompt >= 0
-                and type(completion) is int and completion >= 0
-                and type(total) is int and total >= 0
-                and prompt + completion == total
-            ):
+            if usage_is_consistent(prompt, completion, total):
                 known.append(usage)
                 continue
         unknown_count += 1

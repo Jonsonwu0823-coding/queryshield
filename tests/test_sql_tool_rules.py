@@ -1449,3 +1449,9 @@ def test_the_parameter_object_is_checked_before_the_sql_is_parsed() -> None:
     approved = _error(execute_approved_query, tools, _pending(**arguments), context=_context())
     assert (approved.code, approved.message) == ("reserved_parameter", "identity parameters are server-owned")
     assert connection.executed == []
+
+
+def test_the_metrics_a_projection_proves_are_the_paid_count_and_the_gross_amount() -> None:
+    from queryshield.agent.tool_execution import SQL_PROJECTION_METRICS
+
+    assert SQL_PROJECTION_METRICS == {"gross_fen", "paid_count"}

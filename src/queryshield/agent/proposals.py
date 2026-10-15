@@ -7,7 +7,7 @@ from decimal import Decimal
 from hashlib import sha256
 import json
 import math
-from typing import Any, Literal, TypeAlias, get_args
+from typing import Literal, TypeAlias, get_args
 
 from queryshield.policy.argument_limits import (
     ANSWER_MAX_CHARS,

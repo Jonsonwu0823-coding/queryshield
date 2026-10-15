@@ -18,7 +18,7 @@ from queryshield.providers.contracts import (
     new_request_id,
     usage_is_consistent,
 )
-from queryshield.providers.http import base_url_is_valid, endpoint_url, response_model, send_json
+from queryshield.providers.http import base_url_is_valid, endpoint_url, failed_call_fields, response_model, send_json
 
 
 @dataclass(frozen=True)
@@ -144,12 +144,7 @@ class OpenAICompatibleModel:
         provider_request_id = _header_value(response, "x-request-id") if response is not None else None
         last = sent.attempts[-1]
         if last["status"] == "failed":
-            raise fail(
-                last["error_code"],
-                provider_request_id=provider_request_id,
-                http_status=last.get("http_status"),
-                provider_error_code=last.get("provider_error_code"),
-            ) from sent.error
+            raise fail(last["error_code"], provider_request_id=provider_request_id) from sent.error
         try:
             body = response.json()
             provider_call_id, content, usage, tool_calls, finish_reason = _parse_response(body, native=tools is not None)
@@ -294,10 +289,8 @@ def _failed_record(
     request_id: str,
     model_call_id: str,
     error_code: str,
-    attempts: Sequence[Mapping[str, object]],
+    attempts: tuple[dict[str, object], ...],
     provider_request_id: str | None = None,
-    http_status: int | None = None,
-    provider_error_code: str | None = None,
 ) -> dict[str, object]:
     record: dict[str, object] = {
         "status": "failed",
@@ -313,12 +306,8 @@ def _failed_record(
         "usage": None,
         "usage_status": "unknown",
         "error_code": error_code,
+        **failed_call_fields(attempts),
     }
-    if http_status is not None:
-        record["http_status"] = http_status
-    if provider_error_code is not None:
-        record["provider_error_code"] = provider_error_code
-    record["attempts"] = [dict(attempt) for attempt in attempts]
     return record
 
 

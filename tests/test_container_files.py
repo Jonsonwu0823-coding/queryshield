@@ -413,7 +413,7 @@ def test_operations_doc_covers_the_limits_the_variables_and_does_not_link_contro
         assert symbol in text and symbol in _text(PROJECT_ROOT / relative), f"{symbol} is not in {relative}"
 
 
-# --- compose-real-demo.ps1 run against a fake docker (R2) ---------------------------------------------------
+# --- compose-real-demo.ps1 run against a fake docker ----------------------------------------------------
 
 REAL_DEMO_PS1 = PROJECT_ROOT / "scripts" / "compose-real-demo.ps1"
 _SHELL = __import__("shutil").which("pwsh") or __import__("shutil").which("powershell")
@@ -528,7 +528,7 @@ def test_a_demo_failure_inside_the_container_gives_exit_code_1_and_still_copies_
 
 
 def test_ps1_functions_that_call_an_external_command_either_capture_its_output_or_send_it_to_the_screen() -> None:
-    """A function must not leave a native command's output in the pipeline and then also return an exit code (R2)."""
+    """A function must not leave a native command's output in the pipeline and then also return an exit code."""
 
     real_demo = REAL_DEMO_PS1.read_text(encoding="utf-8-sig")
     docker_function = real_demo[real_demo.index("function Invoke-Docker"): real_demo.index("function Get-DockerText")]

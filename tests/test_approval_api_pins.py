@@ -1129,6 +1129,29 @@ def test_an_expired_approval_is_marked_expired_and_refused(service) -> None:
     assert svc.store.get_run(run["run_id"])["status"] == "WAITING_APPROVAL"
 
 
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+def test_an_approval_that_expires_while_it_is_being_decided_is_refused_as_stale(service, monkeypatch, decision) -> None:
+    svc, _ = service
+    run = _pending(service)
+    expires_at = svc.store.get_approval(run["approval_id"])["expires_at"]
+    decide = svc.store.decide_approval
+    # The service judged it current; by the time the store decides, it has expired.
+    later = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00")) + timedelta(seconds=1)
+    monkeypatch.setattr(svc.store, "decide_approval", lambda approval_id, **options: decide(approval_id, **{**options, "now": later}))
+
+    _fails(service, run, ApprovalConflict, "approval_stale", "approval has expired", decision=decision)
+    assert svc.store.get_approval(run["approval_id"])["status"] == "EXPIRED"
+    assert svc.store.get_run(run["run_id"])["status"] == "WAITING_APPROVAL"
+
+
+def test_the_capacity_set_holds_a_run_only_while_its_first_execution_runs(service) -> None:
+    svc, _ = service
+    run = _pending(service)
+    assert run["run_id"] not in svc._active  # the first execution ended, waiting for the approval
+    assert _approve(service, run)["status"] == "SUCCEEDED"
+    assert run["run_id"] not in svc._active  # an approved execution never takes a slot
+
+
 def test_a_decided_approval_is_a_replay_even_when_the_run_is_no_longer_waiting(service) -> None:
     svc, executor = service
     run = _pending(service)

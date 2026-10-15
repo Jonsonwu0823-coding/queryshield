@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from queryshield.providers.contracts import usage_is_consistent
+
 
 def usage_status_record(
     summary: Mapping[str, object] | None,
@@ -37,12 +39,7 @@ def usage_status_record(
         prompt = summary.get("prompt_tokens")
         completion = summary.get("completion_tokens")
         total = summary.get("total_tokens")
-        if (
-            type(prompt) is int and prompt >= 0
-            and type(completion) is int and completion >= 0
-            and type(total) is int and total >= 0
-            and prompt + completion == total
-        ):
+        if usage_is_consistent(prompt, completion, total):
             return {
                 "usage_status": "known",
                 "prompt_tokens": prompt,

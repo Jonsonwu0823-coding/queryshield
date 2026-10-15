@@ -510,6 +510,8 @@ def run_b0_single_pass(
                     tools,
                     action.name,
                     action.arguments,
+                    # B0 has no approval path (an approval_required read is refused); a question does pause it.
+                    pauses=(ClarificationRequiredError,),
                     context=context,
                     request_time_window=time_window,
                     clarifications=clarifications,
@@ -677,7 +679,7 @@ def b1_result_payload(
         and payload.get("tool_call_count") == 0
     )
     # Only B2 and the skills profile are labelled by their configuration: B1's graph also runs under evaluation configurations.
-    profile = result.run_config.profile if result.run_config.profile in {B2_PROFILE, B1S_PROFILE} else B1_PROFILE
+    profile = result.run_config.profile if result.run_config.profile in _BUILDERS else B1_PROFILE
     return {"profile": profile, **payload}
 
 
@@ -786,6 +788,22 @@ def check_fake_database_boundary(mode: str) -> None:
         )
 
 
+def demo_dataset_setting() -> bool:
+    """Whether the demo dataset is on.
+
+    The setting and the database name must agree (a fixed error code, no URL).  With the
+    setting off and a database that is not a _demo one this changes nothing.
+    """
+
+    from queryshield.db.readonly import DatabaseConfigurationError, check_demo_pairing, demo_dataset_enabled
+
+    try:
+        check_demo_pairing(os.getenv("QUERYSHIELD_DATABASE_URL"))
+        return demo_dataset_enabled()
+    except DatabaseConfigurationError as exc:
+        raise RuntimeConfigurationError(getattr(exc, "code", "invalid_database_configuration"), "the demo dataset setting and the database do not match") from exc
+
+
 def product_retriever(mode: str) -> Any | None:
     """The product retriever for this mode.
 
@@ -793,7 +811,6 @@ def product_retriever(mode: str) -> Any | None:
     server is set to catalog-only search, or None when retrieval is disabled.
     """
 
-    from queryshield.db.readonly import DatabaseConfigurationError, check_demo_pairing, demo_dataset_enabled
     from queryshield.knowledge.runtime import (
         CATALOG_SEARCH_ONLY,
         retrieval_setting,
@@ -802,13 +819,7 @@ def product_retriever(mode: str) -> Any | None:
     )
     from queryshield.providers.embedding import EmbeddingConfigurationError
 
-    # The demo setting and the database name must agree (a fixed error code, no URL).
-    # With the setting off and a database that is not a _demo one this changes nothing.
-    try:
-        check_demo_pairing(os.getenv("QUERYSHIELD_DATABASE_URL"))
-        demo = demo_dataset_enabled()
-    except DatabaseConfigurationError as exc:
-        raise RuntimeConfigurationError(getattr(exc, "code", "invalid_database_configuration"), "the demo dataset setting and the database do not match") from exc
+    demo = demo_dataset_setting()
     setting = retrieval_setting()
     if setting == "disabled":
         return None

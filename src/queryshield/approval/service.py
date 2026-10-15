@@ -45,6 +45,7 @@ from queryshield.agent.runtime import (
     build_bounded_agent,
     check_fake_database_boundary,
     configured_profile,
+    demo_dataset_setting,
     model_for_mode,
     outcome_for,
     product_retriever,
@@ -66,7 +67,7 @@ from queryshield.catalog.phrases import (
     select_value,
 )
 from queryshield.db.guarded import GuardedQueryExecutor
-from queryshield.db.state_store import StateStore, parse_time, utc_now
+from queryshield.db.state_store import StateStore, json_text, parse_time, utc_now
 from queryshield.facts import FactResolver
 from queryshield.facts.facts import FACTS_SCHEMA_VERSION, is_scalar_metric_result
 from queryshield.facts.persisted import evidence_from_record
@@ -157,13 +158,12 @@ class RunIdentity:
             role=str(identity["role"]),
         )
 
-
-def _canonical(value: object) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    def context(self, run_id: str) -> ExecutionContext:
+        return ExecutionContext(run_id=run_id, tenant_id=self.tenant_id, principal_id=self.principal_id, role=self.role)
 
 
 def action_hash(action: Mapping[str, object]) -> str:
-    return hashlib.sha256(_canonical(action).encode("utf-8")).hexdigest()
+    return hashlib.sha256(json_text(action).encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +263,8 @@ def reset_shared_state_stores() -> None:
 
 
 TERMINAL_STATUSES = frozenset({"SUCCEEDED", "DENIED", "FAILED", "LIMIT_REACHED", "CANCELLED", "USAGE_UNKNOWN"})
+# A run in one of these is being executed (or was, by a process that exited).
+EXECUTING_STATUSES = ("RUNNING", "CANCEL_REQUESTED")
 
 # The runs executing in this process, whichever service runs them: startup ends only the others.
 # A run is registered before it can become RUNNING and unregistered in ``finally`` after its
@@ -349,7 +351,7 @@ class RunService:
 
         ended: dict[str, list[str]] = {"failed": [], "cancelled": []}
         with _EXECUTING_LOCK:
-            for run_id in self.store.run_ids_with_status("RUNNING", "CANCEL_REQUESTED"):
+            for run_id in self.store.run_ids_with_status(*EXECUTING_STATUSES):
                 status = None if run_id in _EXECUTING else self._end_interrupted(run_id)
                 if status is not None:
                     ended["failed" if status == "FAILED" else "cancelled"].append(run_id)
@@ -407,15 +409,10 @@ class RunService:
         as it is (``keep_inactive_sources``).  Only the product service calls this.
         """
 
-        from queryshield.db.readonly import DatabaseConfigurationError, check_demo_pairing, demo_dataset_enabled
         from queryshield.knowledge.runtime import product_knowledge
 
         # The same demo setting checks as product_retriever.
-        try:
-            check_demo_pairing(os.getenv("QUERYSHIELD_DATABASE_URL"))
-            demo = demo_dataset_enabled()
-        except DatabaseConfigurationError as exc:
-            raise RuntimeConfigurationError(getattr(exc, "code", "invalid_database_configuration"), "the demo dataset setting and the database do not match") from exc
+        demo = demo_dataset_setting()
         try:
             knowledge = product_knowledge(demo=demo)
         except Exception as exc:  # noqa: BLE001 - never run without the configured knowledge base
@@ -511,7 +508,7 @@ class RunService:
             self._active = {
                 run_id
                 for run_id in self._active
-                if (self.store.get_run(run_id) or {}).get("status") in {"RUNNING", "CANCEL_REQUESTED"}
+                if (self.store.get_run(run_id) or {}).get("status") in EXECUTING_STATUSES
             }
             return len(self._active)
 
@@ -529,16 +526,7 @@ class RunService:
         if self._active_count() >= MAX_ACTIVE_RUNS:
             raise ApprovalConflict("run_capacity_reached", "active run capacity is full")
         run_id = f"run-{uuid4()}"
-        if self._product_knowledge:
-            # The snapshot the product published and its retriever is built from.
-            knowledge_snapshot_id = self.product_knowledge().snapshot_id
-        else:
-            current_snapshot = self.store.get_snapshot()
-            knowledge_snapshot_id = (
-                str(current_snapshot["snapshot_id"])
-                if isinstance(current_snapshot, Mapping) and current_snapshot.get("snapshot_id")
-                else DEFAULT_KNOWLEDGE_SNAPSHOT
-            )
+        knowledge_snapshot_id = self._knowledge_snapshot_id()
         catalog = load_default_catalog()
         run_retriever = deps.retriever if deps.profile in BOUNDED_PROFILES else None
         agent_run_config = product_run_config(deps.profile, catalog=catalog, retriever=tools_retriever(run_retriever))
@@ -580,6 +568,18 @@ class RunService:
         with self._active_lock:
             self._active.add(run_id)
         return run_id
+
+    def _knowledge_snapshot_id(self) -> str:
+        """The snapshot a new run records: the one the product published and its retriever is built from."""
+
+        if self._product_knowledge:
+            return self.product_knowledge().snapshot_id
+        current_snapshot = self.store.get_snapshot()
+        return (
+            str(current_snapshot["snapshot_id"])
+            if isinstance(current_snapshot, Mapping) and current_snapshot.get("snapshot_id")
+            else DEFAULT_KNOWLEDGE_SNAPSHOT
+        )
 
     def run_sync(
         self,
@@ -649,12 +649,7 @@ class RunService:
                 model = CountingModel(deps.model)
                 run_deps = replace(deps, call_store=call_store, model=model)
                 tools = product_tools(run_deps, executor=counter, metadata=metadata)
-                context = ExecutionContext(
-                    run_id=run_id,
-                    tenant_id=subject.tenant_id,
-                    principal_id=subject.principal_id,
-                    role=subject.role,
-                )
+                context = subject.context(run_id)
                 profile_run = run_profile(run_deps, context, question, time_window=time_window, tools=tools, on_step=writer)
                 # The run's MCP session ends with this execution, before the result commits.
                 metadata_record = self._close_metadata(tools, metadata_written)
@@ -669,9 +664,7 @@ class RunService:
                     metadata_record=metadata_record,
                 )
             except Exception as exc:  # noqa: BLE001 - durable terminal state is the boundary
-                metadata_record = self._close_metadata(tools, metadata_written)
-                if metadata_record is not None:
-                    self.store.append_event(run_id, "metadata_session", "RUNNING", payload=metadata_record)
+                self._store_metadata_record(run_id, self._close_metadata(tools, metadata_written))
                 return self._end_on_error(
                     run_id, exc, sql_exec_count=counter.executions if counter is not None else 0, writer=writer, model=model
                 )
@@ -851,9 +844,13 @@ class RunService:
         """The result's events the graph has not stored yet (none after a graph run), then the MCP session record."""
 
         writer.write(payload.get("events") or ())
-        if metadata_record is not None:
-            # One record per MCP session (MCP setting only), after the steps it served.
-            self.store.append_event(run_id, "metadata_session", "RUNNING", payload=dict(metadata_record))
+        self._store_metadata_record(run_id, metadata_record)
+
+    def _store_metadata_record(self, run_id: str, record: Mapping[str, object] | None) -> None:
+        """One record per MCP session (MCP setting only), after the steps it served."""
+
+        if record is not None:
+            self.store.append_event(run_id, "metadata_session", "RUNNING", payload=dict(record))
 
     def _committed_evidences(
         self,
@@ -904,14 +901,14 @@ class RunService:
         self,
         run: Mapping[str, object],
         payload: Mapping[str, object],
-        permission: tuple[str, Mapping[str, object] | None] | None = None,
+        permission: tuple[str, Mapping[str, object] | None],
     ) -> dict[str, object]:
         """The approval record for the run's pending call (``StateStore.create_approval``'s fields)."""
 
         run_id = str(run["run_id"])
         final_action = payload.get("action")
         pending_call = final_action.get("tool_call") if isinstance(final_action, Mapping) else None
-        source_id, acl = permission or self._approval_permission(run)
+        source_id, acl = permission
         action = build_pending_action(
             pending_call if isinstance(pending_call, Mapping) else {},
             run_id=run_id,
@@ -958,32 +955,22 @@ class RunService:
         subject = RunIdentity.from_mapping(identity)
         metadata = self.metadata_config()
         with self._resume_lock, _executing(run_id):
+            # Every check comes before the run moves: owner, checkpoint, configuration, the answer's choice.
             run, checkpoint_envelope, agent_checkpoint, run_config = self._load_waiting_run(run_id, subject)
             _check_metadata_tools(run_config.profile, metadata)
-            # Clarified values in the server checkpoint are authoritative.  A
-            # user answer may supply a bounded month, but it cannot select or
-            # replace the metric binding.
-            checkpoint_for_resume = dict(agent_checkpoint)
-            catalog = load_default_catalog()
-            choice = _resolve_clarification(catalog, checkpoint_envelope, agent_checkpoint, answer)
-            if choice.clarified_metric is not None:
-                binding = _clarified_binding(catalog, choice.clarified_metric, agent_checkpoint, answer)
-                checkpoint_for_resume["metric_bindings"] = [binding.as_dict()]
+            choice, checkpoint_for_resume = _resume_checkpoint(load_default_catalog(), checkpoint_envelope, agent_checkpoint, answer)
             stored_steps = _checked_event_count(agent_checkpoint, run)
             paused_results = _paused_evidences(checkpoint_envelope, run)
             writer = _StepWriter(self.store, run_id, written=stored_steps)
+            # Only from WAITING_USER: a run cancelled meanwhile never executes.
             if not self.store.transition_run(run_id, "WAITING_USER", "RUNNING", cancel_requested=0):
                 return self.store.get_run(run_id)  # type: ignore[return-value]
             with self._segment(run_id, "resume", profile=run_config.profile):
-                context = ExecutionContext(
-                    run_id=run_id,
-                    tenant_id=subject.tenant_id,
-                    principal_id=subject.principal_id,
-                    role=subject.role,
-                )
+                context = subject.context(run_id)
                 counter = CountingExecutor(executor)
                 counted = CountingModel(model)
                 try:
+                    # The tools get back the results kept with the pause; the agent continues from the checkpoint.
                     deps = RuntimeDependencies(
                         model=counted,  # type: ignore[arg-type]
                         executor=counter,
@@ -1003,6 +990,7 @@ class RunService:
                         on_step=writer,
                     )
                     result, metadata_record = self._resume_agent(agent, tools, choice, context, answer, checkpoint_for_resume)
+                    # The outcome commits like a first execution's, with what the answer chose.
                     envelope_updates: dict[str, object] = {}
                     if choice.selected_metric is not None:
                         envelope_updates["clarified_metric"] = choice.selected_metric
@@ -1060,9 +1048,7 @@ class RunService:
             raise _ResumeRefused(code, "resume checkpoint could not be restored") from exc
         except Exception:
             # The run ends on this error; like a first execution, its MCP session record is kept.
-            record = self._close_metadata(tools, metadata_written)
-            if record is not None:
-                self.store.append_event(context.run_id, "metadata_session", "RUNNING", payload=record)
+            self._store_metadata_record(context.run_id, self._close_metadata(tools, metadata_written))
             raise
         finally:
             metadata_record = self._close_metadata(tools, metadata_written)
@@ -1176,14 +1162,10 @@ class RunService:
         if decided.get("status") == "APPROVED":
             # The consumed record must still carry the exact bound digest.
             _require_bound_action(decided, run)
-            try:
-                # Cancelled after the state check: the approved query never runs.
-                if not self.store.transition_run(run_id, "WAITING_APPROVAL", "RUNNING", cancel_requested=0):
-                    return self.store.get_run(run_id)  # type: ignore[return-value]
-                return self._execute_approved(run_id, run, decided)
-            finally:
-                with self._active_lock:
-                    self._active.discard(run_id)
+            # Cancelled after the state check: the approved query never runs.
+            if not self.store.transition_run(run_id, "WAITING_APPROVAL", "RUNNING", cancel_requested=0):
+                return self.store.get_run(run_id)  # type: ignore[return-value]
+            return self._execute_approved(run_id, run, decided)
         if decided.get("status") == "EXPIRED":
             raise ApprovalConflict("approval_stale", "approval has expired")
         return self.store.get_run(run_id)  # type: ignore[return-value]
@@ -1248,12 +1230,7 @@ class RunService:
         of this run (stored when it paused) are kept alongside, once each.
         """
 
-        requester = ExecutionContext(
-            run_id=run_id,
-            tenant_id=str(run["tenant_id"]),
-            principal_id=str(run["principal_id"]),
-            role=str(run["role"]),
-        )
+        requester = RunIdentity.from_mapping(run).context(run_id)  # type: ignore[arg-type]
         catalog = load_default_catalog()
         tools = ControlledTools(catalog=catalog, executor=counter)
         evidence = execute_approved_query(tools, pending_call_from_action(approval["action"]), context=requester)  # type: ignore[arg-type]
@@ -1262,12 +1239,7 @@ class RunService:
         if _cancel_requested(current_run):
             return self._finish_cancelled(run_id, sql_exec_count=sql_total)
 
-        envelope = run.get("checkpoint") if isinstance(run.get("checkpoint"), Mapping) else {}
-        prior = [
-            evidence_from_record(item, run)
-            for item in envelope.get("pre_approval_results", ()) or ()  # type: ignore[union-attr]
-            if isinstance(item, Mapping)
-        ]
+        prior = _prior_results(run)
         references = _approved_fact_refs(prior, evidence)
         facts = _resolve_approved_facts(catalog, requester, references, [*prior, evidence])
         supporting = [item for item in prior if any(ref.result_id == item.result_id for ref in references)]
@@ -1375,6 +1347,23 @@ class ResumeChoice:
     unsupported: ClarificationValue | None  # a chosen scope no catalog metric supports
 
 
+def _resume_checkpoint(
+    catalog: SemanticCatalog, envelope: Mapping[str, object], agent_checkpoint: Mapping[str, object], answer: str
+) -> tuple[ResumeChoice, dict[str, object]]:
+    """The answer's clarification choice and the agent checkpoint the resume continues from.
+
+    Clarified values in the server checkpoint are authoritative.  A user answer may
+    supply a bounded month, but it cannot select or replace the metric binding.
+    """
+
+    checkpoint = dict(agent_checkpoint)
+    choice = _resolve_clarification(catalog, envelope, agent_checkpoint, answer)
+    if choice.clarified_metric is not None:
+        binding = _clarified_binding(catalog, choice.clarified_metric, agent_checkpoint, answer)
+        checkpoint["metric_bindings"] = [binding.as_dict()]
+    return choice, checkpoint
+
+
 def _resolve_clarification(
     catalog: SemanticCatalog,
     envelope: Mapping[str, object],
@@ -1465,6 +1454,17 @@ def _resolve_approved_facts(
         .as_dict()["facts"],
         requester,
     )
+
+
+def _prior_results(run: Mapping[str, object]) -> list[ResultEvidence]:
+    """The verified metric results this run kept when it paused for the approval."""
+
+    envelope = run.get("checkpoint") if isinstance(run.get("checkpoint"), Mapping) else {}
+    return [
+        evidence_from_record(item, run)
+        for item in envelope.get("pre_approval_results", ()) or ()  # type: ignore[union-attr]
+        if isinstance(item, Mapping)
+    ]
 
 
 def _approved_fact_refs(prior: Sequence[ResultEvidence], evidence: ResultEvidence) -> list[FactRef]:
@@ -1597,7 +1597,7 @@ def _commit_counters(current: Mapping[str, object], payload: Mapping[str, object
         "model_call_count": int(payload.get("model_call_count", 0) or 0),
         "tool_call_count": int(payload.get("tool_call_count", 0) or 0),
         "sql_exec_count": int(current.get("sql_exec_count", 0)) + int(sql_executions),
-        "usage_json": json.dumps(dict(usage), ensure_ascii=False, sort_keys=True) if isinstance(usage, Mapping) else None,
+        "usage_json": _json(dict(usage)) if isinstance(usage, Mapping) else None,
     }
 
 

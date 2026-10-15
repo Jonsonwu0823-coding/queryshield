@@ -252,7 +252,7 @@ def validate_catalog_document(document: Mapping[str, object]) -> None:
     _validate_entries(document["entries"], version, source_id, source_version)
     _validate_clarifications(document["clarifications"], version)
     if version in PHRASE_TABLE_VERSIONS:
-        _validate_phrase_table(document["entries"], document["clarifications"])
+        _validate_phrase_table(document["entries"], document["clarifications"])  # type: ignore[arg-type]
 
 
 def _validate_time_window(value: object) -> None:
@@ -355,14 +355,12 @@ def _validate_clarifications(raw_clarifications: object, version: str) -> None:
         _as_string(rule.get("resolution"), path=f"{path}.resolution")
 
 
-def _validate_phrase_table(raw_entries: list[object], raw_rules: list[object]) -> None:
-    """catalog-v3: every phrase names exactly one thing; values are well formed."""
+def _validate_phrase_table(raw_entries: list[Mapping[str, object]], raw_rules: list[Mapping[str, object]]) -> None:
+    """catalog-v3: every phrase names exactly one thing; values are well formed.
 
-    metric_ids = {
-        str(entry["id"]).removeprefix("metric.")
-        for entry in raw_entries
-        if isinstance(entry, Mapping) and entry.get("kind") == "metric"
-    }
+    Runs after _validate_entries and _validate_clarifications: every entry and rule is a mapping.
+    """
+
     explicit_owner: dict[str, str] = {}
 
     def claim(phrase: str, owner: str, path: str) -> None:
@@ -371,28 +369,18 @@ def _validate_phrase_table(raw_entries: list[object], raw_rules: list[object]) -
             raise CatalogValidationError(f"{path} phrase {phrase!r} already names {explicit_owner[key]}")
         explicit_owner[key] = owner
 
+    metric_ids: set[str] = set()
     for entry in raw_entries:
-        if isinstance(entry, Mapping) and entry.get("kind") == "metric":
-            for phrase in entry["phrases"]:
+        if entry.get("kind") == "metric":
+            metric_ids.add(str(entry["id"]).removeprefix("metric."))
+            for phrase in entry["phrases"]:  # type: ignore[union-attr]
                 claim(phrase, str(entry["id"]), f"{entry['id']}.phrases")
 
     ambiguous_all: set[str] = set()
-    for index, raw_rule in enumerate(raw_rules):
+    for index, rule in enumerate(raw_rules):
         path = f"clarifications[{index}]"
-        rule = _as_mapping(raw_rule, path=path)
-        allowed = list(rule["allowed_values"])
-        ambiguous = rule.get("ambiguous_phrases")
-        if type(ambiguous) is not list or any(type(item) is not str or not item.strip() for item in ambiguous):
-            raise CatalogValidationError(f"{path}.ambiguous_phrases must be a list of phrases")
-        if len(allowed) > 1 and not ambiguous:
-            raise CatalogValidationError(f"{path} with several values needs ambiguous_phrases")
+        ambiguous, values = _phrase_rule_values(rule, path)
         ambiguous_all.update(item.casefold() for item in ambiguous)
-        _as_string_list(rule.get("ask_markers"), path=f"{path}.ask_markers")
-        values = rule.get("values")
-        if type(values) is not list or [
-            item.get("value") if isinstance(item, Mapping) else None for item in values
-        ] != allowed:
-            raise CatalogValidationError(f"{path}.values must describe allowed_values in order")
         for value_index, raw_value in enumerate(values):
             value_path = f"{path}.values[{value_index}]"
             value = _as_mapping(raw_value, path=value_path)
@@ -409,20 +397,44 @@ def _validate_phrase_table(raw_entries: list[object], raw_rules: list[object]) -
                 own = list(_as_string_list(own, path=f"{value_path}.phrases"))
             for phrase in own:
                 claim(phrase, f"{rule['id']}={value['value']}", f"{value_path}.phrases")
-            if metric is None:
-                _as_string(value.get("definition"), path=f"{value_path}.definition")
-            supported = value.get("supported", True)
-            if type(supported) is not bool:
-                raise CatalogValidationError(f"{value_path}.supported must be boolean")
-            if not supported:
-                _as_string(value.get("unsupported_note"), path=f"{value_path}.unsupported_note")
-                if metric is not None:
-                    raise CatalogValidationError(f"{value_path} an unsupported value cannot name a metric")
-            elif "unsupported_note" in value:
-                raise CatalogValidationError(f"{value_path}.unsupported_note is only for unsupported values")
+            _validate_value_support(value, value_path, metric)
     overlap = ambiguous_all & set(explicit_owner)
     if overlap:
         raise CatalogValidationError(f"ambiguous phrases cannot also be explicit: {sorted(overlap)}")
+
+
+def _phrase_rule_values(rule: Mapping[str, object], path: str) -> tuple[list[str], list[object]]:
+    """A rule's ambiguous phrases (needed when it has several values) and its values, which describe allowed_values in order."""
+
+    allowed = list(rule["allowed_values"])  # type: ignore[call-overload]
+    ambiguous = rule.get("ambiguous_phrases")
+    if type(ambiguous) is not list or any(type(item) is not str or not item.strip() for item in ambiguous):
+        raise CatalogValidationError(f"{path}.ambiguous_phrases must be a list of phrases")
+    if len(allowed) > 1 and not ambiguous:
+        raise CatalogValidationError(f"{path} with several values needs ambiguous_phrases")
+    _as_string_list(rule.get("ask_markers"), path=f"{path}.ask_markers")
+    values = rule.get("values")
+    if type(values) is not list or [
+        item.get("value") if isinstance(item, Mapping) else None for item in values
+    ] != allowed:
+        raise CatalogValidationError(f"{path}.values must describe allowed_values in order")
+    return ambiguous, values
+
+
+def _validate_value_support(value: Mapping[str, object], value_path: str, metric: object) -> None:
+    """A value without a metric is defined in words; an unsupported one has a note and no metric."""
+
+    if metric is None:
+        _as_string(value.get("definition"), path=f"{value_path}.definition")
+    supported = value.get("supported", True)
+    if type(supported) is not bool:
+        raise CatalogValidationError(f"{value_path}.supported must be boolean")
+    if not supported:
+        _as_string(value.get("unsupported_note"), path=f"{value_path}.unsupported_note")
+        if metric is not None:
+            raise CatalogValidationError(f"{value_path} an unsupported value cannot name a metric")
+    elif "unsupported_note" in value:
+        raise CatalogValidationError(f"{value_path}.unsupported_note is only for unsupported values")
 
 
 def validate_catalog_overlay_document(document: Mapping[str, object]) -> None:

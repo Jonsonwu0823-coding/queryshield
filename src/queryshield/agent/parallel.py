@@ -7,7 +7,8 @@ week may replace the branch runner with a durable database boundary.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from hashlib import sha256
@@ -264,6 +265,48 @@ class ParallelGroupStore:
 BranchRunner = Callable[[ExecutionContext, str, str], BranchExecution]
 
 
+def _check_request(context: object, action_or_metric_ids: ParallelReadonlyAction | Sequence[str], plan: object) -> None:
+    """The server context, valid metric ids and the server plan made for this identity and those metrics."""
+
+    if not isinstance(context, ExecutionContext):
+        raise ParallelValidationError("unauthorized", "parallel execution requires server context")
+    metric_ids = (
+        action_or_metric_ids.metric_ids
+        if isinstance(action_or_metric_ids, ParallelReadonlyAction)
+        else tuple(action_or_metric_ids)
+    )
+    normalized_metrics = _validate_metric_ids(metric_ids)
+    if not isinstance(plan, ParallelPlan):
+        raise ParallelValidationError("invalid_parallel_plan", "plan must be server-created")
+    if (
+        plan.metric_ids != normalized_metrics
+        or plan.tenant_id != context.tenant_id
+        or plan.principal_id != context.principal_id
+        or plan.role != context.role
+    ):
+        raise ParallelPlanConflict("parallel action does not match the server plan")
+
+
+class _ActiveBranches:
+    """How many branches run at once, and the most that did."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._active = 0
+        self.peak = 0
+
+    @contextmanager
+    def one(self) -> Iterator[None]:
+        with self._lock:
+            self._active += 1
+            self.peak = max(self.peak, self._active)
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._active -= 1
+
+
 class ParallelScheduler:
     """Execute up to two read-only Fake branches at once and merge by branch ID."""
 
@@ -290,24 +333,7 @@ class ParallelScheduler:
         plan: ParallelPlan,
         tool_budget_remaining: int | None = None,
     ) -> ParallelRunResult:
-        if not isinstance(context, ExecutionContext):
-            raise ParallelValidationError("unauthorized", "parallel execution requires server context")
-        metric_ids = (
-            action_or_metric_ids.metric_ids
-            if isinstance(action_or_metric_ids, ParallelReadonlyAction)
-            else tuple(action_or_metric_ids)
-        )
-        normalized_metrics = _validate_metric_ids(metric_ids)
-        if not isinstance(plan, ParallelPlan):
-            raise ParallelValidationError("invalid_parallel_plan", "plan must be server-created")
-        if (
-            plan.metric_ids != normalized_metrics
-            or plan.tenant_id != context.tenant_id
-            or plan.principal_id != context.principal_id
-            or plan.role != context.role
-        ):
-            raise ParallelPlanConflict("parallel action does not match the server plan")
-
+        _check_request(context, action_or_metric_ids, plan)
         existing_group = self._store.peek(context.run_id)
         if existing_group is not None and existing_group.plan_hash != plan.plan_hash:
             raise ParallelPlanConflict()
@@ -341,16 +367,29 @@ class ParallelScheduler:
                     reused=existing_group is not None,
                 )
         group = group or self._store.get_or_create(context, plan)
-        active = 0
-        peak_active = 0
-        active_lock = Lock()
+        active = _ActiveBranches()
+        with ThreadPoolExecutor(max_workers=MAX_ACTIVE_BRANCHES, thread_name_prefix="qs-parallel") as pool:
+            futures = {
+                pool.submit(self._run_branch, context, metric_id, group.branch_ids[metric_id], active): metric_id
+                for metric_id in pending_metrics
+            }
+            for future in as_completed(futures):
+                branch = future.result()
+                self._store.save_branch(group, branch)
 
-        def execute(metric_id: str) -> ParallelBranchResult:
-            nonlocal active, peak_active
-            branch_id = group.branch_ids[metric_id]
-            with active_lock:
-                active += 1
-                peak_active = max(peak_active, active)
+        self._store.set_peak_active(group, active.peak)
+        return self._result(
+            group,
+            run_id=context.run_id,
+            plan_hash=plan.plan_hash,
+            new_branch_count=len(pending_metrics),
+            reused=False,
+        )
+
+    def _run_branch(self, context: ExecutionContext, metric_id: str, branch_id: str, active: "_ActiveBranches") -> ParallelBranchResult:
+        """One branch; whatever its runner returns or raises becomes the branch's result."""
+
+        with active.one():
             started = self._clock()
             try:
                 execution = self._branch_runner(context, metric_id, branch_id)
@@ -382,24 +421,6 @@ class ParallelScheduler:
                     error_code=code,
                     elapsed_ms=int(max(0.0, self._clock() - started) * 1000),
                 )
-            finally:
-                with active_lock:
-                    active -= 1
-
-        with ThreadPoolExecutor(max_workers=MAX_ACTIVE_BRANCHES, thread_name_prefix="qs-parallel") as pool:
-            futures = {pool.submit(execute, metric_id): metric_id for metric_id in pending_metrics}
-            for future in as_completed(futures):
-                branch = future.result()
-                self._store.save_branch(group, branch)
-
-        self._store.set_peak_active(group, peak_active)
-        return self._result(
-            group,
-            run_id=context.run_id,
-            plan_hash=plan.plan_hash,
-            new_branch_count=len(pending_metrics),
-            reused=False,
-        )
 
     def _budget_result(
         self,

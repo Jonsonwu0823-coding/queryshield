@@ -23,6 +23,7 @@ import re
 import socket
 import threading
 import time
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -34,14 +35,18 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import SpanKind
 
-from multi_agent_support import COMPOSITE
+from multi_agent_support import COMPOSITE, SEP as SEP_WINDOW, RoleModel, b2, cite_all, delegate, run_b2  # noqa: F401  (b2 is a fixture)
 from test_http_queries import APPROVER, auth
-from test_model_call_retry import ADAPTERS, CALL_ID, RETRIED_FIRSTS, RUN_ID, _chat, _chat_ok, _send
+from test_model_call_retry import ADAPTERS, CALL_ID, NOT_RETRIED, RETRIED_FIRSTS, RUN_ID, TWO_FAILURES, _chat, _chat_ok, _send
 from test_run_id_header import PLACEHOLDER_KEY, REQUESTER, _Upstream
 from test_runs_left_executing_at_startup import PAID, _Old, _ProcessExit
-from test_clarification import _query
+from test_approval_api_pins import NAME_QUERY
+from test_clarification import REQUESTER as CLARIFICATION_REQUESTER, SEPTEMBER, _Scripted, _query, _start, service  # noqa: F401  (service is a fixture)
 from queryshield import tracing
-from queryshield.agent.runtime import RuntimeConfigurationError
+from queryshield.agent import tool_execution
+from queryshield.agent.tool_execution import ApprovalRequiredError, ClarificationRequiredError, ClarificationValueUnsupportedError
+from queryshield.tools import ToolError
+from queryshield.agent.runtime import B0_PROFILE, RuntimeConfigurationError
 from queryshield.api.main import app, get_model_provider, get_retriever_source
 from queryshield.approval.service import reset_shared_state_stores, shared_state_store
 from queryshield.catalog import load_default_catalog
@@ -373,12 +378,34 @@ def test_a_retried_call_is_one_model_call_with_two_attempt_spans(exported, adapt
     assert {_trace(span) for span in spans} == {_header(requests[0])[0]}
     assert call.attributes["queryshield.attempt_count"] == 2 and call.attributes["queryshield.status"] == "succeeded"
     assert [span.attributes["queryshield.status"] for span in attempts] == ["failed", "succeeded"]
+    assert [span.status.status_code for span in attempts] == [trace.StatusCode.ERROR, trace.StatusCode.UNSET]
+    assert call.status.status_code is trace.StatusCode.UNSET
     if run_id is not None:
         assert _trace(call) == _expected_trace(run_id)
 
 
+@pytest.mark.parametrize("adapter", ADAPTERS)
+@pytest.mark.parametrize(
+    "outcomes",
+    [pytest.param(case.values[0], id=case.id) for case in TWO_FAILURES]
+    + [pytest.param([case.values[0]], id=f"once_{case.id}") for case in NOT_RETRIED],
+)
+def test_a_call_that_fails_marks_its_span_and_every_attempt_span_failed(exported, adapter, outcomes) -> None:
+    error, requests, _waits = _send(adapter, [*outcomes, adapter[1](9)])
+
+    assert isinstance(error, adapter[2])
+    spans = exported.get_finished_spans()
+    [call] = _named(spans, "queryshield.model_call")
+    attempts = _named(spans, "queryshield.http_attempt")
+    assert len(attempts) == len(requests) == len(outcomes)
+    assert call.status.status_code is trace.StatusCode.ERROR
+    assert call.attributes["queryshield.status"] == "failed" and call.attributes["queryshield.error_code"] == error.code
+    assert all(span.status.status_code is trace.StatusCode.ERROR for span in attempts)
+    assert all(span.attributes["queryshield.status"] == "failed" for span in attempts)
+
+
 def test_a_call_in_a_run_from_a_thread_without_the_context_keeps_the_header_trace(exported) -> None:
-    """K9: the gateway hangs its spans under the attempt span, so its trace must be the header's."""
+    """The gateway hangs its spans under the attempt span, so its trace must be the header's."""
 
     requests: list[httpx.Request] = []
 
@@ -454,11 +481,128 @@ def test_a_run_resumed_or_approved_by_a_new_process_stays_on_its_trace(tmp_path,
     [tool] = [span for span in _of_trace(spans, approval_trace) if _parent(span) == _id(segment)]
     assert tool.name == "queryshield.tool" and tool.attributes["queryshield.tool_name"] == "query_readonly"
     assert tool.attributes["queryshield.row_count"] == 2
-    # The first execution paused on the approval: its tool span failed with that code.
+    # The first execution paused on the approval: its tool span is not failed, it has the step's status and the code.
     queries = [span for span in _named(_of_trace(spans, approval_trace), "queryshield.tool") if span.attributes["queryshield.tool_name"] == "query_readonly"]
     [paused] = [span for span in queries if span is not tool]
-    assert paused.status.status_code is trace.StatusCode.ERROR
+    assert paused.status.status_code is trace.StatusCode.UNSET
+    assert paused.attributes["queryshield.status"] == "waiting_approval"
     assert paused.attributes["queryshield.error_code"] == "approval_required"
+
+
+def test_a_query_that_waits_for_the_users_answer_leaves_its_tool_span_unfailed(service, exported) -> None:
+    run = _start(service, AMBIGUOUS, [_query()])
+
+    assert run["status"] == "WAITING_USER"
+    spans = _of_trace(exported.get_finished_spans(), _expected_trace(run["run_id"]))
+    [paused] = _named(spans, "queryshield.tool")
+    assert paused.status.status_code is trace.StatusCode.UNSET
+    assert paused.attributes["queryshield.status"] == "waiting_user"
+    assert paused.attributes["queryshield.error_code"] == "clarification_required"
+    [step] = [span for span in spans if span.name == "queryshield.step.execute_tool"]
+    assert step.attributes["queryshield.status"] == "waiting_user" and step.status.status_code is trace.StatusCode.UNSET
+
+
+PAUSES = (ApprovalRequiredError, ClarificationRequiredError)
+
+
+@pytest.mark.parametrize(
+    ("error", "pauses", "status", "failed"),
+    [
+        pytest.param(lambda: ApprovalRequiredError({"sql": "x"}), PAUSES, "waiting_approval", False, id="approval_that_pauses"),
+        pytest.param(lambda: ClarificationRequiredError(SimpleNamespace(id="clarify.x")), PAUSES, "waiting_user", False, id="clarification_that_pauses"),
+        pytest.param(lambda: ApprovalRequiredError({"sql": "x"}), (), "failed", True, id="approval_the_caller_does_not_pause_on"),
+        pytest.param(lambda: ClarificationRequiredError(SimpleNamespace(id="clarify.x")), (), "failed", True, id="clarification_the_caller_does_not_pause_on"),
+        pytest.param(
+            lambda: ClarificationValueUnsupportedError(SimpleNamespace(id="clarify.x"), SimpleNamespace(unsupported_note="n")),
+            PAUSES,
+            "failed",
+            True,
+            id="unsupported_scope",
+        ),
+        pytest.param(lambda: ToolError("table_not_allowed", "t"), PAUSES, "failed", True, id="tool_error"),
+    ],
+)
+def test_a_tool_span_is_failed_unless_its_caller_says_the_error_pauses_the_run(exported, error, pauses, status, failed) -> None:
+    raised = error()
+
+    def call():
+        raise raised
+
+    with pytest.raises(type(raised)) as caught:
+        tool_execution._in_tool_span("query_readonly", call, pauses=pauses)
+
+    assert caught.value is raised
+    [span] = exported.get_finished_spans()
+    assert span.status.status_code is (trace.StatusCode.ERROR if failed else trace.StatusCode.UNSET)
+    assert span.attributes["queryshield.status"] == status and span.attributes["queryshield.error_code"] == raised.code
+
+
+def _tool_spans(exported, run_id: str) -> list:
+    return _named(_of_trace(exported.get_finished_spans(), _expected_trace(run_id)), "queryshield.tool")
+
+
+def _b0_run(service, question: str, steps) -> dict:
+    svc, _ = service
+    deps = svc.default_dependencies()
+    deps.model, deps.retriever, deps.profile = _Scripted(steps), None, B0_PROFILE
+    return svc.run_sync(identity=CLARIFICATION_REQUESTER, question=question, time_window={**SEPTEMBER, "timezone": "UTC"}, deps=deps)
+
+
+def test_b0_ends_on_an_approval_so_its_tool_span_is_failed(service, exported) -> None:
+    run = _b0_run(service, "列出前三个客户的名字", [NAME_QUERY])
+
+    assert (run["status"], run["error_code"]) == ("DENIED", "approval_required")
+    [tool] = _tool_spans(exported, run["run_id"])
+    assert tool.status.status_code is trace.StatusCode.ERROR
+    assert (tool.attributes["queryshield.status"], tool.attributes["queryshield.error_code"]) == ("failed", "approval_required")
+
+
+def test_b0_waits_on_the_catalogs_question_so_its_tool_span_is_not_failed(service, exported) -> None:
+    run = _b0_run(service, AMBIGUOUS, [_query()])
+
+    assert run["status"] == "WAITING_USER"
+    [tool] = _tool_spans(exported, run["run_id"])
+    assert tool.status.status_code is trace.StatusCode.UNSET
+    assert (tool.attributes["queryshield.status"], tool.attributes["queryshield.error_code"]) == ("waiting_user", "clarification_required")
+
+
+@pytest.mark.parametrize(
+    "pause",
+    [
+        pytest.param(lambda: ApprovalRequiredError({"sql": "x"}), id="approval"),
+        pytest.param(lambda: ClarificationRequiredError(SimpleNamespace(id="clarify.metric_basis", question="q")), id="clarification"),
+    ],
+)
+def test_a_sub_agent_does_not_wait_so_its_tool_span_is_failed(b2, exported, monkeypatch, pause) -> None:
+    """A sub-agent's approval or question leaves its subtask incomplete and fails the run."""
+
+    def query_raises(tools, name, arguments, **options):
+        raise pause()
+
+    monkeypatch.setattr(tool_execution, "_call_tool", query_raises)
+    run = run_b2(b2, COMPOSITE, RoleModel([delegate((["gross_fen"], SEP_WINDOW), (["net_fen"], SEP_WINDOW)), cite_all]))
+
+    assert (run["status"], run["error_code"]) == ("FAILED", "subtask_incomplete")
+    tools = _tool_spans(exported, run["run_id"])
+    assert len(tools) == 2 and all(span.attributes["queryshield.agent"] != "coordinator" for span in _parents(tools, exported))
+    assert all(span.status.status_code is trace.StatusCode.ERROR for span in tools)
+    assert {span.attributes["queryshield.status"] for span in tools} == {"failed"}
+
+
+def test_a_coordinator_that_queries_a_value_needing_approval_waits_and_its_tool_span_is_not_failed(b2, exported) -> None:
+    run = run_b2(b2, "列出前三个客户的名字", RoleModel([NAME_QUERY]))
+
+    assert run["status"] == "WAITING_APPROVAL"
+    [tool] = _tool_spans(exported, run["run_id"])
+    assert tool.status.status_code is trace.StatusCode.UNSET
+    assert (tool.attributes["queryshield.status"], tool.attributes["queryshield.error_code"]) == ("waiting_approval", "approval_required")
+    [step] = _parents([tool], exported)
+    assert step.name == "queryshield.step.execute_tool" and step.attributes["queryshield.agent"] == "coordinator"
+
+
+def _parents(spans, exported) -> list:
+    by_id = {_id(span): span for span in exported.get_finished_spans()}
+    return [by_id[_parent(span)] for span in spans]
 
 
 def test_a_run_ended_at_startup_gets_a_short_segment_on_its_trace(tmp_path, monkeypatch, receiver) -> None:

@@ -89,6 +89,16 @@ class Sent:
     retryable: bool = False
 
 
+def failed_call_fields(attempts: tuple[dict[str, object], ...]) -> dict[str, object]:
+    """How a failed call's record ends: the last attempt's HTTP fields, if any, then every attempt's record."""
+
+    last = attempts[-1]
+    return {
+        **{name: last[name] for name in ("http_status", "provider_error_code") if name in last},
+        "attempts": [dict(attempt) for attempt in attempts],
+    }
+
+
 def send_json(
     client: httpx.Client | None,
     url: str,

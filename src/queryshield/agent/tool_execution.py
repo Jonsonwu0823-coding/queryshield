@@ -22,7 +22,7 @@ from queryshield.policy.sql import (
     Star,
     parse_readonly_select,
 )
-from queryshield.agent.metric_intent import MetricDeclarationError, resolve_query_declaration
+from queryshield.agent.metric_intent import METRIC_VERIFIERS, MetricDeclarationError, resolve_query_declaration
 from queryshield.agent.proposals import ExecutionContext, ResultEvidence
 from queryshield.catalog.catalog import ClarificationRule, ClarificationValue
 from queryshield.catalog.phrases import ClarificationReading, check_declaration
@@ -34,6 +34,10 @@ from queryshield.tools.semantic import ToolError, _as_tool_error, _validated_sel
 # GuardedQueryError("limit_reached").  Inside the Agent that is a failed query,
 # not the Agent's own budget status ``limit_reached``; give it its own code.
 RESULT_ROW_LIMIT_CODE = "result_row_limit"
+# The metrics a query's own projection proves; the others have a server plan.
+SQL_PROJECTION_METRICS = frozenset(
+    metric_id for metric_id, verifier in METRIC_VERIFIERS.items() if verifier["verification"] == "sql_projection"
+)
 
 
 class ApprovalRequiredError(ToolError):
@@ -107,27 +111,42 @@ def _driver_error(exc: DatabaseDriverError) -> ToolError:
     return ToolError("database_error", "database execution failed")
 
 
+# The status a step records when one of these pauses its run.  Whether it does is the caller's
+# to say (``pauses``): B0 ends on an approval and a sub-agent's run ends on either.
+_PAUSE_STATUS: dict[type[ToolError], str] = {ApprovalRequiredError: "waiting_approval", ClarificationRequiredError: "waiting_user"}
+
+
 def _row_limit_error() -> ToolError:
     return ToolError(RESULT_ROW_LIMIT_CODE, "query returned more than the 100 row limit")
 
 
-def call_tool(tools, name, arguments, **options):
-    """One tool call as a span, its database query inside; see ``_call_tool``."""
+def call_tool(tools, name, arguments, *, pauses: tuple[type[ToolError], ...] = (), **options):
+    """One tool call as a span, its database query inside; see ``_call_tool``.
 
-    return _in_tool_span(name, lambda: _call_tool(tools, name, arguments, **options))
+    ``pauses``: the errors that make this run wait (for an approval or an answer) instead of ending it.
+    """
+
+    return _in_tool_span(name, lambda: _call_tool(tools, name, arguments, **options), pauses=pauses)
 
 
-def _in_tool_span(tool_name: str, call: Callable[[], object]):
+def _in_tool_span(tool_name: str, call: Callable[[], object], *, pauses: tuple[type[ToolError], ...] = ()):
     with tracing.span("queryshield.tool") as span:
         tracing.annotate(span, {"tool_name": tool_name})
         try:
             output = call()
+        except pauses as exc:
+            # The run waits: the span ends with the step's status, not failed, and the exception is
+            # raised again once the span has ended.
+            tracing.annotate(span, {"status": _PAUSE_STATUS[type(exc)], "error_code": exc.code})
+            pause = exc
         except ToolError as exc:
             tracing.annotate(span, {"status": "failed", "error_code": exc.code})
             raise
-        rows = output.get("row_count") if isinstance(output, Mapping) else getattr(output, "row_count", None)
-        tracing.annotate(span, {"status": "succeeded", "row_count": rows})
-        return output
+        else:
+            rows = output.get("row_count") if isinstance(output, Mapping) else getattr(output, "row_count", None)
+            tracing.annotate(span, {"status": "succeeded", "row_count": rows})
+            return output
+    raise pause
 
 
 def _call_tool(tools, name, arguments, *, context, metric_bindings=(), request_time_window=None, clarifications=None):
@@ -421,7 +440,7 @@ def _bind_metric_result_positions(arguments, metric_bindings, *, context):
     params = arguments.get("params")
     if type(sql) is not str or not isinstance(params, Mapping):
         return None
-    if not any(binding.metric_id.removeprefix("metric.") in {"gross_fen", "paid_count"} for binding in bindings):
+    if not any(binding.metric_id.removeprefix("metric.") in SQL_PROJECTION_METRICS for binding in bindings):
         return bindings
     parameter_values = ordered_param_values(params)
     if parameter_values is None:
@@ -449,7 +468,7 @@ def _bind_metric_result_positions(arguments, metric_bindings, *, context):
         return None
 
     for metric_id, binding in by_metric.items():
-        if metric_id not in {"gross_fen", "paid_count"}:
+        if metric_id not in SQL_PROJECTION_METRICS:
             continue
         if not _has_bound_window(terms, parameter_values, binding.time_window, statement):
             return None
@@ -502,7 +521,7 @@ def _oriented(term: Comparison):
 
 
 def _metric_scope_filters_match(terms, params, statement: SelectStatement, bindings, tenant_id: str) -> bool:
-    bound_windows = [binding.time_window for binding in bindings if binding.metric_id.removeprefix("metric.") in {"gross_fen", "paid_count"}]
+    bound_windows = [binding.time_window for binding in bindings if binding.metric_id.removeprefix("metric.") in SQL_PROJECTION_METRICS]
     if not bound_windows or any(window != bound_windows[0] for window in bound_windows[1:]):
         return False
     has_paid = False

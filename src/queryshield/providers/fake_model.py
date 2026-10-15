@@ -214,7 +214,7 @@ def _window(text: str, request_window: object) -> dict[str, str]:
 
 def _metrics(question: str, clarification: str) -> list[str]:
     text = f"{question} {clarification}"
-    ambiguous = any(word in question for word in ("销售额", "营业额"))
+    ambiguous = any(word in question for word in _AMBIGUOUS_WORDS)
     if any(word in text for word in ("净额", "退款后")):
         return ["net_fen"]
     metrics: list[str] = []
@@ -320,7 +320,7 @@ def _composite_parts(question: str, clarification: str, request_window: object) 
         metrics[index] = metrics[index] or metrics[index + 1]
     if any(window is None for window in windows) or not all(metrics):
         return None
-    return [(part_metrics, window) for part_metrics, window in zip(metrics, windows)]  # type: ignore[misc]
+    return list(zip(metrics, windows))  # type: ignore[arg-type]
 
 
 def _query_plan(parts: list[tuple[list[str], dict[str, str]]]) -> list[tuple[list[str], dict[str, str]]]:
@@ -329,8 +329,8 @@ def _query_plan(parts: list[tuple[list[str], dict[str, str]]]) -> list[tuple[lis
     plan: list[tuple[list[str], dict[str, str]]] = []
     shared: dict[tuple[str, str], list[str]] = {}
     for metrics, window in parts:
+        key = (window["start"], window["end"])
         for metric_id in metrics:
-            key = (window["start"], window["end"])
             if metric_id == "net_fen":
                 plan.append((["net_fen"], window))
             elif key in shared:
@@ -351,8 +351,8 @@ def _composite_content(
     """B1 queries the parts one after another; a coordinator delegates them.  Both then cite every result."""
 
     answered = _successful_queries(tool_results)
-    planned = len(parts) if coordinator else len(_query_plan(parts))
-    if answered and (coordinator or len(answered) >= planned):
+    plan = _query_plan(parts)
+    if answered and (coordinator or len(answered) >= len(plan)):
         refs = [ref for output in answered for ref in _fact_refs(output)]
         return _dump({"type": "final_answer", "answer": "read-only results verified", "source_ids": [], "fact_refs": refs})
     if search is not None and not answered:
@@ -360,18 +360,26 @@ def _composite_content(
     if coordinator:
         subtasks = [{"metrics": metrics, "time_window": window} for metrics, window in parts]
         return _dump({"type": "delegate", "subtasks": subtasks})
-    metrics, window = _query_plan(parts)[len(answered)]
+    metrics, window = plan[len(answered)]
     return _dump({"type": "tool_call", "name": "query_readonly", "arguments": _metric_call(metrics, window)})
 
 
 def _composite_skill_load(context: dict[str, object], messages: list[dict[str, str]]) -> str | None:
     """Under the skills profile, the load_skill action for a composite question, until the Skill's text is there."""
 
-    offered = '"load_skill"' in json.dumps(context.get("action_contract", {}), ensure_ascii=False)
+    offered = _contract_offers(context, "load_skill")
     loaded = any(
         message.get("role") == "system" and str(message.get("content", "")).startswith(_SKILL_MESSAGE) for message in messages
     )
     return _dump({"type": "load_skill", "skill_id": COMPOSITE_SKILL}) if offered and not loaded else None
+
+
+def _contract_offers(context: dict[str, object], name: str) -> bool:
+    return f'"{name}"' in json.dumps(context.get("action_contract", {}), ensure_ascii=False)
+
+
+def _search_call(question: str) -> str:
+    return _dump({"type": "tool_call", "name": "search_catalog", "arguments": {"query": question[:200], "top_k": 3}})
 
 
 def _retrieval_offered(context: dict[str, object], tools: list[dict[str, Any]] | None) -> bool:
@@ -379,7 +387,7 @@ def _retrieval_offered(context: dict[str, object], tools: list[dict[str, Any]] |
 
     if tools is not None:
         return any(tool["function"]["name"] == "search_catalog" for tool in tools)
-    return '"search_catalog"' in json.dumps(context.get("action_contract", {}), ensure_ascii=False)
+    return _contract_offers(context, "search_catalog")
 
 
 def _searched(tool_results: list[dict[str, object]], messages: list[dict[str, str]]) -> bool:
@@ -417,12 +425,8 @@ def _fake_content(messages: list[dict[str, str]], tools: list[dict[str, Any]] | 
         return skill_load
     if parts is not None and not _ambiguous(question, clarification):
         searched = _searched(tool_results, messages)
-        search = (
-            _dump({"type": "tool_call", "name": "search_catalog", "arguments": {"query": question[:200], "top_k": 3}})
-            if retrieval_offered and not searched
-            else None
-        )
-        coordinator = '"delegate"' in json.dumps(context.get("action_contract", {}), ensure_ascii=False)
+        search = _search_call(question) if retrieval_offered and not searched else None
+        coordinator = _contract_offers(context, "delegate")
         return _composite_content(parts, tool_results, coordinator=coordinator, search=search)
     answer = _answer_from_query_result(tool_results)
     if answer is not None:
@@ -440,10 +444,10 @@ def _fake_content(messages: list[dict[str, str]], tools: list[dict[str, Any]] | 
     searched = _searched(tool_results, messages)
     if question == KNOWLEDGE_SMOKE_QUESTION and not baseline:
         if retrieval_offered and not searched:
-            return _dump({"type": "tool_call", "name": "search_catalog", "arguments": {"query": question[:200], "top_k": 3}})
+            return _search_call(question)
         return _dump({"type": "final_answer", "answer": "fake definition", "source_ids": [], "fact_refs": [], "basis": "knowledge"})
     if retrieval_offered and not baseline and not searched:
-        return _dump({"type": "tool_call", "name": "search_catalog", "arguments": {"query": question[:200], "top_k": 3}})
+        return _search_call(question)
 
     call = _query_call(question, clarification, request_window)
     if call is None:

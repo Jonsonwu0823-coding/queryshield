@@ -12,6 +12,7 @@ from fastapi.exceptions import RequestValidationError
 from queryshield.auth.identity import resolve_identity
 from queryshield.agent.tenant_scope import has_explicit_foreign_tenant
 from queryshield.providers.contracts import (
+    TOKEN_FIELDS,
     ModelAdapter,
     ModelProviderError,
     usage_is_consistent,
@@ -45,6 +46,7 @@ import psycopg
 from psycopg.errors import GroupingError, QueryCanceled, UndefinedColumn
 from queryshield.approval.models import ApprovalRequest, EmptyRequest, PreferenceUpdate, ResumeRequest
 from queryshield.approval.service import (
+    EXECUTING_STATUSES,
     TERMINAL_STATUSES,
     ApprovalConflict,
     ObjectNotFound,
@@ -178,29 +180,23 @@ def _usage_entries(service: RunService, run: Mapping[str, object]) -> list[dict[
         if event.get("type") != "agent_step" or payload.get("kind") != "model_call":
             continue
         usage = payload.get("usage") if isinstance(payload.get("usage"), Mapping) else {}
-        entries.append({
-            "model_call_id": payload.get("model_call_id"),
-            "provider_call_id": payload.get("provider_call_id"),
-            "provider_request_id": payload.get("provider_request_id"),
-            "prompt_tokens": usage.get("prompt_tokens"),
-            "completion_tokens": usage.get("completion_tokens"),
-            "total_tokens": usage.get("total_tokens"),
-            "usage_status": payload.get("usage_status", "unknown"),
-        })
+        entries.append(_usage_entry(payload.get("model_call_id"), payload, usage, payload.get("usage_status", "unknown")))
     if not entries:
         checkpoint = run.get("checkpoint") if isinstance(run.get("checkpoint"), Mapping) else {}
         summary = run.get("usage") if isinstance(run.get("usage"), Mapping) else {}
         for model_call_id in checkpoint.get("model_call_ids", ()) or ():
-            entries.append({
-                "model_call_id": model_call_id,
-                "provider_call_id": None,
-                "provider_request_id": None,
-                "prompt_tokens": summary.get("prompt_tokens"),
-                "completion_tokens": summary.get("completion_tokens"),
-                "total_tokens": summary.get("total_tokens"),
-                "usage_status": summary.get("usage_status", "unknown"),
-            })
+            entries.append(_usage_entry(model_call_id, {}, summary, summary.get("usage_status", "unknown")))
     return entries
+
+
+def _usage_entry(model_call_id: object, ids: Mapping[str, object], usage: Mapping[str, object], status: object) -> dict[str, object]:
+    return {
+        "model_call_id": model_call_id,
+        "provider_call_id": ids.get("provider_call_id"),
+        "provider_request_id": ids.get("provider_request_id"),
+        **{name: usage.get(name) for name in TOKEN_FIELDS},
+        "usage_status": status,
+    }
 
 
 def _model_error_status(code: str) -> int:
@@ -308,9 +304,6 @@ def _public_run(run: Mapping[str, object], *, include_result: bool = False, incl
     return payload
 
 
-_TOKEN_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
-
-
 def _usage_total(run: Mapping[str, object]) -> dict[str, object]:
     """The run's chat-call token total, read back from the stored run.
 
@@ -321,16 +314,16 @@ def _usage_total(run: Mapping[str, object]) -> dict[str, object]:
     ``status``, B0 ``usage_status``.
     """
 
-    if run.get("status") in {"RUNNING", "CANCEL_REQUESTED"}:
-        return {"status": "unknown", **dict.fromkeys(_TOKEN_FIELDS)}
+    if run.get("status") in EXECUTING_STATUSES:
+        return {"status": "unknown", **dict.fromkeys(TOKEN_FIELDS)}
     stored = run.get("usage") if isinstance(run.get("usage"), Mapping) else {}
     status = stored.get("status", stored.get("usage_status"))
-    tokens = {name: stored.get(name) for name in _TOKEN_FIELDS}
+    tokens = {name: stored.get(name) for name in TOKEN_FIELDS}
     if status == "not_run":
-        return {"status": "not_run", **dict.fromkeys(_TOKEN_FIELDS, 0)}
+        return {"status": "not_run", **dict.fromkeys(TOKEN_FIELDS, 0)}
     if status == "known" and usage_is_consistent(*tokens.values()):
         return {"status": "known", **tokens}
-    return {"status": "unknown", **dict.fromkeys(_TOKEN_FIELDS)}
+    return {"status": "unknown", **dict.fromkeys(TOKEN_FIELDS)}
 
 
 def _answer_fields(run: Mapping[str, object]) -> dict[str, object]:
@@ -514,7 +507,7 @@ def _step_summary(payload: Mapping[str, object]) -> dict[str, object]:
     summary = {name: payload[name] for name in _STEP_FIELDS if name in payload}
     usage = payload.get("usage")
     if isinstance(usage, Mapping):
-        summary.update({name: usage[name] for name in _TOKEN_FIELDS if name in usage})
+        summary.update({name: usage[name] for name in TOKEN_FIELDS if name in usage})
     return summary
 
 

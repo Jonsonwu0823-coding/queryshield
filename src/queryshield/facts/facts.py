@@ -234,16 +234,6 @@ def _bound_value(evidence: ResultEvidence, binding: MetricBinding, metric_id: st
     return value
 
 
-def resolve_fact_refs(
-    fact_refs: Sequence[FactRef],
-    *,
-    context: ExecutionContext,
-    evidences: Mapping[str, ResultEvidence],
-    catalog: SemanticCatalog | None = None,
-) -> FactsEnvelope:
-    return FactResolver(catalog).resolve(fact_refs, context=context, evidences=evidences)
-
-
 __all__ = [
     "FACTS_SCHEMA_VERSION",
     "Fact",
@@ -251,5 +241,4 @@ __all__ = [
     "FactsEnvelope",
     "FactResolver",
     "is_scalar_metric_result",
-    "resolve_fact_refs",
 ]

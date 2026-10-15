@@ -76,10 +76,7 @@ def test_hybrid_search_keeps_public_shape_and_records_rrf_evidence() -> None:
     second_ids = [item["id"] for item in second["items"]]
     assert first_ids == second_ids
 
-    first_evidence = tools.get_retrieval_evidence(
-        tools._retrieval_evidence[(context.run_id, next(iter(tools._retrieval_evidence))[1])].retrieval_id,
-        context=context,
-    )
+    first_evidence = tools._retrieval_evidence[(context.run_id, next(iter(tools._retrieval_evidence))[1])]
     assert first_evidence.strategy_version == "hybrid-v1"
     assert first_evidence.selected_ids == tuple(first_ids)
     assert first_evidence.embedding_call_id
@@ -100,10 +97,7 @@ def test_auth_filter_happens_before_and_after_hybrid_retrieval() -> None:
     tools = ControlledTools(retriever=_retriever())
     tenant_a = _context(tenant_id="tenant-A")
     result = tools.search_catalog({"query": "订单", "top_k": 5}, context=tenant_a)
-    evidence = tools.get_retrieval_evidence(
-        next(iter(tools._retrieval_evidence))[1],
-        context=tenant_a,
-    )
+    evidence = tools._retrieval_evidence[(tenant_a.run_id, next(iter(tools._retrieval_evidence))[1])]
 
     assert all("tenant-b" not in str(item).lower() for item in result["items"])
     assert all("tenant-b" not in candidate_id.lower() for candidate_id in evidence.visible_candidate_ids)
@@ -119,10 +113,7 @@ def test_unknown_query_has_explicit_empty_result() -> None:
     result = tools.search_catalog({"query": "__unknown__", "top_k": 3}, context=context)
 
     assert result == {"items": []}
-    evidence = tools.get_retrieval_evidence(
-        next(iter(tools._retrieval_evidence))[1],
-        context=context,
-    )
+    evidence = tools._retrieval_evidence[(context.run_id, next(iter(tools._retrieval_evidence))[1])]
     assert evidence.selected_ids == ()
     assert evidence.visible_candidate_ids
 

@@ -6,7 +6,6 @@ from queryshield.facts.facts import (
     FactResolutionError,
     FactsEnvelope,
     FactResolver,
-    resolve_fact_refs,
 )
 
 __all__ = [
@@ -15,5 +14,4 @@ __all__ = [
     "FactResolutionError",
     "FactsEnvelope",
     "FactResolver",
-    "resolve_fact_refs",
 ]
