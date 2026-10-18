@@ -21,6 +21,7 @@ from langgraph.graph import END, START, StateGraph
 
 from queryshield import tracing
 from queryshield.agent.config import DEFAULT_RUN_CONFIG, RunConfig
+from queryshield.agent.follow_up import FOLLOW_UP_CONTEXT_EXCEEDED, FollowUp
 from queryshield.agent.context import (
     CONTEXT_VERSION,
     MAX_RETRIEVAL_ITEMS,
@@ -226,6 +227,8 @@ class _GraphState(TypedDict, total=False):
     # keeps its events apart) and the coordinator's checked delegation plan.
     agent: str
     delegation: Mapping[str, object] | None
+    # A follow-up question only: the server's record of the run it continues.
+    follow_up: FollowUp
 
 
 @dataclass(frozen=True)
@@ -335,6 +338,7 @@ class BoundedAgent:
         metric_bindings: Sequence[MetricBinding] = (),
         parallel_plan: ParallelPlan | None = None,
         request_time_window: Mapping[str, object] | None = None,
+        follow_up: FollowUp | None = None,
         _evaluation_initial_retrieval_items: Sequence[Mapping[str, object]] = (),
     ) -> AgentRunResult:
         """Run one request.
@@ -342,6 +346,7 @@ class BoundedAgent:
         ``metric_bindings`` are server pre-bound bindings (a confirmed slot);
         ``request_time_window`` is the request-level window, like a date
         picker.  Model metric declarations must agree with both.
+        ``follow_up`` is context only, never a binding.
         """
 
         if not isinstance(context, ExecutionContext):
@@ -372,6 +377,7 @@ class BoundedAgent:
             request_time_window=normalized_request_window,
             parallel_plan=parallel_plan,
             retrieval_items=initial_retrieval_items,
+            **({"follow_up": follow_up} if follow_up is not None else {}),
         )
         final_state = self._invoke(state)
         result = self._result_from_state(final_state, run_id=context.run_id)
@@ -435,13 +441,20 @@ class BoundedAgent:
         context: ExecutionContext,
         answer: str,
         checkpoint: Mapping[str, object],
+        *,
+        follow_up: FollowUp | None = None,
     ) -> AgentRunResult:
-        """Restore and resume one persisted checkpoint after server authorization."""
+        """Restore and resume one persisted checkpoint after server authorization.
+
+        A follow-up run's record is kept by the server with the run, not in the checkpoint.
+        """
 
         if not isinstance(context, ExecutionContext):
             raise TypeError("context must be an ExecutionContext")
         _require_resume_answer(answer)
         state = _deserialize_agent_checkpoint(checkpoint, expected_context=context)
+        if follow_up is not None:
+            state["follow_up"] = follow_up
         if state["run_config"] != self.run_config:
             raise RunResumeError("resume_profile_mismatch", "checkpoint profile differs from the configured agent")
         # The agent is built from the stored configuration, so compare its Skills with the deployed ones.
@@ -711,6 +724,7 @@ class BoundedAgent:
             delegate_available=self._can_delegate,
             skills=self.skills,
             loaded_skills=self._loaded_skills(state),
+            previous_turn=state["follow_up"].message_payload() if "follow_up" in state else None,
         )
 
     def _loaded_skills(self, state: Mapping[str, object]) -> tuple[Skill, ...]:
@@ -734,7 +748,9 @@ class BoundedAgent:
         try:
             context_result = self._step_context(state)
         except ContextBuildError as exc:
-            return self._failure_update(state, code=exc.code, reason=str(exc))
+            # A follow-up that does not fit is asked again as a new question.
+            code = FOLLOW_UP_CONTEXT_EXCEEDED if exc.code == "context_budget_exceeded" and "follow_up" in state else exc.code
+            return self._failure_update(state, code=code, reason=str(exc))
 
         identity = self.call_store.new_call(state["context"].run_id)
         # What every outcome of this step records about the call.

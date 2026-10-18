@@ -27,7 +27,7 @@
 
 ### 2.1 Linux / macOS（Docker 里的 PostgreSQL）
 
-沿用 README“不用 Compose 的本机安装”的容器名和端口（容器的超级用户叫 `queryshield`）。尖括号里换成你自己的密码，只放在当前 shell 里，不要写进文件。前提：只读角色 `queryshield_ro` 已存在（见 README）。
+沿用 [README](../README.zh-CN.md)“不用 Compose 的本机安装”的容器名和端口（容器的超级用户叫 `queryshield`）。尖括号里换成你自己的密码，只放在当前 shell 里，不要写进文件。前提：只读角色 `queryshield_ro` 已存在（见 README）。
 
 ```bash
 cd queryshield

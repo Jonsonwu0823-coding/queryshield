@@ -32,7 +32,7 @@ SHUTDOWN_SECONDS = 5.0
 # The only fields a span or a span event carries: ids, enums and numbers, never text a person
 # or a model wrote (docs/operations.md).  Each becomes ``queryshield.<field>`` unless named here.
 FIELDS = frozenset({
-    "run_id", "segment", "profile", "approval_id", "model_call_id", "request_id", "agent", "subtask_index",
+    "run_id", "segment", "profile", "previous_run_id", "approval_id", "model_call_id", "request_id", "agent", "subtask_index",
     "endpoint", "tool_name", "skill_id", "status", "error_code", "provider_error_code", "http_status",
     "attempt_count", "row_count", "model_call_count", "tool_call_count", "sql_exec_count",
     "prompt_tokens", "completion_tokens", "total_tokens",

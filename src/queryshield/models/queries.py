@@ -38,6 +38,8 @@ class QueryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     question: str = Field(max_length=500)
     time_window: RequestTimeWindow | None = None
+    # A follow-up question: the caller's own SUCCEEDED run it continues.
+    previous_run_id: str | None = Field(default=None, max_length=64)
 
     @field_validator("question", mode="before")
     @classmethod

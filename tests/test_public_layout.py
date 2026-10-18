@@ -49,9 +49,10 @@ def test_license_is_the_standard_mit_text_with_the_copyright_line() -> None:
     assert 'THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND' in text
 
 
-def test_readme_ends_with_a_license_section_that_links_the_license_file() -> None:
-    readme = _text(PROJECT_ROOT / "README.md")
-    section = readme[readme.index("\n## 许可证"):]
+@pytest.mark.parametrize("name, heading", [("README.md", "## License"), ("README.zh-CN.md", "## 许可证")])
+def test_readme_ends_with_a_license_section_that_links_the_license_file(name: str, heading: str) -> None:
+    readme = _text(PROJECT_ROOT / name)
+    section = readme[readme.index("\n" + heading):]
     assert "MIT" in section and "](LICENSE)" in section
     assert "\n## " not in section[1:], "the license section is the last one"
 

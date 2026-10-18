@@ -294,6 +294,9 @@ def _public_run(run: Mapping[str, object], *, include_result: bool = False, incl
     }
     if run.get("approval_id") is not None:
         payload["approval_id"] = run["approval_id"]
+    envelope = run.get("checkpoint") if isinstance(run.get("checkpoint"), Mapping) else {}
+    if envelope.get("previous_run_id") is not None:
+        payload["previous_run_id"] = envelope["previous_run_id"]
     if run.get("error_code") is not None:
         payload["error_code"] = run["error_code"]
     if include_result:
@@ -682,6 +685,19 @@ def create_query(
             message="只支持Prefer: respond-async",
         )
 
+    follow_up = None
+    if query.previous_run_id is not None:
+        try:
+            follow_up = run_service.follow_up(previous_run_id=query.previous_run_id, identity=identity, profile=profile)
+        except ObjectNotFound:
+            return _query_error(http_request, status_code=404, code="not_found", message="上一轮任务不存在")
+        except ApprovalConflict as exc:
+            if exc.code == "not_supported":
+                return _query_error(http_request, status_code=501, code=exc.code, message="该运行配置不支持接着上一轮问")
+            return _query_error(
+                http_request, status_code=409, code=exc.code, message="上一轮任务还没有成功结束；等追问的任务用 /resume"
+            )
+
     time_window = query.time_window.as_window() if query.time_window is not None else None
     deps = RuntimeDependencies(
         model=model,
@@ -701,9 +717,12 @@ def create_query(
                 question=query.question,
                 time_window=time_window,
                 deps=replace(deps, call_store=None),
+                follow_up=follow_up,
             )
         else:
-            run = run_service.run_sync(identity=identity, question=query.question, time_window=time_window, deps=deps)
+            run = run_service.run_sync(
+                identity=identity, question=query.question, time_window=time_window, deps=deps, follow_up=follow_up
+            )
     except ApprovalConflict as exc:
         return _query_error(http_request, status_code=503, code=exc.code, message="当前运行容量已满")
     http_request.state.run_id = str(run["run_id"])

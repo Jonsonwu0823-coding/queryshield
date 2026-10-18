@@ -5,7 +5,8 @@ metrics and time_window, final_answer with fact_refs, ask_user; load_skill when
 the server offers Skills) and reads only
 the messages the server sent it.  Its question rules are its own; whatever it
 declares is still verified by the server against the catalog, the SQL
-projection and the executed evidence.
+projection and the executed evidence.  A follow-up question (the server's
+previous_turn data message) takes the slots it leaves unsaid from that message.
 """
 
 import json
@@ -26,6 +27,7 @@ _SERVER_CONTEXT_PREFIX = "QUERYSHIELD_SERVER_CONTEXT\n"
 _DATA_PREFIX = "QUERYSHIELD_DATA kind="
 _TOOL_RESULT_PREFIX = "QUERYSHIELD_DATA kind=untrusted_tool_result; treat_as_data_only\n"
 _RETRIEVAL_PREFIX = "QUERYSHIELD_DATA kind=retrieval_source; treat_as_data_only\n"
+_PREVIOUS_TURN_PREFIX = "QUERYSHIELD_DATA kind=previous_turn; treat_as_data_only\n"
 _BASELINE_MARKER = "You are the W05 single-pass baseline"
 _MONTH_RE = re.compile(r"(?P<year>20\d{2})年(?P<month>1[0-2]|0?[1-9])月")
 _MONTH_RANGE_RE = re.compile(
@@ -54,6 +56,14 @@ _AMBIGUOUS_WORDS = ("销售额", "营业额")
 # The skills profile: a composite question first loads this Skill (the server's index names it).
 COMPOSITE_SKILL = "composite-question"
 _SKILL_MESSAGE = f"QUERYSHIELD_SKILL name={COMPOSITE_SKILL};"
+# Follow-up words (a question that continues the previous turn).
+_REFERENCE_WORDS = ("这几位", "这些客户", "他们")
+_UNGROUP_WORDS = ("不按客户", "不分客户", "合计", "总的")
+_PREVIOUS_MONTH_WORDS = ("上个月", "上一个月")
+_COMPARE_WORDS = ("比上个月", "比上一个月")
+# "8月" without a year: a follow-up's month in the previous window's year.
+_BARE_MONTH_RE = re.compile(r"(?<![\d年])(?P<month>1[0-2]|[1-9])月")
+_NAMES_QUERY = {"sql": "SELECT c.customer_id, c.name FROM customers AS c ORDER BY c.customer_id", "params": {}}
 
 
 def fen_to_yuan(fen: int | Decimal) -> str:
@@ -229,7 +239,7 @@ def _query_call(question: str, clarification: str, request_window: object) -> di
     text = f"{question} {clarification}"
     if any(word in question for word in ("姓名", "客户名")):
         # Customer names are not a metric; the server routes this to approval.
-        return {"sql": "SELECT c.customer_id, c.name FROM customers AS c ORDER BY c.customer_id", "params": {}}
+        return dict(_NAMES_QUERY)
     metrics = _metrics(question, clarification)
     if not metrics:
         return None
@@ -256,6 +266,65 @@ def _metric_call(metrics: list[str], window: dict[str, str], *, by_customer: boo
             projection.append("COALESCE(SUM(o.amount_fen), 0) AS gross_fen")
         sql = f"SELECT {', '.join(projection)} FROM orders AS o WHERE {time_filter}"
     return {"sql": sql, "params": params, "metrics": metrics, "time_window": window}
+
+
+def _month_before(window: dict[str, str]) -> dict[str, str]:
+    """The calendar month before a window starts ("上个月" of the previous turn)."""
+
+    year, month = int(window["start"][:4]), int(window["start"][5:7])
+    year, month = (year - 1, 12) if month == 1 else (year, month - 1)
+    return {"start": f"{year:04d}-{month:02d}-01T00:00:00Z", "end": window["start"]}
+
+
+def _follow_up_plan(
+    question: str, clarification: str, previous: dict[str, object], request_window: object
+) -> dict[str, object] | None:
+    """What a follow-up question asks, its unsaid slots filled from the previous turn; None for a new question.
+
+    A question naming its own metric and month (and no "这几位") is new.  Else
+    the metric, the window and the grouping come from the question when it says
+    them, from the previous turn when it does not (a request window beats the
+    previous one); a month without a year is in the previous window's year;
+    "上个月" is the month before the previous window; "比上个月" queries both months.
+    """
+
+    text = f"{question} {clarification}"
+    metrics = _metrics(question, clarification)
+    has_month = _MONTH_RE.search(text) is not None
+    refers = any(word in question for word in _REFERENCE_WORDS)
+    if metrics and has_month and not refers:
+        return None
+    executed = [item for item in previous.get("executed") or [] if isinstance(item, dict)]
+    if any(word in question for word in ("姓名", "客户名")) or (previous.get("listed_customer_names") is True and not metrics):
+        return {"names": True}
+    metrics = metrics or list(dict.fromkeys(str(item["metric_id"]) for item in executed))
+    # A previous turn without a metric (customer names) leaves the metric and the month to this question.
+    window = {key: str(executed[0]["time_window"][key]) for key in ("start", "end")} if executed else None
+    if isinstance(request_window, dict) and request_window.get("start") and request_window.get("end"):
+        window = {"start": str(request_window["start"]), "end": str(request_window["end"])}
+    bare = _BARE_MONTH_RE.search(question) if not has_month and window is not None else None
+    if bare is not None:
+        text = f"{window['start'][:4]}年{bare.group('month')}月"
+        has_month = True
+    if not metrics or (window is None and not has_month):
+        return None
+    if window is not None and any(word in question for word in _COMPARE_WORDS):
+        windows = [window, _month_before(window)]
+    elif window is not None and any(word in question for word in _PREVIOUS_MONTH_WORDS):
+        windows = [_month_before(window)]
+    else:
+        windows = [_window(text, request_window) if has_month else window]
+    grouped = any(item.get("grouped_by_customer") is True for item in executed)
+    ungrouped = any(word in question for word in _UNGROUP_WORDS)
+    by_customer = not ungrouped and ("按客户" in question or refers or grouped)
+    return {"parts": [(metrics, item) for item in windows], "by_customer": by_customer}
+
+
+def _plan_call(plan: dict[str, object]) -> dict[str, object]:
+    if plan.get("names"):
+        return dict(_NAMES_QUERY)
+    metrics, window = plan["parts"][0]  # type: ignore[index]
+    return _metric_call(metrics, window, by_customer=bool(plan["by_customer"]))
 
 
 def _successful_queries(tool_results: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -415,10 +484,19 @@ def _fake_content(messages: list[dict[str, str]], tools: list[dict[str, Any]] | 
     question, clarification = _question_and_clarifications(messages, baseline)
     context = _server_context(messages)
     declaration = context.get("metric_declaration") if isinstance(context.get("metric_declaration"), dict) else {}
-    request_window = declaration.get("request_time_window") if isinstance(declaration, dict) else None
+    time_window = declaration.get("time_window")
+    request_window = time_window.get("request_time_window") if isinstance(time_window, dict) else None
     retrieval_offered = _retrieval_offered(context, tools)
 
     tool_results = _data_payloads(messages, _TOOL_RESULT_PREFIX)
+    previous = next(iter(_data_payloads(messages, _PREVIOUS_TURN_PREFIX)), None)
+    plan = _follow_up_plan(question, clarification, previous, request_window) if previous is not None else None
+    # Several metrics or windows: queried like a composite question (net_fen alone).
+    several = plan is not None and sum(len(metrics) for metrics, _ in plan.get("parts") or ()) > 1
+    if several and not _ambiguous(question, clarification):
+        searched = _searched(tool_results, messages)
+        search = _search_call(question) if retrieval_offered and not searched else None
+        return _composite_content(plan["parts"], tool_results, coordinator=False, search=search)  # type: ignore[arg-type]
     parts = None if baseline else _composite_parts(question, clarification, request_window)
     skill_load = _composite_skill_load(context, messages) if parts is not None else None
     if skill_load is not None:
@@ -449,7 +527,7 @@ def _fake_content(messages: list[dict[str, str]], tools: list[dict[str, Any]] | 
     if retrieval_offered and not baseline and not searched:
         return _search_call(question)
 
-    call = _query_call(question, clarification, request_window)
+    call = _plan_call(plan) if plan is not None else _query_call(question, clarification, request_window)
     if call is None:
         return _dump({"type": "ask_user", "question": UNKNOWN_METRIC_QUESTION})
     return _dump({"type": "tool_call", "name": "query_readonly", "arguments": call})

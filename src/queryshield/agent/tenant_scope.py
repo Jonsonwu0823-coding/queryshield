@@ -5,9 +5,19 @@ from __future__ import annotations
 import re
 
 
+_CHINESE_NOUNS = "租户|商户|商家|店铺|门店|公司"
+_ENGLISH_NOUNS = "tenant|merchant"
+# A label is one letter, optionally followed by digits ("B", "B2"; tenant-A loses its prefix),
+# never glued to a letter, digit or underscore: "租户2026年" names a month, and "show", "ID",
+# "the" or "tenant-acme" are words, not labels.
+_LABEL = r"(?<![A-Za-z0-9_])[A-Za-z][0-9]*(?![A-Za-z0-9_])"
 _TENANT_MENTION_PATTERNS = (
-    re.compile(r"(?i)(?<![A-Za-z0-9_])tenant(?:\s*-\s*|\s+)([A-Za-z0-9][A-Za-z0-9_.-]*)"),
-    re.compile(r"租户\s*([A-Za-z0-9][A-Za-z0-9_.-]*)"),
+    # noun first: "租户B", "商户 B", "tenant-B", "merchant B"
+    re.compile(rf"(?i)(?<![A-Za-z0-9_])(?:{_ENGLISH_NOUNS})(?:\s*-\s*|\s+)({_LABEL})"),
+    re.compile(rf"(?:{_CHINESE_NOUNS})\s*({_LABEL})"),
+    # label first: "B租户", "B 商户", "B tenant"
+    re.compile(rf"({_LABEL})\s*(?:{_CHINESE_NOUNS})"),
+    re.compile(rf"(?i)({_LABEL})\s+(?:{_ENGLISH_NOUNS})(?![A-Za-z0-9_])"),
 )
 
 
@@ -18,9 +28,11 @@ def _tenant_key(value: str) -> str:
 def explicit_foreign_tenant_mentions(question: object, authenticated_tenant_id: object) -> tuple[str, ...]:
     """Return explicit tenant labels that differ from the authenticated tenant.
 
-    The check is intentionally narrow: it recognizes explicit ``tenant-B``,
-    ``tenant B`` and ``租户B`` mentions. It does not infer a tenant from SQL,
-    metadata, model output, or an evaluation case's expected values.
+    The check is intentionally narrow: a tenant noun (租户, 商户, 商家, 店铺, 门店,
+    公司, tenant, merchant) next to a label of one letter and optional digits, in
+    either order ("租户B", "B 商户", "tenant-B", "B2 tenant"). It does not infer a tenant from a
+    business description, SQL, metadata, model output, or an evaluation case's
+    expected values.
     """
 
     if type(question) is not str or type(authenticated_tenant_id) is not str:
@@ -29,9 +41,7 @@ def explicit_foreign_tenant_mentions(question: object, authenticated_tenant_id: 
     if not current_key:
         return ()
 
-    mentions: list[str] = []
-    for pattern in _TENANT_MENTION_PATTERNS:
-        mentions.extend(match.group(1) for match in pattern.finditer(question))
+    mentions = [match.group(1) for pattern in _TENANT_MENTION_PATTERNS for match in pattern.finditer(question)]
     foreign: list[str] = []
     seen: set[str] = set()
     for mention in mentions:

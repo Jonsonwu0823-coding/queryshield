@@ -196,6 +196,9 @@ class RuleReading:
             return "open"
         if self.ambiguous:
             return "mixed"
+        if len(self.question_values) >= 2:
+            # The question names two or more values and the user chose none: still a choice to ask.
+            return "open"
         if self.question_values:
             return "resolved"
         return "silent"
@@ -307,7 +310,8 @@ class AskVerdict:
 def review_ask(reading: ClarificationReading, clarification_id: str | None, ask_text: str) -> AskVerdict:
     """Which catalog rule the model asks about, and whether asking is warranted.
 
-    A rule the wording leaves open (open/mixed) is asked on its catalog
+    A rule the wording leaves open (open/mixed: an ambiguous phrase, or two or
+    more of its values named and none chosen) is asked on its catalog
     question whenever the ask touches it at all.  Sending the model back (a
     rule the wording settles), or replacing its question for a rule the
     question never mentions, needs a strong signal: the declared

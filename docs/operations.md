@@ -238,7 +238,7 @@ docker compose -f compose.yaml -f compose.fake-upstream.yaml -f compose.model-ga
 
 **追踪头。** 聊天和嵌入请求都带 W3C 请求头 `traceparent: 00-<trace-id>-<parent-id>-01`（小写十六进制，trace-id 32 位、parent-id 16 位，flags 固定 `01`，不发 `tracestate`）。一个 run 一条追踪：带 `X-Run-Id` 的调用，trace-id 是 run 编号 UTF-8 字节的 SHA-256 的前 32 位，同一个 run 的聊天调用、查询嵌入、子 Agent 的调用、追问后恢复和进程重启之后的调用都相同，不同的 run 不同。run 之外的调用（建知识索引、探针）每次逻辑调用随机一条新的。parent-id 每次 HTTP 尝试随机一个新的，重试那次也换新（trace-id 不变），记成这次尝试的 `span_id`。run 的公开响应有 `trace_id`，等于这个 run 请求头里的 trace-id；演示摘要的记录和 `run_id` 一样带 `trace_id`，没有建 run 的是 `null`，`not_applicable` 的记录没有。现有的请求头和请求体都不变；网关只拿它关联日志，不用来认证和计费。
 
-**导出 span。** 默认不导出。设了 `QUERYSHIELD_OTLP_TRACES_URL`（Compose 透传，默认空），服务启动时用 OpenTelemetry SDK 按 OTLP/HTTP 把 QueryShield 自己的 span 批量发到这个地址，`service.name` 是 `queryshield`，全部采样。一个 run 一条 trace，trace-id 就是上面请求头里的那个：run 的每段执行（首次执行、追问后恢复、审批后执行、启动时结束上个进程留下的 run）各是一个根 span `queryshield.run`，下面是 Agent 的每一步 `queryshield.step.<节点>`（这一步记下的 Agent 事件作为 span 的事件）、B2 的子 Agent `queryshield.subtask`、工具调用 `queryshield.tool`（数据库查询在里面）、每次逻辑模型调用 `queryshield.model_call`（聊天和嵌入），以及每次 HTTP 尝试一个 CLIENT span `queryshield.http_attempt`。尝试 span 的 id 就是这次请求头里的 parent-id，也是尝试记录的 `span_id`，所以网关的 span 挂在它下面。B0 没有步骤 span。run 之外的调用（建知识索引等）每次逻辑调用一条自己的 trace。属性只有编号（run、模型调用、请求、审批）、枚举（配置、步骤、状态、工具名、错误码）和数字（行数、用量、HTTP 状态码、次数）；不放问题、回答、SQL、参数值、客户姓名、租户和用户的身份、令牌、密钥、地址、提示词，出错时只标失败，不记异常消息。收集器连不上、超时或报错时 run 照常进行，这批 span 丢掉，日志里有导出失败的警告；服务关闭时把剩下的发一次，最多等 5 秒。MCP 子进程不导出 span，宿主发给它的 MCP 请求里也不带追踪上下文。不设这个变量时不建导出器、不起后台线程、不发任何请求，请求头和尝试记录不变。追踪不写进状态库。
+**导出 span。** 默认不导出。设了 `QUERYSHIELD_OTLP_TRACES_URL`（Compose 透传，默认空），服务启动时用 OpenTelemetry SDK 按 OTLP/HTTP 把 QueryShield 自己的 span 批量发到这个地址，`service.name` 是 `queryshield`，全部采样。一个 run 一条 trace，trace-id 就是上面请求头里的那个：run 的每段执行（首次执行、追问后恢复、审批后执行、启动时结束上个进程留下的 run）各是一个根 span `queryshield.run`，下面是 Agent 的每一步 `queryshield.step.<节点>`（这一步记下的 Agent 事件作为 span 的事件）、B2 的子 Agent `queryshield.subtask`、工具调用 `queryshield.tool`（数据库查询在里面）、每次逻辑模型调用 `queryshield.model_call`（聊天和嵌入），以及每次 HTTP 尝试一个 CLIENT span `queryshield.http_attempt`。尝试 span 的 id 就是这次请求头里的 parent-id，也是尝试记录的 `span_id`，所以网关的 span 挂在它下面。B0 没有步骤 span。run 之外的调用（建知识索引等）每次逻辑调用一条自己的 trace。属性只有编号（run、模型调用、请求、审批；接着上一轮问的 run 的根 span 另有 `queryshield.previous_run_id`，上一个 run 的编号）、枚举（配置、步骤、状态、工具名、错误码）和数字（行数、用量、HTTP 状态码、次数）；不放问题、回答、SQL、参数值、客户姓名、租户和用户的身份、令牌、密钥、地址、提示词，出错时只标失败，不记异常消息。收集器连不上、超时或报错时 run 照常进行，这批 span 丢掉，日志里有导出失败的警告；服务关闭时把剩下的发一次，最多等 5 秒。MCP 子进程不导出 span，宿主发给它的 MCP 请求里也不带追踪上下文。不设这个变量时不建导出器、不起后台线程、不发任何请求，请求头和尝试记录不变。追踪不写进状态库。
 
 **按 run 对账。** 网关按 `X-Run-Id` 汇总的数，和 `GET /runs/{id}` 返回的 run 对：聊天调用的条数对 `model_call_count`，聊天调用的用量对 `usage_total`（`status` 是 `known` 时三个数是合计；`unknown` 时三个数是 `null`，表示合计不完整，不能当 0 对；`not_run` 时是 0）。嵌入不按 run 计：run 里的查询嵌入带 `X-Run-Id`，但不进这两个数；建知识索引的嵌入调用不带 `X-Run-Id`。只对已经停下（等待中或已结束）的 run 对账：执行期间（`RUNNING`、`CANCEL_REQUESTED`，包括追问后恢复和审批后执行）`usage_total` 一律是 `unknown`。被取消的 run 也可以对账：执行停下后只写一条终止事件，终态之后计数和合计不再变。返回了 202 的取消，run 一定以 `CANCELLED` 结束，计数和合计按这次执行算；取消正好落在执行结束之后，返回 200 和结束时的 run，不写任何东西。执行中途抛异常结束的 run，出错前已经记下的调用都在这两个数里；只有一次调用发出了、它所在的步骤却没完成时，网关会比 `model_call_count` 多这一次，这时 `usage_total` 是 `unknown`。进程在执行中退出、重启时被结束的 run（`FAILED` 加 `execution_interrupted`，或请求过取消的 `CANCELLED`）：计数是中断前存下的值（首次执行是 0，恢复和审批后执行是暂停时的），用量是 `unknown`，不能拿计数和网关比，跳过这种 run。
 
@@ -268,6 +268,24 @@ pwsh -NoProfile -File scripts/check-all.ps1 -EvidenceDir "$PWD/evidence/check-al
 | `STATE-X01`、`EVAL-X01` | 读上游资产登记表和两个验收标签；登记表或标签不在时记 `not_applicable` 并写明原因（例如导出的公开仓库）。CI 取完整历史和标签，所以在 CI 里跑 |
 
 CI（`.github/workflows/queryshield-ci.yml`）有两个任务：`checks`（起 PostgreSQL，`setup_databases.py --test --demo`，再 `check-all.ps1`）和 `compose`（从空环境起 Compose、跑两遍演示脚本——先默认设置、再 MCP 设置——并做停止与重启的检查）。不使用仓库密钥：数据库密码和令牌在运行时随机生成并遮蔽；上传的产物只有摘要和检查的文字输出，不含 `*-raw.json`。
+
+### 多轮开发评测（不在 check-all 里）
+
+`scripts/conversation_eval.py` 在演示库上经 HTTP 跑 `evals/development/conversation-cases-v1.json` 的多轮对话（每轮带 `previous_run_id`），用法和演示脚本相同：Fake 模式自己起服务；`--base-url` 驱动已经在跑的服务（令牌取 `QUERYSHIELD_TOKEN_*`，状态库取 `QUERYSHIELD_STATE_STORE_PATH`）；`--profile` 只能是 `b1` 或 `b1s`（B0、B2 不接追问）。`--evidence-dir` 必填，证据是 `conversation-summary.json`（只有编号和数字）和 `conversation-raw.json`（问题、回答和行，含客户姓名，只在本机用）。
+
+```bash
+# 演示库（docs/demo-data.md）；Fake 模式只跑 Fake 能回答的对话
+python scripts/conversation_eval.py --mode fake --evidence-dir "$PWD/evidence/conversation-fake"
+# 用例由生成器算出；改了生成器或用例之后重写，再提交
+python scripts/conversation_eval.py --write-cases
+```
+
+用真实模型跑（付费）有两种办法，结果一样：
+
+- **本机，脚本自己起服务**（和盲测正式运行的方式一样，不用 Compose）：本机的演示库（`QUERYSHIELD_DATABASE_URL` 指向 `queryshield_demo`）加上第 3 节的模型和嵌入变量（经模型网关时两个地址都是网关在本机的地址，两个 Key 都是网关发的 Key），然后 `python scripts/conversation_eval.py --mode real --evidence-dir evidence/conversation-real-1`。脚本像演示脚本一样起一个本机的 uvicorn，配置是默认的 B1。
+- **Compose 栈里**：照“经模型网关调用模型”一节起栈，再在 `app` 容器里用 `--mode real --base-url http://127.0.0.1:8000` 运行，把两份证据拷到本机的 `evidence/` 下。
+
+证据都放在 `evidence/` 下（已忽略，不提交）。退出码：0 通过，1 有硬失败（审批违规、数值不符等；Fake 模式下任何一轮没答对也是），2 blocked。
 
 ### 改了 `.env` 里的密码之后
 

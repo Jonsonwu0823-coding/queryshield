@@ -28,7 +28,8 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from queryshield import tracing
-from queryshield.agent.context import NET_FEN_TIME_WINDOW
+from queryshield.agent.context import NET_FEN_TIME_WINDOW, previous_turn_content
+from queryshield.agent.follow_up import FollowUp, follow_up_from_run, same_as_previous_line
 from queryshield.agent.graph import RunResumeError, _usage_summary
 from queryshield.agent.metric_intent import build_metric_binding
 from queryshield.agent.proposals import ExecutionContext, FactRef, MetricBinding, ResultEvidence
@@ -36,6 +37,7 @@ from queryshield.agent.config import RunConfig
 from queryshield.agent.runtime import (
     B2_PROFILE,
     BOUNDED_PROFILES,
+    FOLLOW_UP_PROFILES,
     CountingExecutor,
     CountingModel,
     RuntimeConfigurationError,
@@ -521,6 +523,7 @@ class RunService:
         time_window: Mapping[str, str] | None,
         deps: RuntimeDependencies,
         metadata: object | None = None,
+        follow_up: FollowUp | None = None,
     ) -> str:
         _check_metadata_tools(deps.profile, metadata)
         if self._active_count() >= MAX_ACTIVE_RUNS:
@@ -539,6 +542,8 @@ class RunService:
             "request_time_window": dict(time_window) if time_window is not None else None,
             "status": "RUNNING",
         }
+        if follow_up is not None:
+            checkpoint.update(previous_run_id=follow_up.previous_run_id, follow_up=follow_up.as_dict())
         # Registered before the run exists as RUNNING; ``_execute_run`` unregisters it.
         _register(run_id)
         try:
@@ -581,6 +586,23 @@ class RunService:
             else DEFAULT_KNOWLEDGE_SNAPSHOT
         )
 
+    def follow_up(self, *, previous_run_id: str, identity: Mapping[str, str], profile: str) -> FollowUp:
+        """The record a follow-up question carries: the caller's own SUCCEEDED run, under a profile that takes one.
+
+        Checked before any run is created: the profile (501, whatever the run),
+        then the owner (404, as for a run that does not exist), then the status (409).
+        """
+
+        if profile not in FOLLOW_UP_PROFILES:
+            raise ApprovalConflict("not_supported", "this profile does not take a follow-up question")
+        subject = RunIdentity.from_mapping(identity)
+        run = self.store.get_run(previous_run_id)
+        if run is None or run.get("tenant_id") != subject.tenant_id or run.get("principal_id") != subject.principal_id:
+            raise ObjectNotFound()
+        if run.get("status") != "SUCCEEDED":
+            raise ApprovalConflict("previous_run_not_succeeded", "only a SUCCEEDED run can be followed up")
+        return follow_up_from_run(run)
+
     def run_sync(
         self,
         *,
@@ -588,14 +610,15 @@ class RunService:
         question: str,
         time_window: Mapping[str, str] | None = None,
         deps: RuntimeDependencies | None = None,
+        follow_up: FollowUp | None = None,
     ) -> dict[str, object]:
         """Run inside the caller's request; counts toward the same capacity as async."""
 
         subject = RunIdentity.from_mapping(identity)
         metadata = self.metadata_config()
         deps = deps or self.default_dependencies()
-        run_id = self._reserve_run(subject, question, time_window, deps, metadata)
-        return self._execute_run(run_id, subject, question, time_window, deps, metadata)
+        run_id = self._reserve_run(subject, question, time_window, deps, metadata, follow_up)
+        return self._execute_run(run_id, subject, question, time_window, deps, metadata, follow_up)
 
     def start_async(
         self,
@@ -604,14 +627,15 @@ class RunService:
         question: str,
         time_window: Mapping[str, str] | None = None,
         deps: RuntimeDependencies | None = None,
+        follow_up: FollowUp | None = None,
     ) -> dict[str, object]:
         subject = RunIdentity.from_mapping(identity)
         metadata = self.metadata_config()
         deps = deps or self.default_dependencies()
-        run_id = self._reserve_run(subject, question, time_window, deps, metadata)
+        run_id = self._reserve_run(subject, question, time_window, deps, metadata, follow_up)
         worker = Thread(
             target=self._execute_run,
-            args=(run_id, subject, question, time_window, deps, metadata),
+            args=(run_id, subject, question, time_window, deps, metadata, follow_up),
             name=f"queryshield-run-{run_id}",
             daemon=True,
         )
@@ -629,8 +653,10 @@ class RunService:
         time_window: Mapping[str, str] | None,
         deps: RuntimeDependencies,
         metadata: object | None = None,
+        follow_up: FollowUp | None = None,
     ) -> dict[str, object]:
-        with self._segment(run_id, "execute", profile=deps.profile):
+        previous_run_id = follow_up.previous_run_id if follow_up is not None else None
+        with self._segment(run_id, "execute", profile=deps.profile, previous_run_id=previous_run_id):
             opened_store = None
             tools: object | None = None
             counter: CountingExecutor | None = None
@@ -639,6 +665,10 @@ class RunService:
             metadata_written = [False]
             try:
                 self.store.append_event(run_id, "step_started", "RUNNING", payload={"step": "agent_run", "profile": deps.profile})
+                if follow_up is not None:
+                    message_bytes = len(previous_turn_content(follow_up.message_payload()).encode("utf-8"))
+                    payload = follow_up.event_payload(message_bytes=message_bytes)
+                    self.store.append_event(run_id, "follow_up", "RUNNING", payload=payload)
                 call_store = deps.call_store
                 if call_store is None:
                     from queryshield.agent.call_store import DurableModelCallStore
@@ -650,7 +680,9 @@ class RunService:
                 run_deps = replace(deps, call_store=call_store, model=model)
                 tools = product_tools(run_deps, executor=counter, metadata=metadata)
                 context = subject.context(run_id)
-                profile_run = run_profile(run_deps, context, question, time_window=time_window, tools=tools, on_step=writer)
+                profile_run = run_profile(
+                    run_deps, context, question, time_window=time_window, tools=tools, on_step=writer, follow_up=follow_up
+                )
                 # The run's MCP session ends with this execution, before the result commits.
                 metadata_record = self._close_metadata(tools, metadata_written)
                 return self._commit(
@@ -731,16 +763,17 @@ class RunService:
             if paused:
                 envelope["paused_results"] = paused
 
+        answer = payload.get("answer")
+        if status == "succeeded" and "follow_up" in envelope:
+            answer = _with_same_as_previous(
+                answer, envelope, self._committed_evidences(payload, tools, context, facts_list), tools.catalog
+            )
         update: dict[str, object] = {
             "checkpoint_json": _json(envelope),
             "result_json": result_json,
             "facts_json": facts_json,
             # A failed run has no answer, except the catalog's fixed note for an unsupported scope.
-            "answer": (
-                payload.get("answer")
-                if status == "succeeded" or error_code == CLARIFICATION_VALUE_UNSUPPORTED_CODE
-                else None
-            ),
+            "answer": answer if status == "succeeded" or error_code == CLARIFICATION_VALUE_UNSUPPORTED_CODE else None,
             "error_code": error_code if status not in {"succeeded", "waiting_user", "waiting_approval"} else None,
             **counters,
         }
@@ -965,7 +998,10 @@ class RunService:
             # Only from WAITING_USER: a run cancelled meanwhile never executes.
             if not self.store.transition_run(run_id, "WAITING_USER", "RUNNING", cancel_requested=0):
                 return self.store.get_run(run_id)  # type: ignore[return-value]
-            with self._segment(run_id, "resume", profile=run_config.profile):
+            follow_up_record = checkpoint_envelope.get("follow_up")
+            follow_up = FollowUp.from_dict(follow_up_record) if isinstance(follow_up_record, Mapping) else None
+            previous_run_id = checkpoint_envelope.get("previous_run_id")
+            with self._segment(run_id, "resume", profile=run_config.profile, previous_run_id=previous_run_id):
                 context = subject.context(run_id)
                 counter = CountingExecutor(executor)
                 counted = CountingModel(model)
@@ -989,7 +1025,9 @@ class RunService:
                         retrieval_available=retriever is not None,
                         on_step=writer,
                     )
-                    result, metadata_record = self._resume_agent(agent, tools, choice, context, answer, checkpoint_for_resume)
+                    result, metadata_record = self._resume_agent(
+                        agent, tools, choice, context, answer, checkpoint_for_resume, follow_up
+                    )
                     # The outcome commits like a first execution's, with what the answer chose.
                     envelope_updates: dict[str, object] = {}
                     if choice.selected_metric is not None:
@@ -1025,11 +1063,19 @@ class RunService:
                     )
 
     def _resume_agent(
-        self, agent: Any, tools: object, choice: ResumeChoice, context: ExecutionContext, answer: str, checkpoint: dict[str, object]
+        self,
+        agent: Any,
+        tools: object,
+        choice: ResumeChoice,
+        context: ExecutionContext,
+        answer: str,
+        checkpoint: dict[str, object],
+        follow_up: FollowUp | None,
     ):
         """The agent's result for the answer and the run's MCP session record.
 
-        A resume is a new execution: its MCP session (if any) ends here.
+        A resume is a new execution: its MCP session (if any) ends here.  Only
+        the resume that calls the model again gets a follow-up run's record back.
         """
 
         metadata_written = [False]
@@ -1042,7 +1088,7 @@ class RunService:
             elif choice.keep_waiting:
                 result = agent.continue_waiting_for_clarification(context, answer, checkpoint)
             else:
-                result = agent.resume_from_checkpoint(context, answer, checkpoint)
+                result = agent.resume_from_checkpoint(context, answer, checkpoint, follow_up=follow_up)
         except RunResumeError as exc:
             code = "not_found" if exc.code == "resume_context_mismatch" else "checkpoint_invalid"
             raise _ResumeRefused(code, "resume checkpoint could not be restored") from exc
@@ -1207,7 +1253,9 @@ class RunService:
     ) -> dict[str, object]:
         """Execute the single approved call; whatever it raises ends the run (the approval is consumed)."""
 
-        with self._segment(run_id, "approved", approval_id=approval.get("approval_id")):
+        envelope = run.get("checkpoint") if isinstance(run.get("checkpoint"), Mapping) else {}
+        previous_run_id = envelope.get("previous_run_id")
+        with self._segment(run_id, "approved", approval_id=approval.get("approval_id"), previous_run_id=previous_run_id):
             counter: CountingExecutor | None = None
             try:
                 counter = CountingExecutor(self._executor_factory())
@@ -1254,6 +1302,7 @@ class RunService:
             ),
         )
         approved_envelope = dict(current_run.get("checkpoint") or {}) if isinstance(current_run.get("checkpoint"), Mapping) else {}
+        answer = _with_same_as_previous(answer, approved_envelope, [evidence, *supporting], catalog)
         # Server text throughout; verified only with facts.
         approved_envelope.update({"answer_status": "verified" if facts else "unverified", "answer_source_ids": []})
         return self._leave_running(
@@ -1359,7 +1408,12 @@ def _resume_checkpoint(
     checkpoint = dict(agent_checkpoint)
     choice = _resolve_clarification(catalog, envelope, agent_checkpoint, answer)
     if choice.clarified_metric is not None:
-        binding = _clarified_binding(catalog, choice.clarified_metric, agent_checkpoint, answer)
+        # A follow-up run's window falls back to the first window its previous turn executed;
+        # with none (a knowledge or no-data turn) it is bound as a single question.
+        record = envelope.get("follow_up")
+        executed = record["executed"] if isinstance(record, Mapping) else []
+        base = executed[0]["time_window"] if executed else NET_FEN_TIME_WINDOW
+        binding = _clarified_binding(catalog, choice.clarified_metric, agent_checkpoint, answer, base, follow_up=bool(executed))
         checkpoint["metric_bindings"] = [binding.as_dict()]
     return choice, checkpoint
 
@@ -1395,13 +1449,21 @@ def _clarification_text(agent_checkpoint: Mapping[str, object], answer: str) -> 
     )
 
 
-def _month_window(text: str) -> dict[str, str]:
-    """The month the text names as a half-open UTC window; the server's default window without one."""
+# A month in numerals or in Chinese characters (一 to 十二).
+_MONTH = r"(?P<month>1[0-2]|0?[1-9]|十[一二]|十|[一二三四五六七八九])"
+_CHINESE_MONTHS = {name: index for index, name in enumerate("一二三四五六七八九十", start=1)} | {"十一": 11, "十二": 12}
+_YEAR_MONTH_RE = re.compile(r"(?<!\d)(?P<year>20\d{2})年" + _MONTH + "月")
+# A month alone: not after a digit, a Chinese numeral or 年 ("18月", "十八月", "2026年8月" are not one).
+_BARE_MONTH_RE = re.compile(r"(?<![\d一二三四五六七八九十年])" + _MONTH + "月")
+# "上个月" / "上一个月", not the "上个月" inside "上上个月".
+_PREVIOUS_MONTH_RE = re.compile(r"(?<!上)上一?个月")
 
-    named = re.search(r"(?P<year>20\d{2})年(?P<month>1[0-2]|0?[1-9])月", text)
-    if named is None:
-        return dict(NET_FEN_TIME_WINDOW)
-    year, month = int(named.group("year")), int(named.group("month"))
+
+def _month_number(text: str) -> int:
+    return int(text) if text.isdigit() else _CHINESE_MONTHS[text]
+
+
+def _calendar_month(year: int, month: int) -> dict[str, str]:
     next_year, next_month = (year + 1, 1) if month == 12 else (year, month + 1)
     return {
         "start": f"{year:04d}-{month:02d}-01T00:00:00Z",
@@ -1410,14 +1472,48 @@ def _month_window(text: str) -> dict[str, str]:
     }
 
 
+def _month_window(text: str, base: Mapping[str, str] = NET_FEN_TIME_WINDOW, *, follow_up: bool = False) -> dict[str, str]:
+    """The window a clarified metric is bound to, from the question and the answers; the first rule that holds.
+
+    1. a year and a month ("2026年8月", "2026年八月"): that month;
+    2. a month alone ("8月", "八月"): that month in ``base``'s year;
+    3. "上个月" / "上一个月" in a follow-up of a turn with a window: the month before ``base``;
+    4. no 月 at all: ``base``;
+    5. any other wording (this month, next month, a single question's 上个月, ...): the server's default window.
+
+    ``base`` is the previous turn's first carried window for a follow-up, else the default window;
+    ``follow_up`` is set only when there was one.
+    """
+
+    named = _YEAR_MONTH_RE.search(text)
+    if named is not None:
+        return _calendar_month(int(named.group("year")), _month_number(named.group("month")))
+    year, month = int(base["start"][:4]), int(base["start"][5:7])
+    bare = _BARE_MONTH_RE.search(text)
+    if bare is not None:
+        return _calendar_month(year, _month_number(bare.group("month")))
+    if follow_up and _PREVIOUS_MONTH_RE.search(text):
+        return _calendar_month(year - 1, 12) if month == 1 else _calendar_month(year, month - 1)
+    if "月" not in text:
+        return dict(base)
+    return dict(NET_FEN_TIME_WINDOW)
+
+
 def _clarified_binding(
-    catalog: SemanticCatalog, metric_id: object, agent_checkpoint: Mapping[str, object], answer: str
+    catalog: SemanticCatalog,
+    metric_id: object,
+    agent_checkpoint: Mapping[str, object],
+    answer: str,
+    base: Mapping[str, str] = NET_FEN_TIME_WINDOW,
+    *,
+    follow_up: bool = False,
 ) -> MetricBinding:
     """The server-built binding for the clarified metric; only the three declarable metrics are accepted."""
 
     if type(metric_id) is not str or metric_id not in {"gross_fen", "net_fen", "paid_count"}:
         raise ApprovalConflict("checkpoint_invalid", "server metric slot is invalid")
-    return build_metric_binding(catalog, metric_id, _month_window(_clarification_text(agent_checkpoint, answer)))
+    window = _month_window(_clarification_text(agent_checkpoint, answer), base, follow_up=follow_up)
+    return build_metric_binding(catalog, metric_id, window)
 
 
 def _checked_event_count(agent_checkpoint: Mapping[str, object], run: Mapping[str, object]) -> int:
@@ -1623,6 +1719,18 @@ def _commit_envelope(
         }
     )
     return envelope
+
+
+def _with_same_as_previous(
+    answer: object, envelope: Mapping[str, object], evidences: Sequence[ResultEvidence], catalog: SemanticCatalog
+) -> object:
+    """A follow-up run's answer gets the server's line naming the conditions equal to the previous run's."""
+
+    record = envelope.get("follow_up")
+    if not isinstance(record, Mapping) or type(answer) is not str:
+        return answer
+    line = same_as_previous_line(FollowUp.from_dict(record), evidences, catalog)
+    return answer if line is None else f"{answer}\n{line}"
 
 
 def _require_bound_action(approval: Mapping[str, object], run: Mapping[str, object]) -> None:

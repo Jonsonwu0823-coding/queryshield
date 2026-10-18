@@ -685,6 +685,12 @@ def _data_content(kind: str, payload: object) -> str:
     )
 
 
+def previous_turn_content(payload: Mapping[str, object]) -> str:
+    """The follow-up data message: the previous run's record, data only."""
+
+    return _data_content("previous_turn", dict(payload))
+
+
 def _fits(messages: Sequence[ContextMessage]) -> bool:
     return len(messages) <= MAX_MESSAGES and _serialized_size(messages) <= MAX_CONTEXT_BYTES
 
@@ -800,6 +806,7 @@ def build_context(
     delegate_available: bool = False,
     skills: SkillLibrary | None = None,
     loaded_skills: Sequence[Skill] = (),
+    previous_turn: Mapping[str, object] | None = None,
 ) -> ContextBuildResult:
     """Build a bounded context without allowing optional data to erase identity.
 
@@ -807,6 +814,9 @@ def build_context(
     When the serialized UTF-8 representation is too large, the oldest optional
     message is removed as a whole.  No JSON/tool receipt is sliced.
     ``loaded_skills`` (skills profile) are server-checked Skills, in load order.
+    ``previous_turn`` (a follow-up question only) is the server's record of the
+    run this one continues (``FollowUp.message_payload``): one hard data message
+    just before the question.
     """
 
     if not isinstance(context, ExecutionContext):
@@ -854,9 +864,19 @@ def build_context(
         ContextMessage(message_id=f"skill-{skill.name}", role="system", content=skill.message, hard=True, source="skill")
         for skill in loaded_skills
     ]
+    previous_turn_messages = [
+        ContextMessage(
+            message_id="previous-turn",
+            role="user",
+            content=previous_turn_content(previous_turn),
+            hard=True,
+            source="previous_turn",
+        )
+    ] if previous_turn is not None else []
     hard_messages = [
         server_message,
         *skill_messages,
+        *previous_turn_messages,
         *_question_messages(question, normalized_clarifications),
         *_retrieval_messages(retrieval_items),
     ]
@@ -896,4 +916,5 @@ __all__ = [
     "ContextMessage",
     "build_context",
     "native_tools",
+    "previous_turn_content",
 ]

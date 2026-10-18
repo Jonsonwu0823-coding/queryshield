@@ -28,6 +28,8 @@ flowchart TB
     end
     FACTS["facts/<br/>已核实事实与渲染"]
     MODEL["providers/<br/>Fake / OpenAI 兼容"]
+    QF["QuotaForge 模型网关（可选，另一个项目）<br/>配额、限流、账本、熔断、嵌入缓存"]
+    UP["上游模型服务<br/>例如阿里云百炼"]
     MCPS["mcp_metadata/<br/>可选的 MCP stdio 服务进程"]
     PG[("PostgreSQL<br/>只读角色 + 行级安全")]
 
@@ -44,7 +46,12 @@ flowchart TB
     SEM --> CAT
     SEM --> KN
     SEM -. "QUERYSHIELD_METADATA_TOOLS=mcp" .-> MCPS
+    MODEL -. "经网关：OpenAI 兼容 HTTP，带 X-Run-Id、traceparent" .-> QF
+    QF --> UP
+    MODEL -. "直连" .-> UP
 ```
+
+模型出口可以直连上游，也可以经模型网关 [QuotaForge](https://github.com/Jonsonwu0823-coding/quotaforge)：它是另一个项目，负责模型调用的配额、限流、账本、熔断和故障转移，以及嵌入的缓存。经网关时，两边按 `X-Run-Id` 逐个 run 对账；每次请求带的 W3C `traceparent` 让一个 run 在两边连成同一条追踪。接法见[运维说明](operations.md)的“经模型网关调用模型”。
 
 ## 组件
 
@@ -72,6 +79,8 @@ HTTP 接口都在 `src/queryshield/api/main.py`：
 `trace_id` 也是所有返回 run 的响应都有：这个 run 的追踪编号（32 位小写十六进制），等于这个 run 的每个聊天、嵌入请求的 `traceparent` 里的 trace-id，由 run 编号算出（见下面的模型调用一节）。
 
 身份：`src/queryshield/auth/identity.py` 的 `resolve_identity` 把 `Authorization: Bearer <令牌>` 映射到四个固定身份之一（租户 A、B 各一个请求人、一个审批人），令牌来自环境变量；有两个令牌相同时整张映射作废。服务端用认证结果构造 `ExecutionContext`，之后所有工具调用都用它。用哪种配置（B1 有界 Agent 或 B0 基线）由服务端设置 `QUERYSHIELD_AGENT_PROFILE` 决定，客户端选不了。
+
+点名别的租户：调模型之前，`src/queryshield/agent/tenant_scope.py` 的 `has_explicit_foreign_tenant` 看问题里有没有点名别的租户，有就直接 403（`POST /queries` 的同步、异步都在建 run 之前查；B0 和有界 Agent 自己开头也查一次；0 次模型调用）。认的是一个租户名词（租户、商户、商家、店铺、门店、公司、tenant、merchant）挨着一个编号，名词在前在后都认（“租户B”“B 商户”“tenant-B”“B tenant”）；编号是一个字母、后面可以跟数字（“B”“B2”；本产品的租户编号都是单个字母），前后都不能紧挨着字母、数字或下划线。所以“本租户2026年8月……”（只有数字）、“show tenant A”“商户ID”“B2B 公司”都不会被当成点名别的租户；长编号（“tenant-acme”）也不再认。编号和认证的租户比，不分大小写、去掉 `tenant-`，相同就放行。不按业务描述（“批发商”）猜租户：这种问法靠库里的租户隔离，查不到别的租户的数，但会拿本租户的数作答（[README](../README.zh-CN.md) 的已知限制）。
 
 ### 运行服务与状态库
 
@@ -118,10 +127,20 @@ HTTP 接口都在 `src/queryshield/api/main.py`：
 `src/queryshield/catalog/phrases.py` 的 `PhraseIndex` 是说法表：每个指标的明确说法、每条追问规则的含糊说法，按最长匹配、不重叠扫描。说法表**只用来核对**，不替模型选指标：
 
 - 问题里只有含糊说法，模型却直接声明了口径：不执行 SQL，改为用 catalog 里的固定问题追问；
-- 问题里已有明确说法，模型却追问：退回一次，让它直接查；
+- 问题里已有明确说法，模型却追问：退回一次，让它直接查。问题里点到同一条规则的两个以上取值（例如同时写了支付金额和退款后净额）、用户还没选时，这条规则算没定：模型的追问只要指向它，就停在 catalog 的固定问题上等用户，不退回；模型不追问、直接声明指标的，照旧按下一条核对。规则在 `RuleReading.status` 一处。代价：模型去问别的（例如时间）、追问里又用了“金额”“总额”这类标记词时，会被换成问口径的固定问题（[README](../README.zh-CN.md) 的已知限制）；
 - 模型声明的指标与问题里的明确说法矛盾：在执行 SQL 之前拒绝。
 
 核对的入口是 `src/queryshield/agent/tool_execution.py` 的 `check_clarification`。
+
+用户回答追问之后，服务端给确认的指标建绑定（`src/queryshield/approval/service.py` 的 `_clarified_binding`），时间窗由 `_month_window` 从问题、之前的追问回答和这次回答里读，取第一条成立的：
+
+1. 写了年月（“2026年8月”“2026年八月”，月份认阿拉伯数字和一到十二的汉字）：那个月；
+2. 只写月份（“8月”“那10月的”“十二月”，前面不是数字、汉字数字或“年”）：兜底窗口的年份加这个月；
+3. 接着问、并且上一轮带了时间窗时的“上个月”“上一个月”（不含“上上个月”）：兜底窗口的前一个月；
+4. 没有“月”字：兜底窗口；
+5. 其它说法（单独提问的“上个月”，上一轮没带时间窗时接着问的“上个月”，“这个月”“下个月”“上上个月”“前两个月”等）：默认窗口 `NET_FEN_TIME_WINDOW`（2026 年 9 月）。
+
+兜底窗口：单独提问时是默认窗口；接着问时是 run 信封里沿用条件的第一个时间窗（上一轮有几个时间窗时取第一个）；上一轮没有执行过带时间窗的查询（知识类、no_data）时，照单独提问处理。“18月”“十八月”“2028年”这类不会被认成月份。确认的绑定照旧约束本轮之后的每次查询，模型声明别的窗口报 `time_window_mismatch`。
 
 ### 已核实事实
 
@@ -206,6 +225,8 @@ B2 不进这套评测：它和 B1 的对比用演示库上的复合题（见[演
 
 题目在 `evals/development/`：冻结的 20 道题（其中 8 道关键题，`state_cases.py` 要求关键题集合恰好是这 8 道）和 3 道补充题。安全违规按安全题的禁止副作用计数（`state_oracle.py`）。评测直接构造 `RunService`，走的是与 HTTP 相同的 Agent 装配和受控工具。
 
+多轮开发评测用 `scripts/conversation_eval.py`：经 HTTP 一轮轮地问，每轮带 `previous_run_id`，判分复用演示脚本的判分函数（结果见 [README](../README.zh-CN.md) 的“多轮开发评测”）。当前版本的盲测用 `scripts/seal_blind_v3.py` 封存、`scripts/run_blind_v3.py` 运行和复算，格式和加解密在 `src/queryshield/evaluation/blind_v3.py`；方法和结果见[能力证据清单](evidence.md)的“盲测 v3”。
+
 ## 一次请求的完整流程
 
 以一道需要审批的问题为例（请求人问客户姓名，审批人批准）：
@@ -249,6 +270,18 @@ sequenceDiagram
 ```
 
 数据题不需要审批时，循环里的 `query_readonly` 直接执行；`finish` 节点核对回答依据，符合已核实规则的结果由服务端渲染成回答，返回 200。
+
+### 接着上一轮问
+
+请求带 `previous_run_id` 时，建 run 之前多三步，之后和一次单独的提问走同一条路径：
+
+1. **检查**（`src/queryshield/approval/service.py` 的 `RunService.follow_up`）：配置不是 B1、B1S 的返回 501 `not_supported`（不论那个 run 存不存在）；不是本租户、本人的 run 返回 404；不是 `SUCCEEDED` 的返回 409 `previous_run_not_succeeded`。都在建 run 之前，失败时不建 run。
+2. **取条件**（`src/queryshield/agent/follow_up.py` 的 `follow_up_from_run`）：只读上一轮这一条记录，不往回走链。问题原文是上一轮记录里沿用的问题（最后 2 条）加上一轮自己的问题；指标、时间窗来自上一轮存下的结果证据（主结果和 `supporting_results`，用 `evidence_from_record` 重建并核对，核不过就照常报错、不建 run）；有 GROUP BY 且结果行里有 `customer_id` 列（键名不分大小写）才算按客户分组，按订单、按日期分组的不算；客户编号取自结果行里的 `customer_id` 列，只在没读过姓名的 run 里取：请求人没审批的结果里不可能有姓名（读姓名要审批）。读过姓名的 run（审批后执行的，和审批人自己提问的，后者看姓名不用审批）被接着问时，不读结果行里的值：姓名可以出现在任何输出列名下，`customer_id` 也一样（别名渲染时一律加引号，PostgreSQL 原样返回；两列同名时后一列覆盖前一列）。所以不带编号，客户个数记 `null`；是否列过姓名，审批后执行的记 true，审批人的记 `null`（不知道）。
+3. **记录**：新 run 的信封（`checkpoint_json`）里写 `previous_run_id` 和这份沿用条件；事件表多一条 `follow_up`（上一个 run 的编号、执行过的条件、各个计数和数据消息的字节数，不含客户编号、姓名和问题原文）；这次执行的根 span 带 `queryshield.previous_run_id`。单独的提问三样都没有。
+
+上下文仍是 context-v16：系统消息不变，只多一条只在接着问时才有的 `previous_turn` 数据消息（`src/queryshield/agent/context.py` 的 `previous_turn_content`），放在问题前面，是硬消息。它带一句服务端的说明（只供参考，本轮问题优先，数字在本轮重新查，问题原文是用户数据），不是确认的绑定：不进 `metric_bindings`，所以换指标不会报 `metric_declaration_mismatch`；本轮里追问确认的口径照旧约束本轮之后的查询，但不跨轮。大小只取决于上一轮的记录，有上限，不随轮数增长；硬消息加起来超过 `MAX_CONTEXT_BYTES` 时，接着问的 run 以 422 `follow_up_context_exceeded` 结束（0 次模型调用），单独的提问照旧是 `context_budget_exceeded`。等追问的 run 恢复时，服务端从信封里取出沿用条件交还给图（`BoundedAgent.resume_from_checkpoint`），检查点格式不变。
+
+回答由服务端照常核对和渲染；成功的回答末尾再加一行服务端文字，列出本轮执行的条件里和上一轮相同的（指标用 catalog 的名字，时间窗照已核实回答的写法），没有相同的就不加（`same_as_previous_line`）。审批绑定本 run 的确切查询，没有可继承的东西。
 
 ### run 状态与 HTTP 码
 

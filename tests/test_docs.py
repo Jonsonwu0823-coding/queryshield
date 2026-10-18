@@ -15,11 +15,13 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 README = PROJECT_ROOT / "README.md"
+README_ZH = PROJECT_ROOT / "README.zh-CN.md"  # the Chinese README the English one links to
 DOCS = PROJECT_ROOT / "docs"
 EVIDENCE = DOCS / "evidence.md"
 OPERATIONS = DOCS / "operations.md"
 PUBLIC_DOCS = (
     README,
+    README_ZH,
     DOCS / "architecture.md",
     EVIDENCE,
     DOCS / "retrospective.md",
@@ -204,8 +206,9 @@ def test_the_mapping_covers_the_operations_limits_at_least() -> None:
     assert {"K6", "H7", "H2", "G6", "N6", "D-2", "M11"} <= mapped_tags()
 
 
-def test_readme_quick_start_is_the_operations_quick_start() -> None:
-    readme = _text(README)
+@pytest.mark.parametrize("readme_path", [README, README_ZH], ids=["README.md", "README.zh-CN.md"])
+def test_readme_quick_start_is_the_operations_quick_start(readme_path: Path) -> None:
+    readme = _text(readme_path)
     for command in ("python scripts/new_env.py", "docker compose up -d --build", "demo_walkthrough.py"):
         assert command in readme
     block = re.search(r"```bash\n(.*?)```", _section(_text(OPERATIONS), "## 1. 用 Compose 跑起来"), re.DOTALL)

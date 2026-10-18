@@ -27,7 +27,7 @@ def _system(*, contract=("search_catalog", "query_readonly"), window=None, basel
     text = "You are the W05 single-pass baseline.\n" if baseline else "rules\n"
     context = {"action_contract": {"tool_names": list(contract)}}
     if window is not None:
-        context["metric_declaration"] = {"request_time_window": window}
+        context["metric_declaration"] = {"time_window": {"request_time_window": window}}  # where the server puts it
     body = raw_context if raw_context is not None else json.dumps(context, ensure_ascii=False)
     return {"role": "system", "content": text + "QUERYSHIELD_SERVER_CONTEXT\n" + body}
 

@@ -19,6 +19,7 @@ from typing import Any
 from queryshield.agent.config import MULTI_AGENT_VERSIONS, NATIVE_VERSIONS, SKILLS_VERSIONS, RunConfig
 from queryshield.agent.context import build_context
 from queryshield.agent.delegation import COORDINATOR
+from queryshield.agent.follow_up import FOLLOW_UP_CONTEXT_EXCEEDED, FollowUp
 from queryshield.agent.graph import CLARIFICATION_NOT_NEEDED_CODE, AgentRunResult, BoundedAgent, GraphLimits
 from queryshield.agent.proposals import (
     AskUserAction,
@@ -68,6 +69,8 @@ B1S_PROFILE = "B1S-agent-skills"
 PRODUCT_PROFILES = PROFILES + (B2_PROFILE, B1S_PROFILE)
 # The bounded-graph profiles: they retrieve and can wait for the user (B0 does neither).
 BOUNDED_PROFILES = (B1_PROFILE, B2_PROFILE, B1S_PROFILE)
+# The profiles that take a follow-up question (previous_run_id); B0 makes one call, B2 delegates.
+FOLLOW_UP_PROFILES = (B1_PROFILE, B1S_PROFILE)
 DEFAULT_PRODUCT_PROFILE = B1_PROFILE
 B0_MODEL_CALL_LIMIT = 1
 B1_MODEL_CALL_LIMIT = 6
@@ -140,6 +143,8 @@ FAILED_ERROR_HTTP: Mapping[str, int] = {
     "upstream_timeout": 504,
     "query_timeout": 504,
     "result_row_limit": 422,
+    # A follow-up whose previous turn does not fit the context: ask it as a new question.
+    FOLLOW_UP_CONTEXT_EXCEEDED: 422,
     # The model's answer had nothing to ground it; like other unusable model
     # output (e.g. query_repair_limit) this is an upstream failure, not a bad request.
     "answer_not_grounded": 502,
@@ -957,10 +962,12 @@ def run_profile(
     time_window: Mapping[str, object] | None = None,
     tools: ControlledTools | None = None,
     on_step: Callable[[Mapping[str, object]], None] | None = None,
+    follow_up: FollowUp | None = None,
 ) -> ProfileRun:
     """Run the server-configured profile once; the product's only run entry.
 
     ``on_step`` sees the agent state after every graph step (B1 and B2; B0 has no steps).
+    ``follow_up`` only with a profile in FOLLOW_UP_PROFILES (the service checks).
     """
 
     if deps.profile not in PRODUCT_PROFILES:
@@ -978,7 +985,7 @@ def run_profile(
         retrieval_available=deps.retriever is not None,
         on_step=on_step,
     )
-    result = agent.run(context, question, request_time_window=time_window)
+    result = agent.run(context, question, request_time_window=time_window, follow_up=follow_up)
     return ProfileRun(b1_result_payload(result, context, question), agent, tools, run_config)
 
 
@@ -1009,6 +1016,7 @@ __all__ = [
     "BOUNDED_PROFILES",
     "DEFAULT_PRODUCT_PROFILE",
     "FAILED_ERROR_HTTP",
+    "FOLLOW_UP_PROFILES",
     "PRODUCT_PROFILES",
     "PROFILES",
     "RUN_OUTCOMES",

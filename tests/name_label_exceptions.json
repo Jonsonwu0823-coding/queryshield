@@ -1003,6 +1003,13 @@
       "reason": "seeded: name of a past record or of local evidence outside the repository (ticket decision 2)"
     },
     {
+      "file": "tests/test_post_blind_cleanup.py",
+      "literal": "W04_租户",
+      "count": 1,
+      "class": "C",
+      "reason": "the past record name above as input to the tenant check: a letter glued to digits and an underscore is not a tenant label"
+    },
+    {
       "file": "scripts/check_state.py",
       "literal": "__w04_acl_{suffix}",
       "count": 3,
