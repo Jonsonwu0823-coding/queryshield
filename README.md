@@ -130,7 +130,7 @@ The extra failures of B1 and B0 in the first run are the same question timing ou
 The current version had one blind test on 2026-10-18 (blind test v3); the method and the full results are in [docs/evidence.md](docs/evidence.md#盲测-v3当前版本2026-10-18).
 
 - **Questions.** 12 (8 functional, 4 security) over the demo database. They were drafted from the question guide by a large language model that took no part in development, and reviewed by the project's author; the side that writes the code never saw them before sealing or before the run. The questions and expected answers were encrypted and sealed, and before the run only a commitment was handed over (digests, counts and a check value for the key).
-- **Run.** Before starting, the run checks the source manifest, the commitment, the demo data and the key; B0 and B1 alternate for 3 passes each; any service-level outage voids the whole attempt, which then starts over, and only the first complete attempt counts (this time the first attempt completed). Afterwards a separate command recalculated the scores independently (no model calls, no database), and they matched. Real model `qwen-plus`, through the QuotaForge model gateway.
+- **Run.** Before starting, the run checks the source manifest, the commitment, the demo data and the key; B0 and B1 alternate for 3 passes each; any service-level outage voids the whole attempt, which then starts over, and only the first complete attempt counts (this time the first attempt completed). Afterwards a separate command recalculated the scores independently (no model calls, no database), and they matched. Real model `qwen-plus`, through the QuotaForge model gateway (its code identical to QuotaForge's public commit `bbb5c01`).
 
 | Configuration | Functional | Security |
 |---|---|---|
@@ -176,7 +176,7 @@ These are a few runs on development material; see [docs/evidence.md](docs/eviden
 
 ### Automated checks and CI
 
-`scripts/check-all.ps1` is the one entry point for local machines and CI: the full test suite, the historical checks (DB-SMOKE plus the Fake mode of the five suites BASE, PROPOSAL, AGENT, STATE and EVAL) and the Fake smoke tests (HTTP, MCP, the demo questions, and B2 and B1S on the composite questions). CI has two jobs: `checks` runs the above, and `compose` starts Compose from an empty environment, runs the demo script twice (default settings, MCP settings) and checks stopping and restarting. In CI on 2026-10-03 (GitHub Actions, Linux): 1652 tests passed, 1 skipped.
+`scripts/check-all.ps1` is the one entry point for local machines and CI: the full test suite, the historical checks (DB-SMOKE plus the Fake mode of the five suites BASE, PROPOSAL, AGENT, STATE and EVAL) and the Fake smoke tests (HTTP, MCP, the demo questions, and B2 and B1S on the composite questions). CI has two jobs: `checks` runs the above, and `compose` starts Compose from an empty environment, runs the demo script twice (default settings, MCP settings) and checks stopping and restarting. In CI on 2026-10-03 (GitHub Actions, Linux): 1652 tests passed, 1 skipped. The suite has since grown to 4,655 tests; on 2026-10-20, on Linux with the test database but without the demo database or PowerShell: 4,522 passed, 133 skipped, 0 failed.
 
 The code, tests and verification commands of each capability are in [docs/evidence.md](docs/evidence.md).
 

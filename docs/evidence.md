@@ -108,7 +108,7 @@
 - **复算。** 另一个进程只读加密的记录，重新判分，和摘要逐项比，不调模型、不连库。
 - **和 2026-09 的盲测不能逐项比较。** 那次是单步用例（预置状态、开发数据），按结束状态、HTTP 码、事实、副作用、预算和用量判；这次的题目、数据和判分方法都不同，两次的分数只能并列给出。分数名沿用 `functional_success`（功能题）和 `security_correct`（安全题）。
 
-**结果（2026-10-18）。** 真实模型 `qwen-plus`、`text-embedding-v4`，经模型网关 QuotaForge。第 1 次尝试就完整跑完，没有作废的尝试；开跑时本机源码清单等于事先给的候选值。72 个 run（6 遍 × 12 题），模型调用 126 次，418,058 tokens（全部是已知用量），上游错误 0；每遍都核过数据表没有被改。
+**结果（2026-10-18）。** 真实模型 `qwen-plus`、`text-embedding-v4`，经模型网关 QuotaForge（网关的代码与 QuotaForge 的公开提交 `bbb5c01` 相同）。第 1 次尝试就完整跑完，没有作废的尝试；开跑时本机源码清单等于事先给的候选值。72 个 run（6 遍 × 12 题），模型调用 126 次，418,058 tokens（全部是已知用量），上游错误 0；每遍都核过数据表没有被改。
 
 | 配置 | 功能 `functional_success` | 安全 `security_correct` |
 |---|---|---|
@@ -317,7 +317,7 @@ Real 那次记录的已知缺口：Q04b 退款总额 502 `query_repair_limit`；
 
 ### 多轮开发评测（真实模型，2026-10-18）
 
-同一套 45 段、98 轮对话，`scripts/conversation_eval.py --mode real`（B1，json 协议），真实模型 `qwen-plus`、`text-embedding-v4`，经模型网关 QuotaForge。代码和盲测 v3 是同一个版本。这是开发材料上的一次运行，不是盲测。
+同一套 45 段、98 轮对话，`scripts/conversation_eval.py --mode real`（B1，json 协议），真实模型 `qwen-plus`、`text-embedding-v4`，经模型网关 QuotaForge（网关的代码与 QuotaForge 的公开提交 `bbb5c01` 相同）。代码和盲测 v3 是同一个版本。这是开发材料上的一次运行，不是盲测。
 
 | 项 | 结果 |
 |---|---|
@@ -344,6 +344,7 @@ Real 那次记录的已知缺口：Q04b 退款总额 502 `query_repair_limit`；
 
 - 2026-10-03 的 CI（GitHub Actions，Linux）上：全量测试 1652 过、1 跳过（那 1 个是只在一次性库上运行的真实建库测试）；DB-SMOKE 和五个套件（BASE、PROPOSAL、AGENT、STATE、EVAL）的 Fake 检查、三个 Fake 冒烟都通过；`compose` 任务通过。
 - 本机（Windows）同一入口 `scripts/check-all.ps1` 也通过。
+- 之后测试增加到 4,655 个。2026-10-20 在 Linux 上（Python 3.14.3，PostgreSQL 16 测试库，没有演示库和 PowerShell）：4,522 过、133 跳过、0 失败；跳过的测试需要演示库、PowerShell 或一次性库，有的只在开发仓库里运行。同一天在 macOS（Apple 芯片，不连库）上：4,543 过、112 跳过、0 失败。
 - CI 不使用仓库密钥：数据库密码和令牌在运行时随机生成并遮蔽。
 
 ### 还没做的验证

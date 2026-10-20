@@ -1,8 +1,9 @@
 """Whether a process the MCP server reported (its own pid) still exists.
 
-No signals: ``os.kill(pid, 0)`` ends the process on Windows.  Linux reads
-``/proc``; Windows opens the process with query rights and waits zero
-milliseconds.  Other platforms answer ``None`` (unverified).
+No signals: ``os.kill(pid, 0)`` ends the process on Windows and reports a zombie as
+alive elsewhere.  Linux reads ``/proc``; macOS asks libproc for the process's BSD
+info; Windows opens the process with query rights and waits zero milliseconds.
+Other platforms answer ``None`` (unverified).
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ def process_exists(pid: int) -> bool | None:
         return None
     if sys.platform.startswith("linux"):
         return _linux_exists(pid)
+    if sys.platform == "darwin":
+        return _darwin_exists(pid)
     if sys.platform == "win32":
         return _windows_exists(pid)
     return None
@@ -47,6 +50,22 @@ def _linux_exists(pid: int) -> bool:
     # The state follows the parenthesised command name; a zombie has exited.
     state = stat.rpartition(")")[2].split()
     return not (state and state[0] in {"Z", "X"})
+
+
+def _darwin_exists(pid: int) -> bool:  # pragma: no cover - exercised on macOS hosts
+    import ctypes
+    import errno
+
+    proc_pidtbsdinfo = 3
+    zombie = 5  # SZOMB
+    libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    libproc.proc_pidinfo.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int)
+    libproc.proc_pidinfo.restype = ctypes.c_int
+    info = (ctypes.c_uint32 * 34)()  # struct proc_bsdinfo (136 bytes); pbi_status is its second field
+    if libproc.proc_pidinfo(pid, proc_pidtbsdinfo, 0, info, ctypes.sizeof(info)) <= 0:
+        # ESRCH: no such process (a zombie is not found either); EPERM: it exists, owned by someone else.
+        return ctypes.get_errno() == errno.EPERM
+    return info[1] != zombie
 
 
 def _windows_exists(pid: int) -> bool:  # pragma: no cover - exercised on the controller's Windows host
